@@ -1,4 +1,4 @@
-name: 超绝可爱弹幕姬 Windows 开发构建
+name: Windows 构建与验证
 
 on:
   push:
@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install locked Rust toolchain
-        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt clippy
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
