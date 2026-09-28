@@ -66,25 +66,27 @@ fn parse_release(bytes: &[u8], current: &str) -> Result<UpdateInfo, String> {
     // Build metadata cannot trigger an upgrade, and older releases never downgrade.
     let newer = version.cmp_precedence(&current).is_gt();
     let release_url = format!("{REPOSITORY}/releases/tag/{}", release.tag_name);
-    let expected = format!(
-        "{REPOSITORY}/releases/download/{}/DanmakuVoice.exe",
-        release.tag_name
-    );
-    let download = release.assets.iter().find(|asset| {
-        asset.name == "DanmakuVoice.exe"
-            && asset.browser_download_url == expected
-            && asset.state == "uploaded"
-            && asset.size > 0
-    });
+    // Prefer the compressed distribution; keep support for older EXE-only releases.
+    let download = ["DanmakuVoice-windows-x64.zip", "DanmakuVoice.exe"]
+        .iter()
+        .find_map(|name| {
+            let expected = format!("{REPOSITORY}/releases/download/{}/{name}", release.tag_name);
+            release
+                .assets
+                .iter()
+                .any(|asset| {
+                    asset.name == *name
+                        && asset.browser_download_url == expected
+                        && asset.state == "uploaded"
+                        && asset.size > 0
+                })
+                .then_some(expected)
+        });
     Ok(UpdateInfo {
         status: if newer { "available" } else { "up_to_date" },
         latest_version: Some(version.to_string()),
         release_url,
-        download_url: if newer {
-            download.map(|_| expected)
-        } else {
-            None
-        },
+        download_url: if newer { download } else { None },
         ..UpdateInfo::no_release()
     })
 }
@@ -236,6 +238,45 @@ mod tests {
                 .download_url
                 .is_none()
         );
+    }
+
+    #[test]
+    fn prefers_zip_and_falls_back_only_to_valid_exe() {
+        let mut data = release("v1.0.0");
+        let zip_url = format!("{REPOSITORY}/releases/download/v1.0.0/DanmakuVoice-windows-x64.zip");
+        let zip = json!({"name":"DanmakuVoice-windows-x64.zip", "state":"uploaded",
+            "size":42, "browser_download_url":zip_url});
+        data["assets"].as_array_mut().unwrap().push(zip.clone());
+        let parse = |data: &serde_json::Value| {
+            parse_release(&serde_json::to_vec(data).unwrap(), "0.2.0").unwrap()
+        };
+        assert_eq!(parse(&data).download_url.as_deref(), Some(zip_url.as_str()));
+        // GitHub may return assets in either order, including EXE first.
+        data["assets"].as_array_mut().unwrap().reverse();
+        assert_eq!(parse(&data).download_url.as_deref(), Some(zip_url.as_str()));
+        for (field, bad_value) in [
+            (
+                "browser_download_url",
+                json!("https://example.com/evil.zip"),
+            ),
+            ("state", json!("starter")),
+            ("size", json!(0)),
+            ("name", json!("DanmakuVoice-source.zip")),
+        ] {
+            data["assets"][0] = zip.clone();
+            data["assets"][0][field] = bad_value;
+            assert!(
+                parse(&data)
+                    .download_url
+                    .unwrap()
+                    .ends_with("/DanmakuVoice.exe")
+            );
+            let zip_only = json!({"tag_name":"v1.0.0", "draft":false, "prerelease":false,
+                "assets":[data["assets"][0].clone()]});
+            assert!(parse(&zip_only).download_url.is_none());
+        }
+        data["assets"] = json!([zip]);
+        assert_eq!(parse(&data).download_url.as_deref(), Some(zip_url.as_str()));
     }
 
     #[tokio::test]

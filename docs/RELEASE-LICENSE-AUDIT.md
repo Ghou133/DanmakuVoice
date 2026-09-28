@@ -2,12 +2,17 @@
 
 每个正式版本同时提供：
 
-- `DanmakuVoice.exe`：Windows x64 单文件程序。
+- `DanmakuVoice-windows-x64.zip`：压缩后的 Windows x64 程序，包内仅有 `DanmakuVoice.exe`。
+- `DanmakuVoice.exe`：同一程序的独立附件，兼容 0.2.0 的更新下载入口。
 - `DanmakuVoice-source.zip`：同一提交的应用、完整锁定 Rust 依赖、FFmpeg 对应源码与构建材料。
 - `DanmakuVoice-licenses.zip`：项目许可与第三方原始许可、NOTICE 及归属文本。
 - `SHA256SUMS.txt`：上述发布文件的校验值。
 
 ## 同版本配对
+
+GitHub Actions 对普通提交及 PR 执行构建验证；推送版本标签（如 `v0.2.1`）时，要求标签、Cargo 和 Tauri 版本一致。测试、源码配对、离线重建全部通过后，`scripts/package-release.py` 以 ZIP Deflate 最高压缩级别生成发行包，并逐字节核对解压内容。再次解压 ZIP 执行单 EXE 启动检查后才上传。
+
+自动发布先创建草稿，核对 GitHub 返回的全部附件大小及 SHA-256，成功后转为正式最新版。构建失败不会发布，已有 Release 不会在重跑时被覆盖。`DanmakuVoice-licenses.zip` 与对应源码必须和程序同时保留在 Release 中。
 
 正式打包要求干净检出。`scripts/package-portable.ps1` 记录构建提交、Cargo.lock、FFmpeg 哈希，并校验 PE 依赖。
 `scripts/package-source.ps1` 从同一提交归档，核验锁文件中的每份 `.crate` 及补充许可材料。

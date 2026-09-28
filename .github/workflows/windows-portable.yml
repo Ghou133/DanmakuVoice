@@ -1,9 +1,18 @@
-name: Windows 构建与验证
+name: Windows 构建、压缩与发布
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   minimal-ffmpeg:
@@ -43,6 +52,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])"
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'Invalid stable version' }
+          $tauri = Get-Content -Raw crates/desktop/tauri.conf.json | ConvertFrom-Json
+          if ($tauri.version -ne $version) { throw 'Tauri and Cargo versions differ' }
+          if ($env:REF_TYPE -eq 'tag' -and $env:RELEASE_TAG -cne "v$version") { throw 'Tag and application versions differ' }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Test release packaging
+        run: python -m unittest discover -s scripts -p 'test_*.py'
       - uses: actions/download-artifact@v4
         with:
           name: verified-minimal-ffmpeg-windows-x64
@@ -83,13 +105,13 @@ jobs:
             -FfmpegSourceArchive (Join-Path $inputDir 'ffmpeg-9.0.2.tar.xz') `
             -FfmpegCopying (Join-Path $inputDir 'COPYING.LGPLv2.1') `
             -FfmpegLicenseDescription (Join-Path $inputDir 'LICENSE.md') `
-            -OutputZip 'dist/DanmakuVoice-source-ci.zip' `
+            -OutputZip 'dist/DanmakuVoice-source.zip' `
             -RequireCleanCheckout
-          ./scripts/verify-bundle-pair.ps1 -PortableZip 'dist/DanmakuVoice-audit-ci.zip' -ApplicationExe 'dist/DanmakuVoice.exe' -SourceZip 'dist/DanmakuVoice-source-ci.zip' -ExpectedCommit $env:GITHUB_SHA
-          python scripts/verify-rust-license-copies.py --portable 'dist/DanmakuVoice-audit-ci.zip' --source 'dist/DanmakuVoice-source-ci.zip'
+          ./scripts/verify-bundle-pair.ps1 -PortableZip 'dist/DanmakuVoice-audit-ci.zip' -ApplicationExe 'dist/DanmakuVoice.exe' -SourceZip 'dist/DanmakuVoice-source.zip' -ExpectedCommit $env:GITHUB_SHA
+          python scripts/verify-rust-license-copies.py --portable 'dist/DanmakuVoice-audit-ci.zip' --source 'dist/DanmakuVoice-source.zip'
           if ($LASTEXITCODE -ne 0) { throw 'Rust license copies differ from their locked source archives' }
           $sourceExtract = Join-Path $env:RUNNER_TEMP 'danmakuvoice-source-check'
-          Expand-Archive -LiteralPath 'dist/DanmakuVoice-source-ci.zip' -DestinationPath $sourceExtract
+          Expand-Archive -LiteralPath 'dist/DanmakuVoice-source.zip' -DestinationPath $sourceExtract
           $sourceRoot = Join-Path $sourceExtract ('DanmakuVoice-source-' + $env:GITHUB_SHA.Substring(0, 12))
           $previousCargoHome = $env:CARGO_HOME
           try {
@@ -100,11 +122,64 @@ jobs:
           } finally {
             $env:CARGO_HOME = $previousCargoHome
           }
+      - name: Compress and verify release ZIP
+        run: |
+          python scripts/package-release.py --audit dist/DanmakuVoice-audit-ci.zip --exe dist/DanmakuVoice.exe --source dist/DanmakuVoice-source.zip --output dist/release --commit $env:GITHUB_SHA --version $env:RELEASE_VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'Release packaging failed' }
+          $zipExtract = Join-Path $env:RUNNER_TEMP 'danmakuvoice-release-check'
+          Expand-Archive -LiteralPath dist/release/DanmakuVoice-windows-x64.zip -DestinationPath $zipExtract
+          $extractedExe = Join-Path $zipExtract 'DanmakuVoice.exe'
+          if ((Get-FileHash -LiteralPath $extractedExe).Hash -ne (Get-FileHash -LiteralPath dist/DanmakuVoice.exe).Hash) { throw 'Extracted EXE differs' }
+          ./scripts/smoke-portable.ps1 -ApplicationExe $extractedExe
       - uses: actions/upload-artifact@v4
         with:
-          name: 超绝可爱弹幕姬-windows-x64
-          path: |
-            dist/DanmakuVoice.exe
-            dist/DanmakuVoice-source-ci.zip
+          name: DanmakuVoice-release-assets
+          path: dist/release/
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
+    needs: windows
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: DanmakuVoice-release-assets
+          path: release
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum --check SHA256SUMS.txt
+          # Create as draft so partial uploads never become the latest update.
+          # Existing releases are never silently overwritten on a rerun.
+          gh release create "$RELEASE_TAG" --verify-tag --draft \
+            --title "超绝可爱弹幕姬 $RELEASE_TAG" --notes-file RELEASE-NOTES.md \
+            DanmakuVoice-windows-x64.zip DanmakuVoice.exe \
+            DanmakuVoice-source.zip DanmakuVoice-licenses.zip SHA256SUMS.txt
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > uploaded.json
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          expected = {line.split('  ')[1] for line in Path('SHA256SUMS.txt').read_text().splitlines()}
+          expected.add('SHA256SUMS.txt')
+          uploaded = json.loads(Path('uploaded.json').read_text())
+          assert uploaded['draft'], 'Release must remain draft until verified'
+          assets = uploaded['assets']
+          assert len(assets) == len(expected) and {a['name'] for a in assets} == expected, 'Unexpected release assets'
+          for asset in assets:
+              path = Path(asset['name'])
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              assert asset['state'] == 'uploaded' and asset['size'] == path.stat().st_size, path.name
+              assert asset['digest'] == 'sha256:' + digest, path.name
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false --latest

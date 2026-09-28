@@ -6,7 +6,7 @@ Windows 弹幕接收与语音播报工具，支持 B 站直播间、观众指定
 
 ## 下载与启动
 
-在 [GitHub Releases](https://github.com/Ghou133/DanmakuVoice/releases/latest) 下载 **DanmakuVoice.exe**，双击启动。支持 Windows 10/11 x64，需要 Microsoft Edge WebView2 Runtime；缺少时程序会提示安装。FFmpeg 已内嵌，无需另行配置。
+在 [GitHub Releases](https://github.com/Ghou133/DanmakuVoice/releases/latest) 下载 **DanmakuVoice-windows-x64.zip**，解压后双击 **DanmakuVoice.exe** 启动。ZIP 内只有程序本体。支持 Windows 10/11 x64，需要 Microsoft Edge WebView2 Runtime；缺少时程序会提示安装。FFmpeg 已内嵌，无需另行配置。
 
 首次启动扫码登录 B 站，或输入主播 UID 匿名连接。选择语音服务和音色后即可开始接收。之后会沿用设置，自动尝试连接已保存的直播间。
 
@@ -22,7 +22,7 @@ Windows 弹幕接收与语音播报工具，支持 B 站直播间、观众指定
 
 ## 更新
 
-打开 **设置 → 关于 → 检查更新**，检查本仓库最新正式版。发现新版后点击“下载新版”，退出程序，再用下载的 EXE 替换原文件。程序不会自动覆盖正在运行的文件，更新保留现有设置和登录信息。网络失败时可直接打开发布页面；连续检查会缓存结果 60 秒。
+打开 **设置 → 关于 → 检查更新**，检查本仓库最新正式版。发现新版后点击“下载新版”，解压 ZIP，退出程序，再用新版 EXE 替换原文件。程序不会自动覆盖正在运行的文件，更新保留现有设置和登录信息。网络失败时可直接打开发布页面；连续检查会缓存结果 60 秒。
 
 ## 数据
 
@@ -44,6 +44,8 @@ cargo test --locked --workspace
 ```
 
 发行包使用静态 CRT，构建与验证方法见 [FFMPEG.md](docs/FFMPEG.md)。同版 `DanmakuVoice-source.zip` 提供完整锁定依赖及 FFmpeg 源码，解压后可运行 `scripts/build-from-source.ps1 -VerifyOnly` 核验，或运行 `scripts/build-from-source.ps1` 离线构建。工具链和 Windows SDK 仍需预先安装。
+
+GitHub Actions 在推送与应用版本一致的 `v主版本.次版本.修订版` 标签时，自动编译、测试、生成 ZIP 并发布 GitHub Release。普通提交和 PR 只构建验证，不发布版本。发布步骤见 [发布材料核验](docs/RELEASE-LICENSE-AUDIT.md)。
 
 ## 许可
 
