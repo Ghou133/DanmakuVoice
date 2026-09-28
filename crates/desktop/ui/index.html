@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>超绝可爱弹幕姬</title>
+    <script src="./startup-theme.js"></script>
+    <link rel="icon" type="image/png" href="./logo.png">
+    <link rel="stylesheet" href="./styles.css">
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div id="app" aria-busy="true">
+      <div class="boot" role="status"><img class="brand-mark" src="./logo.png" width="128" height="128" alt="" aria-hidden="true" draggable="false"><strong>超绝可爱弹幕姬</strong><p>正在准备直播间…</p></div>
+    </div>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <dialog id="settings" class="settings-dialog" aria-labelledby="settings-title"></dialog>
+    <dialog id="confirmation" class="confirmation-dialog" aria-labelledby="confirmation-title"></dialog>
+    <noscript>超绝可爱弹幕姬需要启用 JavaScript 才能显示桌面界面。</noscript>
+  </body>
+</html>

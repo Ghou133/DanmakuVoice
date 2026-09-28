@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.exe binary
+*.rgba binary
+# License supplements are verified against upstream byte-for-byte SHA-256.
+# Preserve those bytes on Windows checkouts even with core.autocrlf=true.
+third-party/license-supplements/** -text

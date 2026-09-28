@@ -1,0 +1,19 @@
+/target/
+/dist/
+/data/
+/crates/desktop/gen/
+*.log
+*.pdb
+*.pyc
+__pycache__/
+.vs/
+.idea/
+.vscode/
+
+# Superseded local license-source probes. Only manifest-listed, hash-checked
+# supplements enter the source and portable packages.
+/third-party/license-supplements/iced-patch1/
+/third-party/license-supplements/iced-patch2/
+/third-party/license-supplements/zune-inflate/COPYRIGHT.md
+/third-party/license-supplements/zune-inflate/LICENSE-APACHE
+/third-party/license-supplements/zune-inflate/LICENSE-MIT

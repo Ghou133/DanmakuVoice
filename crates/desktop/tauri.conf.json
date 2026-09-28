@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "超绝可爱弹幕姬",
+  "version": "0.2.0",
+  "identifier": "app.danmakuvoice.desktop",
+  "build": { "frontendDist": ["ui/index.html", "ui/app.js", "ui/helpers.mjs", "ui/autosave.mjs", "ui/select.mjs", "ui/startup-theme.js", "ui/styles.css", "ui/logo.png"] },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.hdslb.com; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.ico"] }
+}

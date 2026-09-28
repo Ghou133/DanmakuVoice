@@ -1,0 +1,406 @@
+{
+  "schemaVersion": 1,
+  "source": "Crate .cargo_vcs_info.json exact package revision; selected license is one option from Cargo license expression.",
+  "entries": [
+    {
+      "package": "alloc-stdlib",
+      "version": "0.3.0",
+      "crateVcsSha1": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012",
+      "selectedLicense": "BSD-3-Clause",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "alloc-stdlib/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+          "sha256": "C0C56F26D9C051CAC4D200C34C84E7AE9AAA853E01A982A1DF08B09931E518AE"
+        }
+      ]
+    },
+    {
+      "package": "clipboard-win",
+      "version": "5.4.1",
+      "crateVcsSha1": "3b27cf2bfd1adcfa6e0264eb51c1025ddaf0f342",
+      "selectedLicense": "BSL-1.0",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "clipboard-win/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/DoumanAsh/clipboard-win/3b27cf2bfd1adcfa6e0264eb51c1025ddaf0f342/LICENSE",
+          "sha256": "C9BFF75738922193E67FA726FA225535870D2AA1059F91452C411736284AD566"
+        }
+      ]
+    },
+    {
+      "package": "dasp_sample",
+      "version": "0.11.0",
+      "crateVcsSha1": "97c3bb9b2363c0b46ac1633858bf1054fd02a980",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "dasp_sample/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/rustaudio/sample/97c3bb9b2363c0b46ac1633858bf1054fd02a980/LICENSE-MIT",
+          "sha256": "B1D6DF41ED3AA96806E74C729444D7C121D90E6660A6AED01D298E03FDE475A0"
+        },
+        {
+          "path": "dasp_sample/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/rustaudio/sample/97c3bb9b2363c0b46ac1633858bf1054fd02a980/LICENSE-APACHE",
+          "sha256": "756C8D2AB2DC24F256E1455B5F03937F4933D83D7BC9F2D55009FC962377D512"
+        }
+      ]
+    },
+    {
+      "package": "hexf-parse",
+      "version": "0.2.1",
+      "crateVcsSha1": "4225763d744183d720f575ae96d04161b4d08ea0",
+      "selectedLicense": "CC0-1.0",
+      "sourceRelation": "canonical-license-text",
+      "files": [
+        {
+          "path": "hexf-parse/CC0-1.0.txt",
+          "sourceUrl": "https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt",
+          "sha256": "A2010F343487D3F7618AFFE54F789F5487602331C0A8D03F49E9A7C547CF0499"
+        }
+      ]
+    },
+    {
+      "package": "iced_core",
+      "version": "0.14.0",
+      "crateVcsSha1": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_debug",
+      "version": "0.14.0",
+      "crateVcsSha1": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_futures",
+      "version": "0.14.0",
+      "crateVcsSha1": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_graphics",
+      "version": "0.14.0",
+      "crateVcsSha1": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_program",
+      "version": "0.14.0",
+      "crateVcsSha1": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_renderer",
+      "version": "0.14.0",
+      "crateVcsSha1": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_runtime",
+      "version": "0.14.0",
+      "crateVcsSha1": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_tiny_skia",
+      "version": "0.14.1",
+      "crateVcsSha1": "0ecf60664df7b8ac7d7aef5f7279d5323027f693",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/0ecf60664df7b8ac7d7aef5f7279d5323027f693/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_wgpu",
+      "version": "0.14.0",
+      "crateVcsSha1": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_widget",
+      "version": "0.14.2",
+      "crateVcsSha1": "54abf81d13fec06d4d9ac754b03ce2c3313e8a1f",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/54abf81d13fec06d4d9ac754b03ce2c3313e8a1f/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "iced_winit",
+      "version": "0.14.1",
+      "crateVcsSha1": "38237dd294da3256c2ac4d3f8288fc73956c91e0",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "iced/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/iced-rs/iced/38237dd294da3256c2ac4d3f8288fc73956c91e0/LICENSE",
+          "sha256": "FC9086BA4EBA4B77E4C603906362742BC3715FFA2C7810C6074FE7780D3A0398"
+        }
+      ]
+    },
+    {
+      "package": "profiling",
+      "version": "1.0.18",
+      "crateVcsSha1": "8271551172eb6fa4cba47369aedd93790c623df9",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "profiling/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "sha256": "C8167FDEEED46D3F244D3F85C5BF998CE889343691C32BE2C61A8BC4B5C08333"
+        },
+        {
+          "path": "profiling/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "sha256": "10D30A673CD5E9349BDC02AEB48F14B3386D27D0DA32DF8F0A555D4AA16AA551"
+        }
+      ]
+    },
+    {
+      "package": "profiling-procmacros",
+      "version": "1.0.18",
+      "crateVcsSha1": "8271551172eb6fa4cba47369aedd93790c623df9",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "profiling/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "sha256": "C8167FDEEED46D3F244D3F85C5BF998CE889343691C32BE2C61A8BC4B5C08333"
+        },
+        {
+          "path": "profiling/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "sha256": "10D30A673CD5E9349BDC02AEB48F14B3386D27D0DA32DF8F0A555D4AA16AA551"
+        }
+      ]
+    },
+    {
+      "package": "pulp-wasm-simd-flag",
+      "version": "0.1.1",
+      "crateVcsSha1": "5eb07fd7b68edf0a5e19f71737d315f72a510295",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "pulp-wasm-simd-flag/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/sarah-quinones/pulp/5eb07fd7b68edf0a5e19f71737d315f72a510295/LICENSE",
+          "sha256": "D64F878C89BD5F1E5ADA7E4AAD57690B122727CF5229B7B87EA1980C188DA1D9"
+        }
+      ]
+    },
+    {
+      "package": "simd_helpers",
+      "version": "0.1.0",
+      "crateVcsSha1": "ca1a2f84aa386d758e98f8a609d990263932fb85",
+      "selectedLicense": "MIT",
+      "sourceRelation": "later-upstream-license-crate-declares-MIT",
+      "files": [
+        {
+          "path": "simd_helpers/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/lu-zero/simd_helpers/82040194cd05affb060bf94d6f19f82a771d07fb/LICENSE",
+          "sha256": "D69F24AD84EC2ADE64C0B68BDB31B41170E997B158370342056918329CC9AF1E"
+        }
+      ]
+    },
+    {
+      "package": "svg_fmt",
+      "version": "0.4.5",
+      "crateVcsSha1": "93f414cd572b5c2781df93dbdc068ed13443d05a",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "svg_fmt/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/nical/rust_debug/93f414cd572b5c2781df93dbdc068ed13443d05a/LICENSE",
+          "sha256": "7E98BED7F100747AAAE7D82AB94FBE6B76FD6B84B09A3AAA413BFF8196D0FBB1"
+        }
+      ]
+    },
+    {
+      "package": "zune-inflate",
+      "version": "0.2.54",
+      "crateVcsSha1": "69502ce83fdfecdd0beefd677e2abb3781b29d98",
+      "selectedLicense": "Zlib",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "zune-inflate/LICENSE-ZLIB",
+          "sourceUrl": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE-ZLIB",
+          "sha256": "7FA429541E55B1509909E058F2D21A37467E4958EC713B357F6E0CF9DC4EE352"
+        }
+      ]
+    },
+    {
+      "package": "defmt-parser",
+      "version": "1.0.0",
+      "crateVcsSha1": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "defmt-parser/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+          "sha256": "2710A622A896BBA67356913D4D0492CAB5465F61B2ECCE6D880AEB483834FB50"
+        },
+        {
+          "path": "defmt-parser/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+          "sha256": "8173D5C29B4F956D532781D2B86E4E30F83E6B7878DCE18C919451D6BA707C90"
+        }
+      ]
+    },
+    {
+      "package": "selectors",
+      "version": "0.38.0",
+      "crateVcsSha1": "572ecba2d1600e7c3d490586692a209faf703baa",
+      "selectedLicense": "MPL-2.0",
+      "sourceRelation": "canonical-license-text",
+      "note": "The exact stylo revision has no MPL license text. Its selectors/lib.rs notice links to Mozilla MPL 2.0; Cargo declares MPL-2.0. This is Mozilla's canonical full text, not an upstream-revision file.",
+      "noticeSourceUrl": "https://raw.githubusercontent.com/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
+      "files": [
+        {
+          "path": "selectors/MPL-2.0.txt",
+          "sourceUrl": "https://www.mozilla.org/media/MPL/2.0/index.txt",
+          "sha256": "3F3D9E0024B1921B067D6F7F88DEB4A60CBE7A78E76C64E3F1D7FC3B779B9D04"
+        }
+      ]
+    },
+    {
+      "package": "tauri-plugin",
+      "version": "2.7.0",
+      "crateVcsSha1": "447fa9f3f993fe77724189e355078b38ce20baea",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "tauri-plugin/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/tauri-apps/tauri/447fa9f3f993fe77724189e355078b38ce20baea/LICENSE-MIT",
+          "sha256": "9DD42EA92CFF2EDE5CD477CBFCCE051B2D0115C0AC7F368EE88CB545055DFF1D"
+        }
+      ]
+    },
+    {
+      "package": "webview2-com",
+      "version": "0.39.1",
+      "crateVcsSha1": "edc2caf886175ccaebe86078c9cfe1ae2a187328",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "webview2-rs/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+          "sha256": "0DCF41516E608BBCB6CDC5229FEB7B86FE4A643B85E7DF251133C93408FDAC73"
+        }
+      ]
+    },
+    {
+      "package": "webview2-com-macros",
+      "version": "0.8.1",
+      "crateVcsSha1": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "webview2-rs/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+          "sha256": "0DCF41516E608BBCB6CDC5229FEB7B86FE4A643B85E7DF251133C93408FDAC73"
+        }
+      ]
+    },
+    {
+      "package": "webview2-com-sys",
+      "version": "0.39.1",
+      "crateVcsSha1": "edc2caf886175ccaebe86078c9cfe1ae2a187328",
+      "selectedLicense": "MIT",
+      "sourceRelation": "exact-crate-vcs",
+      "files": [
+        {
+          "path": "webview2-rs/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+          "sha256": "0DCF41516E608BBCB6CDC5229FEB7B86FE4A643B85E7DF251133C93408FDAC73"
+        }
+      ]
+    }
+  ]
+}

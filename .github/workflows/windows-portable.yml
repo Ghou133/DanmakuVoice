@@ -1,0 +1,110 @@
+name: 超绝可爱弹幕姬 Windows 开发构建
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  minimal-ffmpeg:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc libc6-dev gcc-mingw-w64-x86-64-win32 make nasm curl gnupg xz-utils
+      - name: Build and verify official FFmpeg 9.0.2 source
+        run: |
+          bash scripts/build-minimal-ffmpeg-wsl.sh "$RUNNER_TEMP/ffmpeg-bundle"
+          cp /tmp/danmakuvoice-ffmpeg-9.0.2/ffmpeg-9.0.2.tar.xz "$RUNNER_TEMP/ffmpeg-bundle/"
+          cp /tmp/danmakuvoice-ffmpeg-9.0.2/source/COPYING.LGPLv2.1 "$RUNNER_TEMP/ffmpeg-bundle/"
+          cp /tmp/danmakuvoice-ffmpeg-9.0.2/source/LICENSE.md "$RUNNER_TEMP/ffmpeg-bundle/"
+          cd "$RUNNER_TEMP/ffmpeg-bundle"
+          printf '%s  %s\n' '8fb7ecc11f4f7a441ae7075a81c984289250b166e78dedf51900bbeb1a96ef4d' ffmpeg.exe | sha256sum --check -
+          printf '%s  %s\n' '8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e' ffmpeg-9.0.2.tar.xz | sha256sum --check -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-minimal-ffmpeg-windows-x64
+          path: ${{ runner.temp }}/ffmpeg-bundle/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    needs: minimal-ffmpeg
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install locked Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-minimal-ffmpeg-windows-x64
+          path: ${{ runner.temp }}/ffmpeg-input
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Check desktop UI helpers
+        run: |
+          node --check crates/desktop/ui/app.js
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop JavaScript syntax check failed' }
+          $uiTests = @(Get-ChildItem -LiteralPath crates/desktop/ui -Filter '*.test.mjs' -File |
+            Sort-Object Name | ForEach-Object { $_.FullName })
+          if ($uiTests.Count -eq 0) { throw 'No desktop UI tests were found' }
+          node --test @uiTests
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop UI tests failed' }
+      - name: Smoke-test 8-bit WAV on the minimal FFmpeg
+        run: python scripts/verify-minimal-ffmpeg.py --candidate (Join-Path $env:RUNNER_TEMP 'ffmpeg-input/ffmpeg.exe') --wav-smoke-only
+      - name: Check all Rust targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run offline tests with real minimal FFmpeg
+        env:
+          DANMAKUVOICE_TEST_FFMPEG: ${{ runner.temp }}\ffmpeg-input\ffmpeg.exe
+        run: cargo test --workspace --locked
+      - name: Build direct EXE and verify matching source
+        run: |
+          $inputDir = Join-Path $env:RUNNER_TEMP 'ffmpeg-input'
+          ./scripts/package-portable.ps1 `
+            -FfmpegBinary (Join-Path $inputDir 'ffmpeg.exe') `
+            -FfmpegSourceArchive (Join-Path $inputDir 'ffmpeg-9.0.2.tar.xz') `
+            -FfmpegCopying (Join-Path $inputDir 'COPYING.LGPLv2.1') `
+            -FfmpegLicenseDescription (Join-Path $inputDir 'LICENSE.md') `
+            -OutputZip 'dist/DanmakuVoice-audit-ci.zip' `
+            -OutputExe 'dist/DanmakuVoice.exe' `
+            -RequireCleanCheckout
+          ./scripts/smoke-portable.ps1 -ApplicationExe 'dist/DanmakuVoice.exe'
+          ./scripts/package-source.ps1 `
+            -Commit $env:GITHUB_SHA `
+            -FfmpegSourceArchive (Join-Path $inputDir 'ffmpeg-9.0.2.tar.xz') `
+            -FfmpegCopying (Join-Path $inputDir 'COPYING.LGPLv2.1') `
+            -FfmpegLicenseDescription (Join-Path $inputDir 'LICENSE.md') `
+            -OutputZip 'dist/DanmakuVoice-source-ci.zip' `
+            -RequireCleanCheckout
+          ./scripts/verify-bundle-pair.ps1 -PortableZip 'dist/DanmakuVoice-audit-ci.zip' -ApplicationExe 'dist/DanmakuVoice.exe' -SourceZip 'dist/DanmakuVoice-source-ci.zip' -ExpectedCommit $env:GITHUB_SHA
+          python scripts/verify-rust-license-copies.py --portable 'dist/DanmakuVoice-audit-ci.zip' --source 'dist/DanmakuVoice-source-ci.zip'
+          if ($LASTEXITCODE -ne 0) { throw 'Rust license copies differ from their locked source archives' }
+          $sourceExtract = Join-Path $env:RUNNER_TEMP 'danmakuvoice-source-check'
+          Expand-Archive -LiteralPath 'dist/DanmakuVoice-source-ci.zip' -DestinationPath $sourceExtract
+          $sourceRoot = Join-Path $sourceExtract ('DanmakuVoice-source-' + $env:GITHUB_SHA.Substring(0, 12))
+          $previousCargoHome = $env:CARGO_HOME
+          try {
+            # Build the extracted ZIP with an empty Cargo cache. The source
+            # script vendors verified locked archives and runs Cargo --offline.
+            $env:CARGO_HOME = Join-Path $env:RUNNER_TEMP 'danmakuvoice-source-cargo'
+            & (Join-Path $sourceRoot 'scripts/build-from-source.ps1')
+          } finally {
+            $env:CARGO_HOME = $previousCargoHome
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 超绝可爱弹幕姬-windows-x64
+          path: |
+            dist/DanmakuVoice.exe
+            dist/DanmakuVoice-source-ci.zip
+          if-no-files-found: error
+          retention-days: 7
