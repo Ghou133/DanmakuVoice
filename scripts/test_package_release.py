@@ -60,6 +60,7 @@ class ReleaseTests(unittest.TestCase):
         for line in (self.out / "SHA256SUMS.txt").read_text().splitlines():
             digest, name = line.split("  ")
             self.assertEqual(release.sha256(self.out / name), digest)
+        self.assertNotIn(b"\r", (self.out / "SHA256SUMS.txt").read_bytes())
         first_hash = release.sha256(self.out / release.APPLICATION_ZIP)
         self.out = self.root / "second"
         self.package()

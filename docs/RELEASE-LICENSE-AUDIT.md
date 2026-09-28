@@ -14,6 +14,8 @@ GitHub Actions 对普通提交及 PR 执行构建验证；推送版本标签（�
 
 自动发布先创建草稿，核对 GitHub 返回的全部附件大小及 SHA-256，成功后转为正式最新版。构建失败不会发布，已有 Release 不会在重跑时被覆盖。`DanmakuVoice-licenses.zip` 与对应源码必须和程序同时保留在 Release 中。
 
+发布步骤使用独立工作流 `publish-release.yml`。如果构建已成功而发布前失败，可在 Actions 手动运行“发布已验证的构建产物”，填写原版本标签和构建运行 ID。它会核对同仓库构建来源、标签提交、Windows 作业成功状态及附件校验值，复用已验证的产物；不会绕过编译与测试门槛。校验清单接受 CRLF/LF，公开附件统一使用 LF。
+
 正式打包要求干净检出。`scripts/package-portable.ps1` 记录构建提交、Cargo.lock、FFmpeg 哈希，并校验 PE 依赖。
 `scripts/package-source.ps1` 从同一提交归档，核验锁文件中的每份 `.crate` 及补充许可材料。
 

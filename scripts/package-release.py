@@ -91,7 +91,7 @@ def package(audit, exe, source, output, commit, version):
     shutil.copyfile(exe, output / "DanmakuVoice.exe")
     shutil.copyfile(source, output / "DanmakuVoice-source.zip")
     (output / "SHA256SUMS.txt").write_text(
-        "".join(f"{sha256(output / name)}  {name}\n" for name in ASSETS), encoding="utf-8")
+        "".join(f"{sha256(output / name)}  {name}\n" for name in ASSETS), encoding="utf-8", newline="\n")
     (output / "RELEASE-NOTES.md").write_text(
         f"下载 **[{APPLICATION_ZIP}]({REPOSITORY}/releases/download/v{version}/{APPLICATION_ZIP})**，"
         "完整解压后双击 `DanmakuVoice.exe`。更新前请退出旧程序，设置会保留。\n\n"
