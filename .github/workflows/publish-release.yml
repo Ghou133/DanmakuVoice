@@ -89,19 +89,24 @@ jobs:
           with ZipFile('DanmakuVoice-source.zip') as archive:
               assert f'DanmakuVoice source commit: {commit}' in archive.read(prefix + 'SOURCE-COMMIT.txt').decode('utf-8-sig')
           PY
-          # An interrupted upload stays a draft. Never overwrite an existing release.
-          gh release create "$RELEASE_TAG" --verify-tag --draft \
-            --title "超绝可爱弹幕姬 $RELEASE_TAG" --notes-file RELEASE-NOTES.md \
-            DanmakuVoice-windows-x64.zip DanmakuVoice.exe \
-            DanmakuVoice-source.zip DanmakuVoice-licenses.zip SHA256SUMS.txt
-          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > uploaded.json
+          # Resume only an identical complete draft; never overwrite assets or a
+          # published release. Draft lookup uses its ID, not the public tag API.
+          if ! release_api=$(gh release view "$RELEASE_TAG" --json apiUrl --jq .apiUrl 2>/dev/null); then
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "超绝可爱弹幕姬 $RELEASE_TAG" --notes-file RELEASE-NOTES.md \
+              DanmakuVoice-windows-x64.zip DanmakuVoice.exe \
+              DanmakuVoice-source.zip DanmakuVoice-licenses.zip SHA256SUMS.txt
+            release_api=$(gh release view "$RELEASE_TAG" --json apiUrl --jq .apiUrl)
+          fi
+          gh api "$release_api" > uploaded.json
           python3 - <<'PY'
-          import hashlib, json
+          import hashlib, json, os
           from pathlib import Path
           expected = {line.split('  ')[1] for line in Path('SHA256SUMS.txt').read_text(encoding='utf-8').splitlines()}
           expected.add('SHA256SUMS.txt')
           uploaded = json.loads(Path('uploaded.json').read_text(encoding='utf-8'))
           assert uploaded['draft'], 'Release must remain draft until verified'
+          assert uploaded['tag_name'] == os.environ['RELEASE_TAG'], 'Release tag differs'
           assets = uploaded['assets']
           assert len(assets) == len(expected) and {a['name'] for a in assets} == expected, 'Unexpected release assets'
           for asset in assets:
