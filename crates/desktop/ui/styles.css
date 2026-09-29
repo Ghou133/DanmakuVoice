@@ -25,7 +25,7 @@
 .message-emote{height:1.65em;max-width:5.5em;width:auto;vertical-align:-.34em;object-fit:contain;margin:0 .1em}
 .message-emote.large{height:4.5em;max-width:min(12em,100%);width:auto;vertical-align:middle}
 .main-volume{display:flex;align-items:center;gap:7px;flex:none;color:var(--subtle)}
-.main-volume svg{width:17px;height:17px}
+.main-volume svg{width:17px;height:17px}.main-volume .icon-button{width:28px;height:28px;flex:none}.main-volume [aria-pressed="true"]{color:var(--accent-text)}
 .main-volume input{width:105px;accent-color:var(--accent);cursor:pointer}
 .main-volume output{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
 .tts-switch{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:7px 10px;border:1px solid var(--line);border-radius:10px;color:var(--subtle);font-size:11px;background:var(--surface);white-space:nowrap}
@@ -66,7 +66,7 @@
 .directory-field .field{flex:1;min-width:0}
 .directory-field .button{flex:none;margin-bottom:1px}
 @media(max-width:680px){.service-grid{grid-template-columns:1fr}.tts-switch{padding:7px}.tts-switch span{max-width:75px}.main-volume input{width:77px}.playback-bar{gap:7px}}
-@media(max-width:440px){.tts-switch span{max-width:48px}.main-volume svg{display:none}.main-volume input{width:64px}.main-volume output{min-width:31px}.directory-field{flex-wrap:wrap}.directory-field .button{margin-left:auto}}
+@media(max-width:440px){.tts-switch span{max-width:48px}.main-volume input{width:64px}.main-volume output{min-width:31px}.directory-field{flex-wrap:wrap}.directory-field .button{margin-left:auto}}
 .model-pair-picker{display:flex;align-items:flex-end;gap:10px;margin-top:18px}
 .model-pair-picker .field{flex:1;min-width:0}
 .model-pair-picker .button{flex:none;margin-bottom:1px}

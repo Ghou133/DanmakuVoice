@@ -265,7 +265,7 @@ impl FishClient {
         if !(5..=600).contains(&config.timeout_secs) {
             return Err(configuration("超时须在 5 到 600 秒之间"));
         }
-        let http = Client::builder()
+        let http = fish_http_builder()?
             // Never carry a bearer token to a redirect destination. TLS
             // certificate validation remains enabled for the official URL.
             .redirect(Policy::none())
@@ -465,7 +465,7 @@ async fn verify_api_key_at(
     let api_key = api_key.trim();
     validate_api_key(api_key)?;
     let authorization = authorization_header(api_key)?;
-    let client = Client::builder()
+    let client = fish_http_builder()?
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(10))
@@ -482,6 +482,80 @@ async fn verify_api_key_at(
         return Err(verification_http_error(response.status().as_u16()));
     }
     Ok(())
+}
+
+fn fish_http_builder() -> Result<reqwest::ClientBuilder, TtsError> {
+    let builder = Client::builder();
+    #[cfg(windows)]
+    {
+        // reqwest's system matcher accepts a shared server, but not the Windows
+        // per-protocol form (http=host:port;https=host:port). Handle that form
+        // explicitly while preserving environment overrides and bypass rules.
+        let Ok(settings) = windows_registry::CURRENT_USER
+            .open("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+        else {
+            return Ok(builder);
+        };
+        if settings.get_u32("ProxyEnable").unwrap_or(0) == 0 {
+            return Ok(builder);
+        }
+        let server = settings.get_string("ProxyServer").unwrap_or_default();
+        if !server.contains('=') {
+            return Ok(builder);
+        }
+        let environment = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .or_else(|| std::env::var(name.to_ascii_lowercase()).ok())
+                .filter(|s| !s.is_empty())
+        };
+        let bypass = environment("NO_PROXY").unwrap_or_else(|| {
+            settings
+                .get_string("ProxyOverride")
+                .unwrap_or_default()
+                .split(';')
+                .map(|entry| {
+                    let entry = entry.trim();
+                    let parts: Vec<_> = entry.split('.').collect();
+                    if let Some(star) = parts.iter().position(|part| *part == "*")
+                        && (1..4).contains(&star)
+                        && parts[star..].iter().all(|part| *part == "*")
+                        && parts[..star].iter().all(|part| part.parse::<u8>().is_ok())
+                    {
+                        let mut octets = ["0"; 4];
+                        octets[..star].copy_from_slice(&parts[..star]);
+                        return format!("{}/{}", octets.join("."), star * 8);
+                    }
+                    entry.replace("*.", "")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        let mut builder = builder.no_proxy();
+        for scheme in ["http", "https"] {
+            let server = environment(&format!("{}_PROXY", scheme.to_ascii_uppercase()))
+                .or_else(|| {
+                    server.split(';').find_map(|entry| {
+                        let (key, value) = entry.trim().split_once('=')?;
+                        (key.trim().eq_ignore_ascii_case(scheme) && !value.trim().is_empty())
+                            .then(|| value.trim().to_owned())
+                    })
+                })
+                .or_else(|| environment("ALL_PROXY"));
+            if let Some(server) = server {
+                let proxy = if scheme == "https" {
+                    reqwest::Proxy::https(server)
+                } else {
+                    reqwest::Proxy::http(server)
+                }
+                .map_err(|_| configuration("Windows 系统代理地址无效，请检查代理设置"))?;
+                builder = builder.proxy(proxy.no_proxy(reqwest::NoProxy::from_string(&bypass)));
+            }
+        }
+        Ok(builder)
+    }
+    #[cfg(not(windows))]
+    Ok(builder)
 }
 
 fn validate_api_key(key: &str) -> Result<(), TtsError> {

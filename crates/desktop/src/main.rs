@@ -207,14 +207,19 @@ async fn finish_exit(
         show_window(&app);
         return Ok(());
     }
-    if let Err(error) = state.dispatch("queue.stop", serde_json::json!({})).await {
-        exit_bridge.abort_request(request_id);
-        show_window(&app);
-        return Err(error);
-    }
+    shutdown_and_exit(&app, &state).await;
+    Ok(())
+}
+
+async fn shutdown_and_exit(app: &tauri::AppHandle, state: &Application) {
+    // Closing is a single action, including when a network task fails to stop.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        state.dispatch("queue.stop", serde_json::json!({})),
+    )
+    .await;
     state.stop_owned_local_services();
     app.exit(0);
-    Ok(())
 }
 
 #[tauri::command]
@@ -516,16 +521,8 @@ fn install_tray(
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "断开直播并停止播报", true, None::<&str>)?;
-    let exit = MenuItem::with_id(
-        app,
-        "exit",
-        "退出并关闭本应用启动的 TTS",
-        true,
-        None::<&str>,
-    )?;
-    let force_exit = MenuItem::with_id(app, "force_exit", "强制退出…", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &stop, &exit, &force_exit])?;
+    let exit = MenuItem::with_id(app, "exit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &exit])?;
     TrayIconBuilder::new()
         .icon(tauri::image::Image::new(
             include_bytes!("../icons/tray.rgba"),
@@ -553,20 +550,7 @@ fn install_tray(
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => show_window_if_ready(app, &startup),
             "exit" => {
-                show_window_if_ready(app, &startup);
                 request_exit(app, &app.state::<ExitBridge>());
-            }
-            "force_exit" if confirm_force_exit() => app.exit(0),
-            "stop" => {
-                let handle = app.clone();
-                let state = app.state::<Application>().inner().clone();
-                let startup = startup.clone();
-                tauri::async_runtime::spawn(async move {
-                    let stopped = state.dispatch("queue.stop", serde_json::json!({})).await;
-                    if stopped.is_err() {
-                        show_window_if_ready(&handle, &startup);
-                    }
-                });
             }
             _ => {}
         })
@@ -577,8 +561,7 @@ fn install_tray(
 fn request_exit(app: &tauri::AppHandle, bridge: &ExitBridge) {
     match bridge.begin_request() {
         ExitRoute::Frontend(request_id) => {
-            // The page flushes pending settings and calls finish_exit. An
-            // unsuccessful save keeps the window open for the user's edits.
+            // Give automatic settings saves a chance to finish before closing.
             if app
                 .emit_to(
                     "main",
@@ -588,36 +571,33 @@ fn request_exit(app: &tauri::AppHandle, bridge: &ExitBridge) {
                 .is_err()
             {
                 bridge.abort_request(request_id);
-                show_window(app);
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<Application>().inner().clone();
+                    shutdown_and_exit(&app, &state).await;
+                });
             } else {
                 // Emission success means the WebView accepted the event, not
                 // that its JS listener is still alive after a reload/crash.
-                // Make a later click possible without silently force exiting.
+                // A failed frontend must not strand the application or its TTS.
                 let bridge = bridge.clone();
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     if bridge.expire_frontend_request(request_id) {
-                        show_window(&app);
+                        let state = app.state::<Application>().inner().clone();
+                        shutdown_and_exit(&app, &state).await;
                     }
                 });
             }
         }
-        ExitRoute::Native(request_id) => {
+        ExitRoute::Native(_request_id) => {
             // Before the first snapshot, the page cannot have editable drafts.
             // Do not strand an owned TTS process when a close arrives this early.
             let app = app.clone();
-            let bridge = bridge.clone();
             let state = app.state::<Application>().inner().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = state.dispatch("queue.stop", serde_json::json!({})).await {
-                    bridge.abort_request(request_id);
-                    show_window(&app);
-                    show_exit_error(&error);
-                    return;
-                }
-                state.stop_owned_local_services();
-                app.exit(0);
+                shutdown_and_exit(&app, &state).await;
             });
         }
         ExitRoute::Pending => {}
@@ -641,31 +621,6 @@ fn show_window_if_ready(app: &tauri::AppHandle, startup: &Arc<Mutex<StartupWindo
     {
         show_window(app);
     }
-}
-
-#[cfg(windows)]
-fn show_exit_error(error: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-    let title: Vec<u16> = "超绝可爱弹幕姬无法退出\0".encode_utf16().collect();
-    let message: Vec<u16> = format!(
-        "停止播报失败，请重试；必要时可从托盘选择“强制退出”。\n\n{}\0",
-        error.chars().take(500).collect::<String>()
-    )
-    .encode_utf16()
-    .collect();
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            message.as_ptr(),
-            title.as_ptr(),
-            MB_OK | MB_ICONERROR,
-        )
-    };
-}
-
-#[cfg(not(windows))]
-fn show_exit_error(error: &str) {
-    eprintln!("超绝可爱弹幕姬无法退出：{error}");
 }
 
 fn native_theme(snapshot: &Value) -> Option<tauri::Theme> {
@@ -749,26 +704,6 @@ fn show_startup_error(message: &str) {
             MB_OK | MB_ICONERROR,
         )
     };
-}
-
-#[cfg(windows)]
-fn confirm_force_exit() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MessageBoxW,
-    };
-    let title: Vec<u16> = "超绝可爱弹幕姬\0".encode_utf16().collect();
-    let message: Vec<u16> =
-        "强制退出会立即停止接收、播放和本应用启动的 TTS，未保存的设置可能丢失。确定退出？\0"
-            .encode_utf16()
-            .collect();
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            message.as_ptr(),
-            title.as_ptr(),
-            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-        ) == IDYES
-    }
 }
 
 #[cfg(test)]

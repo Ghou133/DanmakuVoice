@@ -1316,7 +1316,7 @@ impl Controller {
         }
         let ffmpeg = embedded_ffmpeg::ensure(self.store.data_dir())?;
         let output =
-            AudioOutput::open(&self.prefs.output, self.prefs.master_volume).map_err(display)?;
+            AudioOutput::open(&self.prefs.output, self.prefs.playback_volume()).map_err(display)?;
         let executor = PlaybackExecutor::new(output.writer.clone(), &ffmpeg).map_err(display)?;
         let scheduler = scheduler::spawn(Arc::new(executor));
         self.audio = Some(output);
@@ -2170,7 +2170,9 @@ impl Application {
             }
             state.save_desktop_paths()?;
             if let Some(audio) = &state.audio {
-                audio.writer.set_master_volume(state.prefs.master_volume);
+                audio
+                    .writer
+                    .set_master_volume(state.prefs.playback_volume());
             }
             if reopen_output {
                 state

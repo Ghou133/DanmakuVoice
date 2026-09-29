@@ -116,6 +116,7 @@ pub struct DesktopPreferences {
     pub scale: f32,
     pub output: OutputSelection,
     pub master_volume: f32,
+    pub muted: bool,
     pub onboarding_done: bool,
     pub broadcaster_uid: Option<u64>,
     pub authenticated: bool,
@@ -129,6 +130,7 @@ impl Default for DesktopPreferences {
             scale: 1.0,
             output: OutputSelection::Default,
             master_volume: 1.0,
+            muted: false,
             onboarding_done: false,
             broadcaster_uid: None,
             authenticated: false,
@@ -138,6 +140,10 @@ impl Default for DesktopPreferences {
 }
 
 impl DesktopPreferences {
+    pub fn playback_volume(&self) -> f32 {
+        if self.muted { 0.0 } else { self.master_volume }
+    }
+
     /// Check an edited preference set before stopping playback or changing
     /// devices. Persistence uses the same validation again before writing.
     pub fn validate(&self) -> Result<(), StorageError> {
@@ -2801,6 +2807,7 @@ mod tests {
             scale: 1.25,
             output: OutputSelection::Named("Speakers (USB DAC)".into()),
             master_volume: 0.65,
+            muted: true,
             onboarding_done: true,
             broadcaster_uid: Some(42),
             authenticated: false,
@@ -2810,6 +2817,10 @@ mod tests {
         drop(store);
         let mut reopened = DataStore::open(temp.path()).unwrap();
         assert_eq!(reopened.load_desktop_preferences().unwrap(), preferences);
+        assert_eq!(preferences.playback_volume(), 0.0);
+        let mut unmuted = preferences.clone();
+        unmuted.muted = false;
+        assert_eq!(unmuted.playback_volume(), 0.65);
         let exported = serde_json::to_string(&reopened.export_configuration().unwrap()).unwrap();
         assert!(!exported.contains("Speakers (USB DAC)"));
         let mut invalid = preferences;
@@ -2839,6 +2850,7 @@ mod tests {
         assert_eq!(old.appearance, AppearancePreference::Dark);
         assert!(old.onboarding_done);
         assert!(old.tts_enabled);
+        assert!(!old.muted);
         assert!(!old.authenticated);
         assert_eq!(old.broadcaster_uid, None);
         let new: DesktopPreferences = serde_json::from_str("{}").unwrap();

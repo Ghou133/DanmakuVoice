@@ -12,7 +12,8 @@ thiserror.workspace = true
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# Keep the lean TLS backend, but retain Windows Internet Settings proxy support.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "system-proxy"] }
 futures-util = "0.3"
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 sha2 = "0.10"
@@ -28,7 +29,11 @@ base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+windows-registry = "0.6.1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Console", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Registry"] }

@@ -18,6 +18,7 @@ const icons = {
   plus: '<path d="M12 5v14M5 12h14"/>', rules: '<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="8" cy="18" r="2"/>',
   assets: '<path d="M9 18V5l11-2v13M9 9l11-2"/><ellipse cx="6" cy="18" rx="3" ry="2"/><ellipse cx="17" cy="16" rx="3" ry="2"/>',
   audio: '<path d="M3 9v6h4l5 4V5L7 9ZM16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14"/>', appearance: '<circle cx="12" cy="12" r="8"/><path d="M12 4v16M12 4a8 8 0 0 1 0 16"/>',
+  muted: '<path d="M3 9v6h4l5 4V5L7 9ZM16 9l6 6M22 9l-6 6"/>',
   folder: '<path d="M3 6h7l2 3h9v11H3ZM3 6V4h7l2 2h9v3"/>', info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
   refresh: '<path d="M20 4v6h-6M4 20v-6h6M20 10a8 8 0 0 0-13-6M4 14a8 8 0 0 0 13 6"/>',
   chat: '<path d="M12 12h52a9 9 0 0 1 9 9v22a9 9 0 0 1-9 9H36L21 64V52h-9a9 9 0 0 1-9-9V21a9 9 0 0 1 9-9Z"/><path d="M24 32h.01M38 32h.01M52 32h.01"/>',
@@ -95,7 +96,7 @@ let modelScan = { pairs: [], issues: [] };
 let referenceProfiles = [];
 const volumeSave = createAutosaveQueue({
   delay: 250,
-  save: value => command('preferences.save', { preferences: { master_volume: value / 100 } }, { quiet: true, silent: true }),
+  save: value => command('preferences.save', { preferences: { master_volume: value / 100, muted: false } }, { quiet: true, silent: true }),
   onSaved: (_, value) => { if (volumeDraft === value) volumeDraft = null; liveRenderSignature = ''; if (step === 'main') updateLive(); },
   onError: error => { volumeDraft = null; liveRenderSignature = ''; if (step === 'main') updateLive(); showError(error); },
 });
@@ -222,7 +223,7 @@ function qrMarkup(provider, inSettings = false) {
 function renderApp() {
   app.setAttribute('aria-busy', 'false');
   if (step === 'main') {
-    app.innerHTML = `<div class="app-shell"><header class="app-header live-header"><div class="brand"><span data-brand-portrait>${renderHeaderPortrait()}</span><div class="brand-details"><div class="brand-name" data-brand-name>${esc(headerIdentity(snapshot).name)}</div><div class="room-status"><span id="connection-dot" class="status-dot"></span><span id="room-caption"></span></div></div></div><div class="header-actions"><button type="button" id="live-toggle" class="room-button" data-action="live.toggle"></button>${iconButton('settings', '打开设置', 'settings.open')}</div></header>${snapshot.network_disabled ? '<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>' : ''}<main class="chat-main"><div id="live-error" class="live-error" role="status" hidden><span></span>${button('查看', 'settings.room', { class: 'quiet small' })}</div><div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="收到的弹幕"><div id="chat-empty" class="chat-empty"></div><div id="chat-feed" class="chat-feed" role="log" aria-label="实时弹幕" aria-live="polite" aria-relevant="additions"></div></div><button id="new-messages" class="new-messages" data-action="chat.bottom" hidden>${icon('down')}回到最新弹幕</button></main><footer id="playback-bar" class="playback-bar"><span id="playback-waves" class="playing-waves" aria-hidden="true"><i></i><i></i><i></i></span><span id="playback-caption" class="playback-caption"></span><div class="main-volume">${icon('audio')}<label class="sr-only" for="main-volume-range">播报主音量</label><input id="main-volume-range" type="range" min="0" max="200" step="5" value="${Math.round((snapshot.preferences?.master_volume ?? 1) * 100)}"><output id="main-volume-value" for="main-volume-range">${Math.round((snapshot.preferences?.master_volume ?? 1) * 100)}%</output></div>${iconButton('skip', '跳过当前播报', 'queue.skip')}${iconButton('stop', '停止接收和全部播报', 'queue.stop')}</footer><div id="viewer-menu" class="viewer-menu" hidden></div></div>`;
+    app.innerHTML = `<div class="app-shell"><header class="app-header live-header"><div class="brand"><span data-brand-portrait>${renderHeaderPortrait()}</span><div class="brand-details"><div class="brand-name" data-brand-name>${esc(headerIdentity(snapshot).name)}</div><div class="room-status"><span id="connection-dot" class="status-dot"></span><span id="room-caption"></span></div></div></div><div class="header-actions"><button type="button" id="live-toggle" class="room-button" data-action="live.toggle"></button>${iconButton('settings', '打开设置', 'settings.open')}</div></header>${snapshot.network_disabled ? '<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>' : ''}<main class="chat-main"><div id="live-error" class="live-error" role="status" hidden><span></span>${button('查看', 'settings.room', { class: 'quiet small' })}</div><div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="收到的弹幕"><div id="chat-empty" class="chat-empty"></div><div id="chat-feed" class="chat-feed" role="log" aria-label="实时弹幕" aria-live="polite" aria-relevant="additions"></div></div><button id="new-messages" class="new-messages" data-action="chat.bottom" hidden>${icon('down')}回到最新弹幕</button></main><footer id="playback-bar" class="playback-bar"><span id="playback-waves" class="playing-waves" aria-hidden="true"><i></i><i></i><i></i></span><span id="playback-caption" class="playback-caption"></span><div class="main-volume">${iconButton('audio', '静音', 'audio.mute')}<label class="sr-only" for="main-volume-range">播报主音量</label><input id="main-volume-range" type="range" min="0" max="200" step="5" value="${Math.round((snapshot.preferences?.master_volume ?? 1) * 100)}"><output id="main-volume-value" for="main-volume-range">${Math.round((snapshot.preferences?.master_volume ?? 1) * 100)}%</output></div>${iconButton('skip', '跳过当前播报', 'queue.skip')}${iconButton('stop', '停止接收和全部播报', 'queue.stop')}</footer><div id="viewer-menu" class="viewer-menu" hidden></div></div>`;
     app.querySelector('.header-actions').insertAdjacentHTML('afterbegin', `<button type="button" id="tts-switch" class="tts-switch" data-action="tts.open" aria-haspopup="menu" aria-expanded="false"></button>`);
     app.querySelector('#playback-bar .main-volume').insertAdjacentHTML('afterend', iconButton('trash', '清空待播队列', 'queue.clear'));
     app.querySelector('.app-shell').insertAdjacentHTML('beforeend', '<div id="tts-menu" class="tts-menu" role="menu" hidden></div>');
@@ -372,7 +373,7 @@ function updateLive() {
   const scroll = document.querySelector('#chat-scroll');
   if (!scroll || !snapshot) return;
   const notice = updateFallbackStatus(snapshot.queue || {});
-  const renderSignature = JSON.stringify([snapshot.live, snapshot.queue, snapshot.setup, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.local_services, snapshot.status, notice]);
+  const renderSignature = JSON.stringify([snapshot.live, snapshot.queue, snapshot.setup, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.local_services, snapshot.status, notice]);
   if (liveRenderSignature === renderSignature) return;
   liveRenderSignature = renderSignature;
   const live = snapshot.live || {};
@@ -443,14 +444,31 @@ function updateLive() {
   const playbackText = enabled || queue.current ? notice || playbackCaption(queue) : '播报已关闭';
   if (playbackLabel.textContent !== playbackText) playbackLabel.textContent = playbackText;
   if (playbackLabel.title !== notice) playbackLabel.title = notice;
-  const volume = Math.round((snapshot.preferences?.master_volume ?? 1) * 100);
-  const slider = bar.querySelector('#main-volume-range');
-  if (volumeDraft === null && slider.value !== String(volume)) slider.value = String(volume);
-  bar.querySelector('#main-volume-value').textContent = `${volumeDraft ?? volume}%`;
+  updateVolumeControls();
   bar.querySelector('[data-action="queue.skip"]').disabled = !queue.current;
   const clearQueue = bar.querySelector('[data-action="queue.clear"]');
   if (clearQueue) clearQueue.disabled = !queue.pending?.length;
   bar.querySelector('[data-action="queue.stop"]').disabled = !isRunning && !live.connecting && !queue.current && !queue.pending?.length;
+}
+
+function updateVolumeControls() {
+  const volume = volumeDraft ?? Math.round((snapshot.preferences?.master_volume ?? 1) * 100);
+  const muted = volume === 0 || (volumeDraft === null && !!snapshot.preferences?.muted);
+  const slider = document.querySelector('#main-volume-range');
+  if (slider && slider.value !== String(volume)) slider.value = String(volume);
+  const output = document.querySelector('#main-volume-value');
+  if (output) output.textContent = muted ? '静音' : `${volume}%`;
+  const control = document.querySelector('[data-action="audio.mute"]');
+  if (control) {
+    const label = muted ? '取消静音' : '静音';
+    control.title = label;
+    control.setAttribute('aria-label', label);
+    control.setAttribute('aria-pressed', String(muted));
+    if (control.dataset.muted !== String(muted)) {
+      control.dataset.muted = String(muted);
+      control.innerHTML = icon(muted ? 'muted' : 'audio');
+    }
+  }
 }
 
 const tabs = [['room', 'room', '直播间'], ['voices', 'voice', '声音'], ['rules', 'rules', '播报规则'], ['assets', 'assets', '音效素材'], ['audio', 'audio', '音频输出'], ['appearance', 'appearance', '外观与启动'], ['data', 'folder', '数据与迁移'], ['about', 'info', '关于']];
@@ -907,12 +925,10 @@ async function settleVoiceAuditionChoice() {
 }
 
 async function flushExitEdits() {
-  try {
-    await volumeSave.flush();
-    return await settleVoiceAuditionChoice() && await allowLeaveSettings() && formDrafts.size === 0;
-  } catch {
-    return false;
-  }
+  // Exit is one action: flush pending automatic saves, but never prompt about
+  // an unsubmitted form or keep an owned service running because a save failed.
+  await Promise.allSettled([volumeSave.flush(), settleVoiceAuditionChoice(), flushAutosaves()]);
+  return true;
 }
 
 function renderVoicesSettings() {
@@ -1259,6 +1275,14 @@ async function saveLocalDirectory(provider, directory) {
 }
 
 async function handleAction(action, id, target) {
+  if (action === 'audio.mute') {
+    await volumeSave.flush();
+    const volume = snapshot.preferences?.master_volume ?? 1;
+    const unmute = !!snapshot.preferences?.muted || volume === 0;
+    return command('preferences.save', { preferences: {
+      muted: !unmute, ...(unmute && volume === 0 ? { master_volume: 1 } : {}),
+    } }, { quiet: true, silent: true });
+  }
   if (action === 'external.open') return command('external.open', { page: id }, { quiet: true });
   if (action === 'update.check') {
     if (updateBusy) return;
@@ -1839,7 +1863,7 @@ document.addEventListener('click', async event => {
 document.addEventListener('input', event => {
   if (event.target.id !== 'main-volume-range') return;
   volumeDraft = Number(event.target.value);
-  document.querySelector('#main-volume-value').textContent = `${volumeDraft}%`;
+  updateVolumeControls();
 });
 
 document.addEventListener('change', event => {
@@ -1990,12 +2014,6 @@ async function boot() {
     if (!boot.exitListener && window.__TAURI__?.event?.listen) {
       boot.exitListener = await window.__TAURI__.event.listen('exit-requested', async event => {
         const saved = await flushExitEdits();
-        if (!saved) {
-          const draft = formDrafts.values().next().value;
-          if (draft) { settingsTab = draft.tab; editor = draft.editor; renderSettings(); }
-          if (!settingsDialog.open) settingsDialog.showModal();
-          showToast('还有未完成或保存失败的修改，请补全或丢弃草稿后退出', true);
-        }
         try { await invoke('finish_exit', { saved, requestId: event.payload?.request_id }); }
         catch (error) { showToast(`退出前停止播报失败：${error?.message || error}`, true); }
       });

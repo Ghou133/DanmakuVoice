@@ -1,6 +1,32 @@
 use super::*;
 
 #[tokio::test]
+async fn muting_preserves_volume_and_survives_restart() {
+    let (directory, app) = isolated(true);
+    app.dispatch(
+        "preferences.save",
+        json!({"preferences":{"master_volume":0.65}}),
+    )
+    .await
+    .unwrap();
+    let snapshot = app
+        .dispatch("preferences.save", json!({"preferences":{"muted":true}}))
+        .await
+        .unwrap();
+    assert_eq!(snapshot["preferences"]["muted"], true);
+    assert_eq!(app.lock().unwrap().prefs.playback_volume(), 0.0);
+    drop(app);
+    let reopened = Application::new(directory.path().to_owned(), true).unwrap();
+    assert!(reopened.lock().unwrap().prefs.muted);
+    assert!((reopened.lock().unwrap().prefs.master_volume - 0.65).abs() < 0.00001);
+    reopened
+        .dispatch("preferences.save", json!({"preferences":{"muted":false}}))
+        .await
+        .unwrap();
+    assert!((reopened.lock().unwrap().prefs.playback_volume() - 0.65).abs() < 0.00001);
+}
+
+#[tokio::test]
 async fn polling_omits_unchanged_configuration_and_refreshes_after_edits() {
     let (_directory, app) = isolated(true);
     let full = app.snapshot().unwrap();

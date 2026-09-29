@@ -567,7 +567,7 @@ test('leaving voices waits for the selected live default to save', async () => {
   assert.equal(vm.runInContext('snapshot.rules.default_preset_id', context), 'second');
 });
 
-test('exit waits for a live voice selection and keeps the window on save failure', async () => {
+test('exit flushes automatic saves without confirmation or blocking on failed drafts', async () => {
   const context = appContext();
   const calls = [];
   let release;
@@ -575,17 +575,64 @@ test('exit waits for a live voice selection and keeps the window on save failure
   context.blocked = blocked;
   context.mockVolume = async () => { calls.push('volume'); };
   context.mockLeave = async () => { calls.push('other settings'); return true; };
-  vm.runInContext('volumeSave.flush = mockVolume; allowLeaveSettings = mockLeave; voiceAuditionDefaultSave = blocked', context);
+  vm.runInContext('volumeSave.flush = mockVolume; flushAutosaves = mockLeave; allowLeaveSettings = () => { throw new Error("Must not prompt on exit"); }; voiceAuditionDefaultSave = blocked; formDrafts.set("unsent-key", {});', context);
   const exit = vm.runInContext('flushExitEdits()', context);
   await Promise.resolve();
-  assert.deepEqual(calls, ['volume']);
+  assert.deepEqual(calls, ['volume', 'other settings']);
   release();
   assert.equal(await exit, true);
   assert.deepEqual(calls, ['volume', 'other settings']);
 
   vm.runInContext('voiceAuditionDefaultSave = Promise.reject(new Error("保存失败"))', context);
-  assert.equal(await vm.runInContext('flushExitEdits()', context), false);
-  assert.deepEqual(calls, ['volume', 'other settings', 'volume']);
+  assert.equal(await vm.runInContext('flushExitEdits()', context), true);
+  assert.deepEqual(calls, ['volume', 'other settings', 'volume', 'other settings']);
+});
+
+test('mute click preserves gain, unmutes on the next click and restores a zero slider', async () => {
+  const context = appContext();
+  const calls = [];
+  context.saveMute = async (action, payload) => {
+    assert.equal(action, 'preferences.save');
+    calls.push(structuredClone(payload.preferences));
+    context.nextPreferences = payload.preferences;
+    vm.runInContext('Object.assign(snapshot.preferences, nextPreferences)', context);
+  };
+  vm.runInContext('snapshot.preferences = {master_volume: 0.65, muted: false}; command = saveMute;', context);
+  const act = vm.runInContext('handleAction', context);
+  await act('audio.mute');
+  assert.equal(vm.runInContext('snapshot.preferences.master_volume', context), 0.65);
+  assert.equal(vm.runInContext('snapshot.preferences.muted', context), true);
+  await act('audio.mute');
+  assert.equal(vm.runInContext('snapshot.preferences.muted', context), false);
+  assert.equal(vm.runInContext('snapshot.preferences.master_volume', context), 0.65);
+  vm.runInContext('snapshot.preferences.master_volume = 0;', context);
+  await act('audio.mute');
+  assert.equal(vm.runInContext('snapshot.preferences.master_volume', context), 1);
+  assert.equal(vm.runInContext('snapshot.preferences.muted', context), false);
+  assert.equal(calls.length, 3);
+});
+
+test('muted volume control has a different icon and accessible toggle state', () => {
+  const context = appContext();
+  const slider = {value: ''};
+  const output = {textContent: ''};
+  const control = {dataset: {}, attrs: {}, setAttribute(name, value) {this.attrs[name] = value;}};
+  context.document.querySelector = selector => selector === '#main-volume-range' ? slider : selector === '#main-volume-value' ? output : control;
+  vm.runInContext('snapshot.preferences = {master_volume: 0.65, muted: false}; updateVolumeControls();', context);
+  const unmutedIcon = control.innerHTML;
+  assert.equal(control.attrs['aria-label'], '静音');
+  assert.equal(output.textContent, '65%');
+  vm.runInContext('snapshot.preferences.muted = true; updateVolumeControls();', context);
+  assert.notEqual(control.innerHTML, unmutedIcon);
+  assert.equal(control.attrs['aria-pressed'], 'true');
+  assert.equal(control.title, '取消静音');
+  assert.equal(output.textContent, '静音');
+  assert.equal(slider.value, '65');
+  vm.runInContext('snapshot.preferences.master_volume = 0; snapshot.preferences.muted = false; updateVolumeControls();', context);
+  assert.equal(control.attrs['aria-pressed'], 'true');
+  vm.runInContext('volumeDraft = 80; updateVolumeControls();', context);
+  assert.equal(control.attrs['aria-pressed'], 'false');
+  assert.equal(control.innerHTML, unmutedIcon);
 });
 
 test('failed audition voice switch restores the saved default', async () => {
