@@ -30,20 +30,37 @@ pub struct DeviceInfo {
 
 #[derive(Debug, Error)]
 pub enum AudioError {
-    #[error("没有可用的音频输出设备")]
+    #[error("没有可用的音频输出设备 [DV-A01]")]
     NoDevice,
-    #[error("找不到音频输出设备：{0}")]
+    #[error("找不到音频输出设备：{0} [DV-A02]")]
     DeviceNotFound(String),
-    #[error("同名音频设备不止一个：{0}")]
+    #[error("同名音频设备不止一个：{0} [DV-A03]")]
     AmbiguousDevice(String),
-    #[error("音频设备操作失败：{0}")]
+    #[error("音频设备操作失败：{0} [DV-A04]")]
     Backend(#[from] cpal::Error),
-    #[error("设备不支持的采样格式：{0:?}")]
+    #[error("设备不支持的采样格式：{0:?} [DV-A05]")]
     UnsupportedSampleFormat(cpal::SampleFormat),
     #[error("播放已取消")]
     Cancelled,
-    #[error("音频输出设备已断开")]
+    #[error("音频输出设备已断开 [DV-A07]")]
     Disconnected,
+    #[error("输出设备连续 5 秒未消耗音频 [DV-A08]")]
+    Stalled,
+}
+
+impl AudioError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoDevice => "DV-A01",
+            Self::DeviceNotFound(_) => "DV-A02",
+            Self::AmbiguousDevice(_) => "DV-A03",
+            Self::Backend(_) => "DV-A04",
+            Self::UnsupportedSampleFormat(_) => "DV-A05",
+            Self::Cancelled => "DV-A06",
+            Self::Disconnected => "DV-A07",
+            Self::Stalled => "DV-A08",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -200,7 +217,7 @@ impl AudioWriter {
                 }
                 if stalled_since.elapsed() >= stall_timeout {
                     self.shared.disconnected.store(true, Ordering::Release);
-                    return Err(AudioError::Disconnected);
+                    return Err(AudioError::Stalled);
                 }
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(AudioError::Cancelled),
@@ -243,7 +260,7 @@ impl AudioWriter {
                 last_progress = Instant::now();
             } else if last_progress.elapsed() >= stall_timeout {
                 self.shared.disconnected.store(true, Ordering::Release);
-                return Err(AudioError::Disconnected);
+                return Err(AudioError::Stalled);
             }
             previous_len = remaining;
             tokio::select! {
@@ -602,7 +619,7 @@ mod tests {
         )
         .await
         .expect("stalled writer did not finish");
-        assert!(matches!(result, Err(AudioError::Disconnected)));
+        assert!(matches!(result, Err(AudioError::Stalled)));
         assert!(writer.disconnected());
     }
 
@@ -618,7 +635,7 @@ mod tests {
         )
         .await
         .expect("stalled drain did not finish");
-        assert!(matches!(result, Err(AudioError::Disconnected)));
+        assert!(matches!(result, Err(AudioError::Stalled)));
         assert!(writer.disconnected());
     }
 }

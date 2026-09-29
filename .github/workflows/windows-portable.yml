@@ -1,4 +1,4 @@
-name: Windows 构建、压缩与发布
+name: Windows 验证与微软商店 MSIX 打包
 
 on:
   push:
@@ -88,7 +88,7 @@ jobs:
         env:
           DANMAKUVOICE_TEST_FFMPEG: ${{ runner.temp }}\ffmpeg-input\ffmpeg.exe
         run: cargo test --workspace --locked
-      - name: Build direct EXE and verify matching source
+      - name: Build internal executable and verify matching source
         run: |
           $inputDir = Join-Path $env:RUNNER_TEMP 'ffmpeg-input'
           ./scripts/package-portable.ps1 `
@@ -122,30 +122,23 @@ jobs:
           } finally {
             $env:CARGO_HOME = $previousCargoHome
           }
-      - name: Compress and verify release ZIP
+      - name: Package Microsoft Store submission
         run: |
-          python scripts/package-release.py --audit dist/DanmakuVoice-audit-ci.zip --exe dist/DanmakuVoice.exe --source dist/DanmakuVoice-source.zip --output dist/release --commit $env:GITHUB_SHA --version $env:RELEASE_VERSION
-          if ($LASTEXITCODE -ne 0) { throw 'Release packaging failed' }
-          $zipExtract = Join-Path $env:RUNNER_TEMP 'danmakuvoice-release-check'
-          Expand-Archive -LiteralPath dist/release/DanmakuVoice-windows-x64.zip -DestinationPath $zipExtract
-          $extractedExe = Join-Path $zipExtract 'DanmakuVoice.exe'
-          if ((Get-FileHash -LiteralPath $extractedExe).Hash -ne (Get-FileHash -LiteralPath dist/DanmakuVoice.exe).Hash) { throw 'Extracted EXE differs' }
-          ./scripts/smoke-portable.ps1 -ApplicationExe $extractedExe
+          ./scripts/package-msix.ps1 `
+            -AuditZip 'dist/DanmakuVoice-audit-ci.zip' `
+            -ApplicationExe 'dist/DanmakuVoice.exe' `
+            -FfmpegBinary (Join-Path $env:RUNNER_TEMP 'ffmpeg-input/ffmpeg.exe') `
+            -SourceZip 'dist/DanmakuVoice-source.zip' `
+            -Commit $env:GITHUB_SHA -Version $env:RELEASE_VERSION `
+            -OutputDirectory 'dist/store-submission'
       - uses: actions/upload-artifact@v4
         with:
-          name: DanmakuVoice-release-assets
-          path: dist/release/
+          name: DanmakuVoice-store-submission
+          path: dist/store-submission/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
           compression-level: 0
-
-  publish:
-    if: startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
-    needs: windows
-    permissions:
-      contents: write
-      actions: read
-    uses: ./.github/workflows/publish-release.yml
-    with:
-      release_tag: ${{ github.ref_name }}
-      build_run_id: ${{ github.run_id }}
+      - name: Explain submission status
+        run: |
+          'MSIX 打包完成，尚未经过微软商店签名；请上传 Partner Center 产品 9P4DFD8HGN03。' >> $env:GITHUB_STEP_SUMMARY
+          '构建产物仅包含商店提交包、配套源码及校验信息，不自动发布 EXE 或未签名安装包。' >> $env:GITHUB_STEP_SUMMARY

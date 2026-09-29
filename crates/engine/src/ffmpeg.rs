@@ -29,6 +29,8 @@ pub enum DecodeError {
     Tts(String),
     #[error("音频组件无法解码此音频，退出码：{0:?}")]
     InvalidAudio(Option<i32>),
+    #[error("音频管道关闭，音频组件退出码：{0:?}")]
+    ProcessExit(Option<i32>),
     #[error("音频格式未对齐或数据截断")]
     Misaligned,
     #[error("WAV 流无效：{0}")]
@@ -246,6 +248,20 @@ async fn finish_child(
     cancel: &CancellationToken,
 ) -> Result<(), DecodeError> {
     if let Err(error) = result {
+        // A broken stdin pipe often means the decoder has already crashed.
+        // Preserve its exit code instead of replacing it with a pipe error.
+        if matches!(error, DecodeError::Pipe(_)) {
+            let status = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => None,
+                result = tokio::time::timeout(std::time::Duration::from_millis(250), child.wait()) => result.ok().and_then(Result::ok),
+            };
+            if let Some(status) = status
+                && !status.success()
+            {
+                return Err(DecodeError::ProcessExit(status.code()));
+            }
+        }
         let _ = child.kill().await;
         return Err(error);
     }
@@ -308,6 +324,37 @@ async fn read_pcm<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decoder_exit_probe_child() {
+        if std::env::var_os("DANMAKUVOICE_DECODER_EXIT_PROBE").is_some() {
+            std::process::exit(37);
+        }
+    }
+
+    #[tokio::test]
+    async fn broken_pipe_preserves_decoder_exit_code() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "ffmpeg::tests::decoder_exit_probe_child"])
+            .env("DANMAKUVOICE_DECODER_EXIT_PROBE", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        hide_console(&mut command);
+        let mut child = command.spawn().unwrap();
+        child.wait().await.unwrap();
+        let result = finish_child(
+            &mut child,
+            Err(DecodeError::Pipe(io::Error::from(
+                io::ErrorKind::BrokenPipe,
+            ))),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(result, Err(DecodeError::ProcessExit(Some(37)))));
+    }
+
     use crate::audio::test_writer;
     use crate::tts::{send_bytes, spawn_stream};
     use tokio::sync::oneshot;

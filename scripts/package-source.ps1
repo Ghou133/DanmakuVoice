@@ -77,7 +77,7 @@ foreach ($entry in $manifest.entries) {
 }
 $rootFiles = @('.gitignore', '.gitattributes', 'AGENTS.md', 'ARCHITECTURE.md', 'Cargo.toml',
     'Cargo.lock', 'LICENSE', 'NOTICE.md', 'MIGRATION.md', 'PROGRESS.md', 'README.md', 'rust-toolchain.toml')
-$prefixes = @('crates/', 'docs/', 'scripts/', '.github/workflows/')
+$prefixes = @('crates/', 'docs/', 'scripts/', 'packaging/', '.github/workflows/')
 foreach ($path in $tracked) {
     $allowed = ($path -in $rootFiles) -or $supplementPaths.Contains($path) -or
         @($prefixes | Where-Object { $path.StartsWith($_, [StringComparison]::Ordinal) }).Count -gt 0

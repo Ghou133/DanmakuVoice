@@ -6,17 +6,17 @@ use zeroize::Zeroizing;
 
 #[derive(Debug, Error)]
 pub enum SecretError {
-    #[error("凭据为空")]
+    #[error("凭据为空 [DV-K01]")]
     Empty,
-    #[error("凭据超过系统加密接口的长度限制")]
+    #[error("凭据超过系统加密接口的长度限制 [DV-K02]")]
     TooLarge,
-    #[error("Windows 凭据保护失败：{0}")]
+    #[error("Windows 凭据保护失败：{0} [DV-K03]")]
     Protect(std::io::Error),
-    #[error("Windows 凭据解密失败：{0}")]
+    #[error("Windows 凭据解密失败：{0} [DV-K04]")]
     Unprotect(std::io::Error),
-    #[error("凭据不是 UTF-8 文本")]
+    #[error("凭据不是 UTF-8 文本 [DV-K05]")]
     Utf8,
-    #[error("此平台不支持 Windows 凭据保护")]
+    #[error("此平台不支持 Windows 凭据保护 [DV-K06]")]
     UnsupportedPlatform,
 }
 

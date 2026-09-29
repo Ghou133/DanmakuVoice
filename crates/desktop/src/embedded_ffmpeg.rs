@@ -1,5 +1,5 @@
-//! The distributed application is one EXE. FFmpeg remains a separate process
-//! for audio decoding, so materialize its pinned bytes into private app data.
+//! MSIX runs FFmpeg directly from its protected package directory. Unpackaged
+//! builds retain the existing verified cache for local development and legacy use.
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -140,17 +140,45 @@ fn materialize(data_dir: &Path) -> io::Result<PathBuf> {
 }
 
 pub fn ensure(data_dir: &Path) -> Result<PathBuf, String> {
+    if let Some(root) = crate::package::installed_root()? {
+        return packaged_binary(&root).map_err(|error| {
+            format!("应用安装包中的音频组件缺失或损坏，请通过 Microsoft Store 修复或重新安装：{error} [DV-C09]")
+        });
+    }
     materialize(data_dir).map_err(|error| {
         format!(
-            "无法准备内置音频组件（{}）：{error}。请检查用户数据目录的写入权限",
+            "无法准备内置音频组件（{}）：{error}。请检查用户数据目录的写入权限 [DV-C08]",
             path(data_dir).display()
         )
     })
 }
 
+fn packaged_binary(root: &Path) -> io::Result<PathBuf> {
+    // Do not copy this file to AppData: its trust is tied to the installed MSIX.
+    // Never fall back to the embedded bytes if an installed package is damaged.
+    let target = root.join("ffmpeg.exe");
+    if !valid_file(&target)? {
+        return Err(io::Error::other("FFmpeg 文件校验失败"));
+    }
+    Ok(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_ffmpeg_stays_in_the_package_and_rejects_damage() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(packaged_binary(root.path()).is_err());
+        let target = root.path().join("ffmpeg.exe");
+        fs::write(&target, FFMPEG).unwrap();
+        assert_eq!(packaged_binary(root.path()).unwrap(), target);
+        assert!(!root.path().join("cache").exists());
+        fs::write(&target, b"damaged").unwrap();
+        assert!(packaged_binary(root.path()).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"damaged");
+    }
 
     #[test]
     fn embedded_binary_matches_pinned_hash_and_repairs_cache() {

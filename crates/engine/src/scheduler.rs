@@ -349,8 +349,8 @@ impl Scheduler {
                     let id = self.current.take().unwrap().job.id;
                     match result {
                         Ok(Ok(outcome)) => self.record(id, JobState::Played, outcome.detail),
-                        Ok(Err(detail)) => self.record(id, JobState::Failed, detail),
-                        Err(join_error) => self.record(id, JobState::Failed, format!("播报任务异常：{join_error}")),
+                        Ok(Err(detail)) => self.record(id, JobState::Failed, crate::error_codes::tag(detail, "DV-Q01")),
+                        Err(_) => self.record(id, JobState::Failed, "播报任务异常，请重试 [DV-Q02]"),
                     }
                     self.start_next();
                     self.publish();

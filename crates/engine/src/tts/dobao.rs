@@ -593,10 +593,23 @@ fn ws_error(inner: &Inner, error: tungstenite::Error, stage: &'static str) -> Tt
             reason,
         };
     }
+    let reason = match error {
+        tungstenite::Error::Tls(_) => "TLS 安全连接失败，请检查系统时间、证书及网络代理",
+        tungstenite::Error::Io(error) => match error.kind() {
+            std::io::ErrorKind::TimedOut => "连接或接收超时",
+            std::io::ErrorKind::ConnectionRefused => "连接被拒绝，请检查网络或防火墙",
+            std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof => "连接中断，请检查网络或代理",
+            _ => "无法连接或传输数据，请检查网络、DNS 或代理",
+        },
+        _ => "WebSocket 传输失败",
+    };
     TtsError::Network {
         service: SERVICE,
         stage,
-        reason: "WebSocket 传输失败",
+        reason,
     }
 }
 
@@ -660,6 +673,39 @@ mod tests {
     };
 
     const FRAME: [u8; 11] = [0xff, 0xf1, 0x50, 0x80, 0x01, 0x7f, 0xfc, 1, 2, 3, 4];
+
+    #[test]
+    fn network_diagnostics_distinguish_failures_without_exposing_source_errors() {
+        let client = DoubaoClient::with_endpoint(
+            config(),
+            Url::parse(WS_ENDPOINT).unwrap(),
+            Arc::new(Mutex::new(GateState::default())),
+            Arc::new(AtomicU8::new(0)),
+            Duration::ZERO,
+        )
+        .unwrap();
+        for (kind, expected) in [
+            (std::io::ErrorKind::TimedOut, "超时"),
+            (std::io::ErrorKind::ConnectionRefused, "连接被拒绝"),
+            (std::io::ErrorKind::ConnectionReset, "连接中断"),
+            (std::io::ErrorKind::Other, "DNS"),
+        ] {
+            let error = ws_error(
+                &client.inner,
+                tungstenite::Error::Io(std::io::Error::new(kind, "sessionid=private-value")),
+                "连接",
+            );
+            assert!(error.to_string().contains(expected));
+            assert!(!error.to_string().contains("private-value"));
+            assert_eq!(client.pause_reason(), None);
+        }
+        let error = ws_error(
+            &client.inner,
+            tungstenite::Error::Tls(tungstenite::error::TlsError::InvalidDnsName),
+            "连接",
+        );
+        assert!(error.to_string().contains("TLS"));
+    }
 
     fn config() -> DoubaoConfig {
         DoubaoConfig::new(

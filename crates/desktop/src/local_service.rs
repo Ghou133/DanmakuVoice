@@ -46,7 +46,7 @@ impl Kind {
 pub struct ServiceView<'a> {
     pub directory: Option<&'a Path>,
     pub state: &'static str,
-    pub message: &'a str,
+    pub message: String,
     pub owned: bool,
     pub manual_stopped: bool,
 }
@@ -89,7 +89,11 @@ impl ServiceState {
         ServiceView {
             directory: self.directory.as_deref(),
             state: self.state,
-            message: &self.message,
+            message: if self.state == "failed" {
+                danmakuvoice_engine::error_codes::tag(&self.message, "DV-L01")
+            } else {
+                self.message.clone()
+            },
             owned: self.process.is_some(),
             manual_stopped: self.manual_stopped,
         }

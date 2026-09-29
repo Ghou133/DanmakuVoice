@@ -25,77 +25,77 @@ const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("文件操作失败：{0}")]
+    #[error("文件操作失败：{0} [DV-S01]")]
     Io(#[from] io::Error),
-    #[error("数据库操作失败：{0}")]
+    #[error("数据库操作失败：{0} [DV-S02]")]
     Sql(#[from] rusqlite::Error),
-    #[error("配置格式错误：{0}")]
+    #[error("配置格式错误：{0} [DV-S03]")]
     Json(#[from] serde_json::Error),
-    #[error("不支持的数据库版本：{0}")]
+    #[error("不支持的数据库版本：{0} [DV-S04]")]
     UnsupportedSchema(i64),
-    #[error("不支持的音频格式：{0}")]
+    #[error("不支持的音频格式：{0} [DV-S05]")]
     UnsupportedAudio(String),
-    #[error("音频素材超过 128 MiB 限制")]
+    #[error("音频素材超过 128 MiB 限制 [DV-S06]")]
     AssetTooLarge,
-    #[error("素材仍被规则引用：{0}")]
+    #[error("素材仍被规则引用：{0} [DV-S07]")]
     AssetReferenced(String),
-    #[error("素材不存在：{0}")]
+    #[error("素材不存在：{0} [DV-S08]")]
     AssetMissing(String),
-    #[error("备份文件不属于此数据目录")]
+    #[error("备份文件不属于此数据目录 [DV-S09]")]
     InvalidBackupPath,
-    #[error("服务连接不存在：{0}")]
+    #[error("服务连接不存在：{0} [DV-S10]")]
     ConnectionMissing(String),
-    #[error("声音预设不存在：{0}")]
+    #[error("声音预设不存在：{0} [DV-S11]")]
     PresetMissing(String),
-    #[error("用户声音绑定不存在：{0}")]
+    #[error("用户声音绑定不存在：{0} [DV-S12]")]
     BindingMissing(String),
-    #[error("观众名称不能为空、超过 200 字，或包含前后空格与控制字符")]
+    #[error("观众名称不能为空、超过 200 字，或包含前后空格与控制字符 [DV-S13]")]
     InvalidBindingName,
-    #[error("此观众名称已有声音绑定，请编辑原有绑定")]
+    #[error("此观众名称已有声音绑定，请编辑原有绑定 [DV-S14]")]
     DuplicateBindingName,
-    #[error("此观众 UID 已有声音绑定，请编辑原有绑定")]
+    #[error("此观众 UID 已有声音绑定，请编辑原有绑定 [DV-S15]")]
     DuplicateBindingUid,
     #[error("播报规则无效：{0}")]
     InvalidRules(#[from] RuleError),
-    #[error("声音预设是当前默认声音，请先更换默认声音")]
+    #[error("声音预设是当前默认声音，请先更换默认声音 [DV-S17]")]
     PresetIsDefault,
-    #[error("声音预设仍被 {0} 条用户绑定引用")]
+    #[error("声音预设仍被 {0} 条用户绑定引用 [DV-S18]")]
     PresetReferenced(i64),
-    #[error("服务连接仍被 {0} 个声音预设引用")]
+    #[error("服务连接仍被 {0} 个声音预设引用 [DV-S19]")]
     ConnectionReferenced(i64),
-    #[error("服务连接仍被声音预设引用，不能更换服务类型")]
+    #[error("服务连接仍被声音预设引用，不能更换服务类型 [DV-S20]")]
     ConnectionProviderInUse,
-    #[error("服务连接地址不能包含凭据、查询参数或片段")]
+    #[error("服务连接地址不能包含凭据、查询参数或片段 [DV-S21]")]
     CredentialsInUrl,
-    #[error("服务连接地址无效")]
+    #[error("服务连接地址无效 [DV-S22]")]
     InvalidEndpoint,
-    #[error("服务连接超时无效：{0}")]
+    #[error("服务连接超时无效：{0} [DV-S23]")]
     InvalidConnectionTimeout(&'static str),
     #[error("凭据保护失败：{0}")]
     Secret(#[from] SecretError),
-    #[error("已保存的 B 站会话格式无效，请重新扫码")]
+    #[error("已保存的 B 站会话格式无效，请重新扫码 [DV-S25]")]
     InvalidBiliSession,
-    #[error("直播设置无效")]
+    #[error("直播设置无效 [DV-S26]")]
     InvalidLiveSettings,
-    #[error("豆包设备标识无效，请检查本机数据目录")]
+    #[error("豆包设备标识无效，请检查本机数据目录 [DV-S27]")]
     InvalidDoubaoDevice,
-    #[error("桌面偏好设置无效")]
+    #[error("桌面偏好设置无效 [DV-S28]")]
     InvalidDesktopPreferences,
-    #[error("参考音频路径无效、不可读或文件已删除")]
+    #[error("参考音频路径无效、不可读或文件已删除 [DV-S29]")]
     ReferenceAudioUnavailable,
-    #[error("参考配置无效或服务类型不匹配")]
+    #[error("参考配置无效或服务类型不匹配 [DV-S30]")]
     InvalidReferenceProfile,
-    #[error("Fish Audio 参数无效或连接类型不匹配")]
+    #[error("Fish Audio 参数无效或连接类型不匹配 [DV-S31]")]
     InvalidFishAudioSettings,
-    #[error("dots.tts 参数无效或连接类型不匹配")]
+    #[error("dots.tts 参数无效或连接类型不匹配 [DV-S32]")]
     InvalidDotsSettings,
-    #[error("Fish Audio 音色名称不能为空")]
+    #[error("Fish Audio 音色名称不能为空 [DV-S33]")]
     InvalidFishVoiceName,
-    #[error("Fish Audio 音色 ID 或页面链接无效")]
+    #[error("Fish Audio 音色 ID 或页面链接无效 [DV-S34]")]
     InvalidFishVoiceId,
-    #[error("试听文本不能为空、不能超过 2000 字，且不能包含控制字符")]
+    #[error("试听文本不能为空、不能超过 2000 字，且不能包含控制字符 [DV-S35]")]
     InvalidAuditionText,
-    #[error("数据已重置，但数据库仍被其他实例占用；请关闭其他实例后重新清除")]
+    #[error("数据已重置，但数据库仍被其他实例占用；请关闭其他实例后重新清除 [DV-S36]")]
     DataResetBusy,
 }
 

@@ -3,6 +3,7 @@
 mod app;
 mod embedded_ffmpeg;
 mod local_service;
+mod package;
 mod resources;
 #[cfg(windows)]
 mod startup;
@@ -173,7 +174,7 @@ async fn snapshot(
     let snapshot =
         tauri::async_runtime::spawn_blocking(move || state.snapshot_since(config_revision))
             .await
-            .map_err(|_| "无法读取程序状态".to_string())??;
+            .map_err(|_| "无法读取程序状态 [DV-X12]".to_string())??;
     exit_bridge.frontend_ready_if(generation);
     Ok(snapshot)
 }
@@ -183,7 +184,10 @@ async fn check_update(
     state: tauri::State<'_, Application>,
     updates: tauri::State<'_, updates::UpdateChecker>,
 ) -> Result<updates::UpdateInfo, String> {
-    updates.check(state.network_disabled()?).await
+    updates
+        .check(state.network_disabled()?)
+        .await
+        .map_err(|error| danmakuvoice_engine::error_codes::tag(error, "DV-U01"))
 }
 
 #[tauri::command]
@@ -238,6 +242,8 @@ async fn dispatch(
             "fish_keys" => fish::API_KEYS_URL,
             "fish_discovery" => fish::DISCOVERY_URL,
             "project" => updates::REPOSITORY,
+            "store_updates" => updates::STORE_UPDATES,
+            "releases" if package::installed_root()?.is_some() => updates::STORE_UPDATES,
             "releases" => updates::RELEASES,
             "update_download" => {
                 update = updates.check(state.network_disabled()?).await?;
@@ -297,7 +303,7 @@ fn open_official_page(url: &str) -> Result<(), String> {
         )
     };
     if result as isize <= 32 {
-        Err("无法打开官方网站，请检查默认浏览器".into())
+        Err("无法打开页面，请检查默认浏览器或 Microsoft Store 是否可用 [DV-X11]".into())
     } else {
         Ok(())
     }
@@ -318,10 +324,16 @@ fn main() {
             if error.downcast_ref::<MissingWebView2Runtime>().is_some() {
                 show_missing_webview2_runtime();
             } else {
-                show_startup_error(&error.to_string());
+                show_startup_error(&danmakuvoice_engine::error_codes::tag(
+                    error.to_string(),
+                    "DV-X13",
+                ));
             }
         }
-        eprintln!("超绝可爱弹幕姬启动失败：{error}");
+        eprintln!(
+            "超绝可爱弹幕姬启动失败：{}",
+            danmakuvoice_engine::error_codes::tag(error.to_string(), "DV-X13")
+        );
         std::process::exit(1);
     }
 }
@@ -672,7 +684,7 @@ fn show_missing_webview2_runtime() {
     let title: Vec<u16> = "超绝可爱弹幕姬需要 WebView2 Runtime\0"
         .encode_utf16()
         .collect();
-    let message: Vec<u16> = "这台电脑尚未检测到可用的 Microsoft Edge WebView2 Runtime。\n\n是否打开微软官方下载页？安装后请重新启动超绝可爱弹幕姬。\0".encode_utf16().collect();
+    let message: Vec<u16> = "这台电脑尚未检测到可用的 Microsoft Edge WebView2 Runtime。\n\n是否打开微软官方下载页？安装后请重新启动超绝可爱弹幕姬。 [DV-X14]\0".encode_utf16().collect();
     if unsafe {
         MessageBoxW(
             std::ptr::null_mut(),

@@ -35,35 +35,72 @@ pub enum AudioEncoding {
 /// request, API key, Cookie, or source exception.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum TtsError {
-    #[error("{service} 配置无效：{reason}")]
+    #[error("{service} 配置无效：{reason} [{code}]", code = self.code())]
     Configuration {
         service: &'static str,
         reason: &'static str,
     },
-    #[error("{service} 返回 HTTP {status}：{reason}")]
+    #[error("{service} 返回 HTTP {status}：{reason} [{code}]", code = self.code())]
     HttpStatus {
         service: &'static str,
         status: u16,
         reason: &'static str,
     },
-    #[error("{service} {stage}请求失败：{reason}")]
+    #[error("{service} {stage}请求失败：{reason} [{code}]", code = self.code())]
     Network {
         service: &'static str,
         stage: &'static str,
         reason: &'static str,
     },
-    #[error("{service} 音频无效：{reason}")]
+    #[error("{service} 音频无效：{reason} [{code}]", code = self.code())]
     InvalidAudio {
         service: &'static str,
         reason: &'static str,
     },
-    #[error("{service} 响应无效：{reason}")]
+    #[error("{service} 响应无效：{reason} [{code}]", code = self.code())]
     Protocol {
         service: &'static str,
         reason: &'static str,
     },
     #[error("语音请求已取消")]
     Cancelled,
+}
+
+impl TtsError {
+    pub fn code(&self) -> String {
+        let (service, kind) = match self {
+            Self::Configuration { service, .. } => (*service, "01"),
+            Self::HttpStatus {
+                service,
+                status: 401,
+                ..
+            } => (*service, "02"),
+            Self::HttpStatus {
+                service,
+                status: 403,
+                ..
+            } => (*service, "03"),
+            Self::HttpStatus {
+                service,
+                status: 429,
+                ..
+            } => (*service, "04"),
+            Self::HttpStatus { service, .. } => (*service, "05"),
+            Self::Network { service, .. } => (*service, "06"),
+            Self::InvalidAudio { service, .. } => (*service, "07"),
+            Self::Protocol { service, .. } => (*service, "08"),
+            Self::Cancelled => return "DV-T009".into(),
+        };
+        let provider = match service {
+            "豆包" => "D",
+            "豆包扫码登录" => "Q",
+            "Fish Audio" => "F",
+            "GPT-SoVITS" => "S",
+            "dots.tts" => "L",
+            _ => "0",
+        };
+        format!("DV-T{provider}{kind}")
+    }
 }
 
 /// A single TTS request's bounded stream. `cancel` stops network reads and

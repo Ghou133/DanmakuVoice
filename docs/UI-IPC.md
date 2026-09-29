@@ -117,6 +117,7 @@ is a test-only process flag: network commands reject with a clear error.
 | `assets.delete` | `{id,confirmed:true}` |
 | `preferences.save` | `{preferences:DesktopPreferences,ffmpeg_path?:"path",confirmed?:true}` device/path change needs confirmed, stops all jobs |
 | `devices.refresh` | `{}` |
+| `audio.test` | `{}` queues a 600 ms local calibration tone through the embedded FFmpeg and selected output, without a TTS account or network. Uses existing master volume and queue cancellation; muted/zero volume is rejected. Completion or sanitized failure appears in queue history. |
 | `startup.set` | `{enabled:true}` |
 | `configuration.export` | `{path:"new absolute file path"}` never overwrites |
 | `migration.preview` | `{path:"old config.json"}` result is engine LegacyPreview |

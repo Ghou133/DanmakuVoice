@@ -1,4 +1,4 @@
-import { escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback } from './helpers.mjs';
+import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback } from './helpers.mjs';
 import { createAutosaveQueue } from './autosave.mjs';
 import { mountSelects, closeSelect, stripSelects } from './select.mjs';
 
@@ -110,8 +110,8 @@ let windowFocused = document.hasFocus();
 let nativeActive = null;
 let effectiveActive = null;
 const invoke = (command, args) => {
-  if (!window.__TAURI__?.core?.invoke) return Promise.reject(new Error('桌面连接不可用，请从超绝可爱弹幕姬程序打开。'));
-  return window.__TAURI__.core.invoke(command, args);
+  if (!window.__TAURI__?.core?.invoke) return Promise.reject(new Error('桌面连接不可用，请从超绝可爱弹幕姬程序打开。 [DV-UI02]'));
+  return window.__TAURI__.core.invoke(command, args).catch(error => { throw new Error(errorMessage(error, command === 'snapshot' ? 'DV-X12' : command === 'check_update' ? 'DV-U01' : 'DV-UI02')); });
 };
 
 function showToast(message, isError = false) {
@@ -124,7 +124,7 @@ function showToast(message, isError = false) {
 }
 
 function showError(error) {
-  errorText = String(error?.message || error || '操作没有完成，请重试。');
+  errorText = errorMessage(error);
   const target = document.querySelector('#step-error');
   if (target) { target.textContent = errorText; target.hidden = false; }
   const settingsError = document.querySelector('#settings-error');
@@ -314,8 +314,8 @@ async function startQr(provider, connectionId) {
   try {
     await command(`${provider === 'bilibili' ? 'bili' : 'doubao'}.qr.begin`, connectionId ? { connection_id: connectionId } : {});
     if (generation === qrGeneration && !disposed) scheduleQrPoll(provider, generation);
-  } catch {
-    qrFailure = '二维码暂不可用，请重新生成';
+  } catch (error) {
+    qrFailure = errorMessage(error, provider === 'bilibili' ? 'DV-X01' : 'DV-X02');
   } finally { qrBusy = false; updateQr(); }
 }
 
@@ -348,9 +348,9 @@ function scheduleQrPoll(provider, generation) {
         else if (provider === 'bilibili' && step === 'login' && next.setup?.room_id) setStep('tts');
         else if (provider === 'doubao' && step === 'doubaoQr') { setupTts = true; setStep('ready'); }
       } else if (next.qr?.status !== 'expired') scheduleQrPoll(provider, generation);
-    } catch {
+    } catch (error) {
       const needsRoom = qrNeedsRoomFallback(snapshot);
-      qrFailure = needsRoom ? '' : '查询登录状态失败，请重新扫码';
+      qrFailure = needsRoom ? '' : errorMessage(error, provider === 'bilibili' ? 'DV-X01' : 'DV-X02');
       if (needsRoom && settingsDialog.open && editor?.type === 'qr' && editor.provider === 'bilibili') {
         editor = null;
         renderSettings();
@@ -536,7 +536,16 @@ function updateAttribute(node, name, value) {
   if (node && node.getAttribute(name) !== value) node.setAttribute(name, value);
 }
 
+function updatePlaybackIssue() {
+  const target = document.querySelector('#voice-playback-error, #audio-playback-error');
+  if (!target) return;
+  const message = playbackIssue(snapshot?.queue);
+  target.textContent = message;
+  target.hidden = !message;
+}
+
 function updateServiceIndicators() {
+  updatePlaybackIssue();
   for (const row of settingsDialog.querySelectorAll('[data-service-provider]')) {
     const provider = row.dataset.serviceProvider;
     const status = providerStatus(provider, serviceConnection(provider));
@@ -734,11 +743,11 @@ function mountAutosaves() {
           }
         } else if (record.touched) { copyFormDraft(form, record); if (oldKey !== record.key) formDrafts.delete(oldKey); }
       },
-      onError: error => { showAutoState(form, String(error?.message || error), 'error'); record.touched = true; copyFormDraft(form, record); },
+      onError: error => { showAutoState(form, errorMessage(error), 'error'); record.touched = true; copyFormDraft(form, record); },
       onState: state => {
         if (record.invalid) return;
         if (state.saving) showAutoState(form);
-        else if (state.error) showAutoState(form, String(state.error?.message || state.error), 'error');
+        else if (state.error) showAutoState(form, errorMessage(state.error), 'error');
         else if (state.dirty || !record.touched) showAutoState(form);
       },
     });
@@ -757,7 +766,7 @@ function scheduleAutosave(form, immediate = false, deferUid = false, composing =
   try { envelope = collectAutosave(form); record.invalid = ''; }
   catch (error) {
     record.invalid = error.message; record.queue.cancel(); record.lastScheduled = '';
-    showAutoState(form, `${error.message} · 草稿已保留`, 'draft'); return;
+    showAutoState(form, errorMessage(`${error.message} · 草稿已保留`), 'draft'); return;
   }
   const signature = JSON.stringify(envelope);
   if (signature === record.baseline && !record.queue.saving) {
@@ -816,6 +825,9 @@ function renderSettings() {
 }
 
 function renderAbout() {
+  if (snapshot.update_channel === 'store') {
+    return `${heading('超绝可爱弹幕姬')}<div class="about-mark">${mark}</div><dl class="key-value"><dt>版本</dt><dd>${esc(snapshot.app_version || '—')}</dd><dt>数据目录</dt><dd>${esc(snapshot.data_dir)}</dd></dl><div class="actions">${button('打开 Microsoft Store 更新', 'external.open', { id: 'store_updates', icon: 'external' })}${button('GitHub', 'external.open', { id: 'project', class: 'quiet', icon: 'external' })}</div><p class="quiet-note">此版本由 Microsoft Store 安装和更新。</p><p class="license">AGPL-3.0-only · 许可信息见 GitHub 仓库 NOTICE。</p>`;
+  }
   const status = updateBusy ? '正在检查…' : updateError || (updateInfo?.status === 'available' ? `发现新版本 ${updateInfo.latest_version}` : updateInfo?.status === 'up_to_date' ? '已是最新版本' : updateInfo?.status === 'no_release' ? '暂无正式发布版本' : '');
   return `${heading('超绝可爱弹幕姬')}<div class="about-mark">${mark}</div><dl class="key-value"><dt>版本</dt><dd>${esc(snapshot.app_version || '—')}</dd><dt>数据目录</dt><dd>${esc(snapshot.data_dir)}</dd></dl><div class="actions">${button(updateBusy ? '正在检查…' : '检查更新', 'update.check', { disabled: updateBusy || snapshot.network_disabled })}${updateInfo?.download_url ? button('下载新版', 'external.open', { id: 'update_download', class: 'primary', icon: 'external' }) : ''}${button('GitHub', 'external.open', { id: 'project', class: 'quiet', icon: 'external' })}${button('发布页面', 'external.open', { id: 'releases', class: 'quiet', icon: 'external' })}</div><p role="status" class="${updateError ? 'field-error' : 'quiet-note'}">${esc(status)}</p>${updateInfo?.status === 'available' ? '<p class="quiet-note">下载后解压 ZIP，退出程序，再用新版 EXE 替换原文件，设置会保留。</p>' : ''}<p class="license">AGPL-3.0-only · 许可信息见 GitHub 仓库 NOTICE。</p>`;
 }
@@ -860,7 +872,7 @@ function renderVoiceAudition(presets, preferred) {
   const selected = voices.find(preset => preset.id === preferred?.id) || voices.find(preset => preset.id === voiceAuditionDraft.presetId);
   const options = voices.map(preset => option(preset.id, presetLabel(preset), selected?.id)).join('');
   const choices = selected ? options : option('', '选择音色', '') + options;
-  return `<section class="voice-audition" aria-labelledby="voice-audition-title"><div class="voice-audition-heading"><h3 id="voice-audition-title">播报声音</h3></div><div class="voice-step-label"><span>1</span>选择服务</div><div class="service-grid" role="group" aria-label="默认语音服务">${serviceProviders.map(item => renderServiceCard(item, preferred)).join('')}</div><form data-form="voice-audition" data-provider="${esc(provider)}"><div class="voice-audition-controls"><label><span class="voice-step-label"><span>2</span>选择音色</span><select name="preset_id" aria-label="直播首选音色" required${voices.length ? '' : ' disabled'}>${voices.length ? choices : '<option value="">先为这个服务添加音色</option>'}</select></label>${button('添加音色', 'voice-audition.add', { class: 'small quiet', icon: 'plus' })}</div><label class="voice-step-label" for="voice-audition-text"><span>3</span>试听</label><textarea id="voice-audition-text" name="text" aria-label="试听文字" maxlength="2000" rows="2" required placeholder="输入想试听的文字">${esc(voiceAuditionDraft.text)}</textarea><div class="voice-audition-footer"><button type="submit" class="button primary small"${selected ? '' : ' disabled'}>${icon('play')}试听声音</button></div></form></section>`;
+  return `<section class="voice-audition" aria-labelledby="voice-audition-title"><div class="voice-audition-heading"><h3 id="voice-audition-title">播报声音</h3></div><div class="voice-step-label"><span>1</span>选择服务</div><div class="service-grid" role="group" aria-label="默认语音服务">${serviceProviders.map(item => renderServiceCard(item, preferred)).join('')}</div><form data-form="voice-audition" data-provider="${esc(provider)}"><div class="voice-audition-controls"><label><span class="voice-step-label"><span>2</span>选择音色</span><select name="preset_id" aria-label="直播首选音色" required${voices.length ? '' : ' disabled'}>${voices.length ? choices : '<option value="">先为这个服务添加音色</option>'}</select></label>${button('添加音色', 'voice-audition.add', { class: 'small quiet', icon: 'plus' })}</div><label class="voice-step-label" for="voice-audition-text"><span>3</span>试听</label><textarea id="voice-audition-text" name="text" aria-label="试听文字" maxlength="2000" rows="2" required placeholder="输入想试听的文字">${esc(voiceAuditionDraft.text)}</textarea><div class="voice-audition-footer"><button type="submit" class="button primary small"${selected ? '' : ' disabled'}>${icon('play')}试听声音</button></div></form><div id="voice-playback-error" class="inline-error" role="alert" hidden></div></section>`;
 }
 
 function updateVoiceAudition(form) {
@@ -1118,7 +1130,7 @@ async function loadVoiceEditorData(connectionId) {
       try {
         const scan = await command('models.scan', { path: directory }, { quiet: true, silent: true });
         modelScan = scan.result || modelScan;
-      } catch (error) { modelScan.error = String(error?.message || error); }
+      } catch (error) { modelScan.error = errorMessage(error); }
     }
   }
 }
@@ -1161,7 +1173,7 @@ function renderAssetsSettings() {
 
 function renderAudioSettings() {
   const prefs = snapshot.preferences;
-  return `${heading('音频输出')}<form data-form="audio">${select('output', '输出设备', option('', '跟随系统默认设备', deviceValue(prefs.output)) + (snapshot.devices || []).map(device => option(device.name, `${device.name}${device.is_default ? '（系统默认）' : ''}`, deviceValue(prefs.output))).join(''))}<div class="actions">${button('刷新设备', 'devices.refresh', { class: 'small quiet', icon: 'refresh' })}${button('重新连接设备', 'audio.reconnect', { class: 'small quiet', icon: 'audio' })}</div><p class="quiet-note">切换或重新连接输出设备会停止当前播放和待播队列。</p><div class="form-footer">${autoStatus()}</div></form>`;
+  return `${heading('音频输出')}<form data-form="audio">${select('output', '输出设备', option('', '跟随系统默认设备', deviceValue(prefs.output)) + (snapshot.devices || []).map(device => option(device.name, `${device.name}${device.is_default ? '（系统默认）' : ''}`, deviceValue(prefs.output))).join(''))}<div class="actions">${button('测试声音', 'audio.test', { class: 'small primary', icon: 'play' })}${button('刷新设备', 'devices.refresh', { class: 'small quiet', icon: 'refresh' })}${button('重新连接设备', 'audio.reconnect', { class: 'small quiet', icon: 'audio' })}</div><p class="quiet-note">测试声音会播放一声本地提示音，无需登录语音服务。切换或重新连接输出设备会停止当前播放和待播队列。</p><div id="audio-playback-error" class="inline-error" role="alert" hidden></div><div class="form-footer">${autoStatus()}</div></form>`;
 }
 
 function renderAppearanceSettings() {
@@ -1289,7 +1301,7 @@ async function handleAction(action, id, target) {
     updateBusy = true; updateError = ''; updateInfo = null;
     renderSettings();
     try { updateInfo = await invoke('check_update'); }
-    catch (error) { updateError = String(error?.message || error); }
+    catch (error) { updateError = errorMessage(error, 'DV-U01'); }
     finally { updateBusy = false; if (settingsDialog.open && settingsTab === 'about') renderSettings(); }
     return;
   }
@@ -1573,6 +1585,10 @@ async function handleAction(action, id, target) {
   if (action === 'asset.replace') { if (!await allowLeaveSettings()) return; editor = { type: 'asset', id }; renderSettings(); return; }
   if (action.startsWith('dictionary.add.')) { const type = action.split('.')[2]; const list = document.querySelector(`[data-dictionary="${type}"]`); list.insertAdjacentHTML('beforeend', dictionaryRow(type)); mountSelects(list); scheduleAutosave(list.closest('form')); return; }
   if (action === 'dictionary.remove') { const form = target.closest('form'); target.closest('.dict-row').remove(); scheduleAutosave(form, true); return; }
+  if (action === 'audio.test') {
+    await command('audio.test', {}, { success: '测试声音已加入播放队列' });
+    return;
+  }
   if (action === 'devices.refresh') {
     const form = document.querySelector('[data-form="audio"]'); const selected = form.elements.output.value;
     await command(action); form.elements.output.innerHTML = option('', '跟随系统默认设备', selected) + snapshot.devices.map(device => option(device.name, `${device.name}${device.is_default ? '（系统默认）' : ''}`, selected)).join(''); mountSelects(form); showToast('设备列表已刷新'); return;
@@ -2023,7 +2039,7 @@ async function boot() {
     if (!boot.polling) { boot.polling = true; scheduleSnapshotPolling(); }
   } catch (error) {
     app.setAttribute('aria-busy', 'false');
-    app.innerHTML = `<main class="disconnected">${mark}<h1>桌面连接不可用</h1><p>请重新打开超绝可爱弹幕姬，或点击重试。</p><p class="quiet-note">${esc(error?.message || error)}</p>${button('重试连接', 'reconnect', { class: 'small' })}</main>`;
+    app.innerHTML = `<main class="disconnected">${mark}<h1>桌面连接不可用</h1><p>请重新打开超绝可爱弹幕姬，或点击重试。</p><p class="quiet-note">${esc(errorMessage(error, 'DV-UI02'))}</p>${button('重试连接', 'reconnect', { class: 'small' })}</main>`;
   }
 }
 

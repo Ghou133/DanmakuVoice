@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 pub const REPOSITORY: &str = "https://github.com/Ghou133/DanmakuVoice";
 pub const RELEASES: &str = "https://github.com/Ghou133/DanmakuVoice/releases/latest";
+pub const STORE_UPDATES: &str = "ms-windows-store://downloadsandupdates";
 const API: &str = "https://api.github.com/repos/Ghou133/DanmakuVoice/releases/latest";
 const MAX_RESPONSE: usize = 1024 * 1024;
 const CACHE_TIME: Duration = Duration::from_secs(60);
@@ -22,6 +23,16 @@ pub struct UpdateInfo {
 }
 
 impl UpdateInfo {
+    fn store_managed() -> Self {
+        Self {
+            current_version: env!("CARGO_PKG_VERSION"),
+            latest_version: None,
+            status: "store_managed",
+            release_url: STORE_UPDATES.into(),
+            download_url: None,
+        }
+    }
+
     fn no_release() -> Self {
         Self {
             current_version: env!("CARGO_PKG_VERSION"),
@@ -137,6 +148,9 @@ pub struct UpdateChecker(Mutex<Option<(Instant, Result<UpdateInfo, String>)>>);
 
 impl UpdateChecker {
     pub async fn check(&self, network_disabled: bool) -> Result<UpdateInfo, String> {
+        if crate::package::installed_root()?.is_some() {
+            return Ok(UpdateInfo::store_managed());
+        }
         if network_disabled {
             return Err("离线测试模式不检查更新".into());
         }

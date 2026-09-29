@@ -115,14 +115,28 @@ export function numericId(value) {
   return Number(value);
 }
 
+export function errorMessage(error, fallback = 'DV-UI01') {
+  const message = String(error?.message || error || '操作没有完成，请重试。');
+  const codes = [...new Set(message.match(/\[DV-[A-Z0-9-]{2,21}\]/g) || [])];
+  const prose = message.replace(/[ \t]*\[DV-[A-Z0-9-]{2,21}\]/g, '').trim();
+  return `${prose} ${codes.length ? codes.join(' ') : `[${fallback}]`}`;
+}
+
+export function playbackIssue(queue) {
+  const last = (queue?.history || []).at(-1);
+  if (last?.state !== 'failed') return '';
+  // The engine supplies sanitized diagnostics, never remote bodies or credentials.
+  const detail = typeof last.detail === 'string' ? last.detail.trim() : '';
+  return errorMessage(detail ? `播报未能播放：${detail}` : '有一条播报未能播放，请检查声音服务和输出设备。', 'DV-Q01');
+}
+
 export function runtimeIssue(snapshot) {
-  if (snapshot.live?.state === 'session_expired') return '哔哩哔哩登录已失效，请重新扫码。';
-  if (snapshot.status?.error) return typeof snapshot.status.error === 'string' ? snapshot.status.error : snapshot.status.message || '连接或播放遇到问题，请查看设置。';
-  const history = snapshot.queue?.history || [];
-  const last = history.at(-1);
-  if (last?.state === 'failed') return '有一条播报未能播放，请检查声音服务和输出设备。';
-  if (snapshot.live?.running && Number(snapshot.live.errors) > 0) return '本次会话有接收或播报错误，请检查直播间和声音设置。';
-  if (snapshot.live?.running && snapshot.live.no_voice > 0 && snapshot.setup?.tts_enabled) return '有弹幕未能播报，请检查默认声音、用户绑定或关键词音效。';
+  if (snapshot.live?.state === 'session_expired') return '哔哩哔哩登录已失效，请重新扫码。 [DV-B09]';
+  if (snapshot.status?.error) return errorMessage(typeof snapshot.status.error === 'string' ? snapshot.status.error : snapshot.status.message || '连接或播放遇到问题，请查看设置。', 'DV-X00');
+  const playback = playbackIssue(snapshot.queue);
+  if (playback) return playback;
+  if (snapshot.live?.running && Number(snapshot.live.errors) > 0) return '本次会话有接收或播报错误，请检查直播间和声音设置。 [DV-V05]';
+  if (snapshot.live?.running && snapshot.live.no_voice > 0 && snapshot.setup?.tts_enabled) return '有弹幕未能播报，请检查默认声音、用户绑定或关键词音效。 [DV-P02]';
   return '';
 }
 

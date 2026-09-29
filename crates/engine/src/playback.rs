@@ -33,31 +33,31 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum PrepareError {
-    #[error("这条消息已被过滤")]
+    #[error("这条消息已被过滤 [DV-P01]")]
     Filtered,
-    #[error("未选择声音预设")]
+    #[error("未选择声音预设 [DV-P02]")]
     NoVoice,
-    #[error("声音预设缺少音色或参考音频 ID")]
+    #[error("声音预设缺少音色或参考音频 ID [DV-P03]")]
     EmptyVoiceId,
-    #[error("声音预设的语速须在 0.5 到 2.0 之间")]
+    #[error("声音预设的语速须在 0.5 到 2.0 之间 [DV-P04]")]
     InvalidSpeed,
-    #[error("声音预设的音量须在 0 到 2.0 之间")]
+    #[error("声音预设的音量须在 0 到 2.0 之间 [DV-P05]")]
     InvalidVolume,
-    #[error("声音预设对应的服务连接不存在")]
+    #[error("声音预设对应的服务连接不存在 [DV-P06]")]
     MissingConnection,
-    #[error("声音预设和服务连接的类型不一致")]
+    #[error("声音预设和服务连接的类型不一致 [DV-P07]")]
     ProviderMismatch,
-    #[error("此服务连接缺少登录信息或 API Key")]
+    #[error("此服务连接缺少登录信息或 API Key [DV-P08]")]
     MissingCredential,
-    #[error("豆包设备标识尚未初始化")]
+    #[error("豆包设备标识尚未初始化 [DV-P09]")]
     MissingDoubaoDevice,
-    #[error("GPT-SoVITS 音色语言或分句方式无效")]
+    #[error("GPT-SoVITS 音色语言或分句方式无效 [DV-P10]")]
     InvalidSovitsSettings,
-    #[error("音效素材文件不可用")]
+    #[error("音效素材文件不可用 [DV-P11]")]
     MissingSound,
-    #[error("参考音频原文件已删除或不可读，请重新选择")]
+    #[error("参考音频原文件已删除或不可读，请重新选择 [DV-P12]")]
     MissingReferenceAudio,
-    #[error("找不到随应用提供的 ffmpeg.exe")]
+    #[error("找不到随应用提供的 ffmpeg.exe [DV-P13]")]
     MissingFfmpeg,
     #[error("读取播放配置失败：{0}")]
     Storage(#[from] StorageError),
@@ -146,6 +146,7 @@ fn classify_readiness_error(error: TtsError) -> Result<Readiness, String> {
 enum PreparedPart {
     Text(String),
     Sound(PathBuf),
+    OutputTest,
 }
 
 /// A complete enqueue-time snapshot. It owns the service client (including
@@ -189,6 +190,36 @@ impl fmt::Debug for PreparedPlayback {
 }
 
 impl PreparedPlayback {
+    /// A local calibration tone, with no account, voice preset or network request.
+    pub fn output_test() -> (RulePreview, Arc<Self>) {
+        let preview = RulePreview {
+            event: crate::model::LiveEvent::danmaku(0, None, "", "测试声音"),
+            filtered_reason: None,
+            final_text: "测试声音".into(),
+            // Built-in sound identity is only used by this frozen plan, not storage.
+            parts: vec![PlanPart::Sound {
+                trigger: String::new(),
+                asset_id: "builtin:output-test".into(),
+            }],
+            voice: None,
+            default_voice: None,
+            voice_from_binding: false,
+            pending_legacy_binding: false,
+        };
+        let plan = Self {
+            provider: None,
+            parts: vec![PreparedPart::OutputTest],
+            ffmpeg_speed: 1.0,
+            voice_volume: 1.0,
+            selected_from_binding: false,
+            selected_issue: None,
+            selected_name: None,
+            fallback: None,
+            fallback_issue: None,
+        };
+        (preview, Arc::new(plan))
+    }
+
     async fn select_for_execution(
         &self,
         cancel: &CancellationToken,
@@ -636,6 +667,25 @@ impl PlaybackExecutor {
         speech_progress: &AtomicBool,
     ) -> Result<(), AttemptError> {
         match part {
+            PreparedPart::OutputTest => {
+                ffmpeg::play_tts(
+                    &self.ffmpeg_path,
+                    output_test_stream(cancel),
+                    &self.writer,
+                    job_id,
+                    ffmpeg::TtsPlayback {
+                        speed: 1.0,
+                        voice_volume: 1.0,
+                        speech_progress,
+                    },
+                    cancel,
+                )
+                .await
+                .map_err(|error| match error {
+                    DecodeError::Cancelled => AttemptError::Cancelled,
+                    other => AttemptError::Playback(safe_decode_error(other)),
+                })?;
+            }
             PreparedPart::Text(text) if !text.chars().any(char::is_alphanumeric) => {}
             PreparedPart::Text(text) => {
                 let stream = plan
@@ -770,25 +820,150 @@ fn with_route_notice(notice: &Option<String>, error: String) -> String {
     }
 }
 
+fn output_test_stream(cancel: &CancellationToken) -> AudioStream {
+    crate::tts::spawn_stream(
+        crate::tts::AudioEncoding::PcmS16Le {
+            sample_rate: 24_000,
+            channels: 1,
+        },
+        cancel,
+        |sender, cancel| async move {
+            // 600 ms at 440 Hz, with 20 ms ramps to avoid clicks.
+            let mut pcm = Vec::with_capacity(14_400 * 2);
+            for i in 0..14_400 {
+                let gain = (i.min(14_399 - i) as f32 / 480.0).min(1.0);
+                let sample = ((i as f32 * 440.0 * std::f32::consts::TAU / 24_000.0).sin()
+                    * 4000.0
+                    * gain) as i16;
+                pcm.extend_from_slice(&sample.to_le_bytes());
+            }
+            crate::tts::send_bytes(&sender, &cancel, &pcm).await;
+            Ok(())
+        },
+    )
+}
+
+fn safe_io_error(stage: &str, error: std::io::Error) -> String {
+    let reason = match error.kind() {
+        std::io::ErrorKind::PermissionDenied => "访问被拒绝，请检查文件权限或安全软件拦截记录",
+        std::io::ErrorKind::NotFound => "文件或所需组件不存在",
+        std::io::ErrorKind::BrokenPipe => "音频组件提前关闭了管道",
+        std::io::ErrorKind::TimedOut => "操作超时",
+        _ => "系统操作失败",
+    };
+    match error.raw_os_error() {
+        Some(code) => format!("{stage}：{reason}（系统错误 {code}）"),
+        None => format!("{stage}：{reason}"),
+    }
+}
+
 fn safe_decode_error(error: DecodeError) -> String {
-    match error {
+    let code = match &error {
+        DecodeError::Cancelled | DecodeError::Output(crate::audio::AudioError::Cancelled) => {
+            return "播放已取消".into();
+        }
+        DecodeError::MissingFfmpeg => "DV-C01",
+        DecodeError::Start(_) => "DV-C02",
+        DecodeError::Pipe(_) => "DV-C03",
+        DecodeError::ProcessExit(_) | DecodeError::InvalidAudio(Some(_)) => "DV-C04",
+        DecodeError::InvalidAudio(None) | DecodeError::Misaligned | DecodeError::Wav(_) => "DV-C05",
+        DecodeError::MissingSound => "DV-C06",
+        DecodeError::InvalidSpeed | DecodeError::InvalidVolume => "DV-C07",
+        DecodeError::Output(error) => error.code(),
+        DecodeError::Tts(_) => "DV-T000",
+    };
+    let message: String = match error {
         DecodeError::Cancelled => "播放已取消".into(),
         DecodeError::MissingFfmpeg => "找不到音频组件 ffmpeg.exe".into(),
         DecodeError::MissingSound => "音效素材文件不可用".into(),
         DecodeError::Tts(message) => message,
-        DecodeError::InvalidAudio(_) | DecodeError::Misaligned | DecodeError::Wav(_) => {
+        DecodeError::InvalidAudio(Some(code)) | DecodeError::ProcessExit(Some(code)) => format!(
+            "音频组件 FFmpeg 异常退出（退出码 {code} / 0x{:08X}）",
+            code as u32
+        ),
+        DecodeError::ProcessExit(None) => "音频组件 FFmpeg 异常终止，无法取得退出码".into(),
+        DecodeError::InvalidAudio(None) | DecodeError::Misaligned | DecodeError::Wav(_) => {
             "音频解码失败或文件不完整".into()
         }
-        DecodeError::Start(_) | DecodeError::Pipe(_) | DecodeError::Output(_) => {
-            "音频组件或输出设备失败".into()
+        DecodeError::Start(error) => safe_io_error("音频组件 FFmpeg 无法启动", error),
+        DecodeError::Pipe(error) => safe_io_error("音频组件管道中断", error),
+        DecodeError::Output(crate::audio::AudioError::Disconnected) => {
+            "输出设备已断开或驱动报告错误，请重新连接设备".into()
         }
+        DecodeError::Output(crate::audio::AudioError::Stalled) => {
+            "输出设备连续 5 秒未消耗音频，请重新连接或选择其他设备".into()
+        }
+        DecodeError::Output(crate::audio::AudioError::Cancelled) => "播放已取消".into(),
+        DecodeError::Output(_) => "音频输出设备操作失败，请重新连接或选择其他设备".into(),
         DecodeError::InvalidSpeed | DecodeError::InvalidVolume => "语速或音量配置无效".into(),
-    }
+    };
+    crate::error_codes::tag(message, code)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn playback_diagnostics_separate_device_decoder_and_pipe_without_raw_messages() {
+        let start = safe_decode_error(DecodeError::Start(std::io::Error::from_raw_os_error(5)));
+        assert!(start.contains("FFmpeg 无法启动") && start.contains("系统错误 5"));
+        let pipe = safe_decode_error(DecodeError::Pipe(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "private-path-or-token",
+        )));
+        assert!(pipe.contains("管道中断"));
+        assert!(!pipe.contains("private-path-or-token"));
+        let exit = safe_decode_error(DecodeError::InvalidAudio(Some(0xC000001Du32 as i32)));
+        assert!(exit.contains("0xC000001D"));
+        assert!(
+            safe_decode_error(DecodeError::Output(crate::audio::AudioError::Stalled))
+                .contains("5 秒未消耗")
+        );
+        assert!(
+            safe_decode_error(DecodeError::Output(crate::audio::AudioError::Disconnected))
+                .contains("驱动报告错误")
+        );
+    }
+
+    #[tokio::test]
+    async fn output_test_uses_real_ffmpeg_without_voice_account_or_network() {
+        let Some(path) = std::env::var_os("DANMAKUVOICE_TEST_FFMPEG") else {
+            return;
+        };
+        let (preview, prepared) = PreparedPlayback::output_test();
+        assert!(preview.voice.is_none());
+        assert!(!preview.needs_tts());
+        assert!(preview.has_playable_audio());
+        let writer = crate::audio::test_writer(48_000, 2, 100_000);
+        let executor = PlaybackExecutor::new(writer.clone(), path).unwrap();
+        let job = SpeechJob {
+            id: 1,
+            generation: 0,
+            origin: crate::scheduler::JobOrigin::Audition,
+            preview,
+            prepared: Some(prepared),
+        };
+        let mut task =
+            tokio::spawn(async move { executor.execute(job, CancellationToken::new()).await });
+        let mut samples = Vec::new();
+        let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                tokio::select! {
+                    result = &mut task => break result.unwrap().unwrap(),
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => samples.extend(writer.take_test_samples()),
+                }
+            }
+        }).await.unwrap();
+        assert!(outcome.detail.contains("播报完成"));
+        assert!(samples.len() >= 50_000);
+        assert!(samples.iter().any(|value| value.abs() > 0.05));
+        assert!(
+            samples
+                .iter()
+                .all(|value| value.is_finite() && value.abs() < 0.2)
+        );
+    }
+
     use crate::{
         audio::test_writer,
         model::{LiveEvent, Provider, SovitsVoiceSettings, VoiceBinding},
@@ -2171,7 +2346,7 @@ mod tests {
             .iter()
             .find_map(|part| match part {
                 PreparedPart::Sound(path) => Some(path.clone()),
-                PreparedPart::Text(_) => None,
+                PreparedPart::Text(_) | PreparedPart::OutputTest => None,
             })
             .expect("expected sound part");
         let second_source = temp.path().join("second.wav");

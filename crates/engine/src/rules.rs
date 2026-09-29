@@ -129,23 +129,23 @@ impl RulePreview {
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum RuleError {
-    #[error("模板缺少结束括号")]
+    #[error("模板缺少结束括号 [DV-R01]")]
     UnclosedField,
-    #[error("模板中存在孤立的结束括号")]
+    #[error("模板中存在孤立的结束括号 [DV-R02]")]
     UnexpectedClose,
-    #[error("不支持的模板字段：{0}")]
+    #[error("不支持的模板字段：{0} [DV-R03]")]
     UnknownField(String),
-    #[error("配置过大：{0}")]
+    #[error("配置过大：{0} [DV-R04]")]
     TooLarge(&'static str),
-    #[error("试听文本不能为空、不能超过 2000 字，且不能包含控制字符")]
+    #[error("试听文本不能为空、不能超过 2000 字，且不能包含控制字符 [DV-R05]")]
     InvalidAuditionText,
-    #[error("{event}模板无效：{reason}")]
+    #[error("{event}模板无效：{reason} [DV-R06]")]
     InvalidTemplate { event: &'static str, reason: String },
-    #[error("礼物与醒目留言金额阈值必须是非负有限数")]
+    #[error("礼物与醒目留言金额阈值必须是非负有限数 [DV-R07]")]
     InvalidThreshold,
-    #[error("词典关键词不能为空")]
+    #[error("词典关键词不能为空 [DV-R08]")]
     EmptyKeyword,
-    #[error("关键词音效需要非空关键词和素材")]
+    #[error("关键词音效需要非空关键词和素材 [DV-R09]")]
     InvalidSoundRule,
 }
 

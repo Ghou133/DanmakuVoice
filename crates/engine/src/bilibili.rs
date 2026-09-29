@@ -60,23 +60,23 @@ const MAX_DANMAKU_EXTRA_BYTES: usize = 64 * 1024;
 /// Cookie headers, server response bodies and credentials.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum BiliError {
-    #[error("直播间号必须大于零")]
+    #[error("直播间号必须大于零 [DV-B01]")]
     InvalidRoom,
-    #[error("主播 UID 必须大于零")]
+    #[error("主播 UID 必须大于零 [DV-B02]")]
     InvalidUid,
-    #[error("网络请求失败")]
+    #[error("网络请求失败 [DV-B03]")]
     Network,
-    #[error("B站接口返回错误码 {0}")]
+    #[error("B站接口返回错误码 {0} [DV-B04]")]
     Api(i64),
-    #[error("B站返回了不支持或无效的数据：{0}")]
+    #[error("B站返回了不支持或无效的数据：{0} [DV-B05]")]
     Protocol(&'static str),
-    #[error("当前扫码流程已结束，请生成新的二维码")]
+    #[error("当前扫码流程已结束，请生成新的二维码 [DV-B06]")]
     QrFinished,
-    #[error("直播连接任务已经运行")]
+    #[error("直播连接任务已经运行 [DV-B07]")]
     AlreadyRunning,
-    #[error("此账号没有可用的直播间")]
+    #[error("此账号没有可用的直播间 [DV-B08]")]
     NoOwnRoom,
-    #[error("B站登录已失效，请重新扫码")]
+    #[error("B站登录已失效，请重新扫码 [DV-B09]")]
     SessionExpired,
 }
 

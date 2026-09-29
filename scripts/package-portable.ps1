@@ -94,6 +94,7 @@ function Assert-SystemImports([string]$exe, [string]$dumpbin) {
         'kernel32.dll', 'api-ms-win-core-synch-l1-2-0.dll', 'shell32.dll',
         'advapi32.dll', 'ole32.dll', 'combase.dll', 'mmdevapi.dll',
         'oleaut32.dll', 'api-ms-win-core-winrt-error-l1-1-0.dll',
+        'api-ms-win-core-winrt-l1-1-0.dll',
         'bcryptprimitives.dll', 'gdi32.dll', 'user32.dll', 'ws2_32.dll',
         'crypt32.dll', 'bcrypt.dll', 'ntdll.dll', 'imm32.dll',
         'dwmapi.dll', 'uxtheme.dll', 'comctl32.dll', 'shlwapi.dll',
@@ -437,6 +438,9 @@ try {
     Copy-IntoStage (Join-Path $repoRoot 'ARCHITECTURE.md') 'ARCHITECTURE.md'
     Copy-IntoStage (Join-Path $repoRoot 'rust-toolchain.toml') 'rust-toolchain.toml'
     Copy-IntoStage (Join-Path $repoRoot 'docs\FFMPEG.md') 'docs\FFMPEG.md'
+    Copy-IntoStage (Join-Path $repoRoot 'docs\STORE-PUBLISHING.md') 'docs\STORE-PUBLISHING.md'
+    Copy-IntoStage (Join-Path $repoRoot 'docs\PRIVACY.md') 'docs\PRIVACY.md'
+    Copy-IntoStage (Join-Path $repoRoot 'docs\ERROR-CODES.md') 'docs\ERROR-CODES.md'
     Copy-IntoStage (Join-Path $repoRoot 'docs\RELEASE-LICENSE-AUDIT.md') 'docs\RELEASE-LICENSE-AUDIT.md'
     Copy-IntoStage (Join-Path $repoRoot 'docs\UI-IPC.md') 'docs\UI-IPC.md'
     Copy-IntoStage (Join-Path $repoRoot 'scripts\build-minimal-ffmpeg-wsl.sh') 'scripts\build-minimal-ffmpeg-wsl.sh'

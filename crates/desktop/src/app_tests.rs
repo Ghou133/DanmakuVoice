@@ -1,6 +1,58 @@
 use super::*;
 
 #[tokio::test]
+async fn command_failure_codes_survive_snapshot_without_overriding_typed_causes() {
+    let (_directory, app) = isolated(true);
+    let error = app.dispatch("connections.save", json!({"connection":{
+        "id":"bad-endpoint","name":"local","settings":{"provider":"dots","endpoint":"not a URL","timeout_secs":30},"has_credential":false
+    }})).await.unwrap_err();
+    assert!(error.ends_with("[DV-S22]"), "{error}");
+    assert!(!error.contains("DV-X08"));
+    assert_eq!(app.snapshot().unwrap()["status"]["message"], error);
+    let unknown = app
+        .dispatch("unknown.operation", json!({}))
+        .await
+        .unwrap_err();
+    assert!(unknown.ends_with("[DV-X00]"));
+}
+
+#[tokio::test]
+async fn offline_output_test_checks_mute_without_requiring_a_cloud_account() {
+    let (_directory, app) = isolated(true);
+    app.dispatch("preferences.save", json!({"preferences":{"muted":true}}))
+        .await
+        .unwrap();
+    let error = app.dispatch("audio.test", json!({})).await.unwrap_err();
+    assert!(error.contains("取消静音"), "{error}");
+    assert!(app.lock().unwrap().store.connections().unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "plays a 600 ms local tone on the physical default output; no network or accounts"]
+async fn local_output_test_reaches_physical_device_without_cloud_login() {
+    let (_directory, app) = isolated(true);
+    assert!(danmakuvoice_engine::audio::default_output_available());
+    app.dispatch("audio.test", json!({})).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = app.snapshot().unwrap();
+            if let Some(record) = snapshot["queue"]["history"]
+                .as_array()
+                .and_then(|rows| rows.last())
+            {
+                assert_eq!(record["state"], "played", "{record}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    app.dispatch("queue.stop", json!({})).await.unwrap();
+    assert!(app.lock().unwrap().store.connections().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn muting_preserves_volume_and_survives_restart() {
     let (directory, app) = isolated(true);
     app.dispatch(
@@ -1469,7 +1521,10 @@ async fn local_service_actions_target_the_selected_voice_connection() {
 fn expired_bilibili_session_has_an_actionable_desktop_state() {
     assert_eq!(
         room_state(&RoomState::SessionExpired { room_id: 42 }),
-        ("session_expired", "哔哩哔哩登录已失效，请重新扫码".into())
+        (
+            "session_expired",
+            "哔哩哔哩登录已失效，请重新扫码 [DV-B09]".into()
+        )
     );
 }
 

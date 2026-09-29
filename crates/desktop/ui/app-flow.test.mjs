@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createAutosaveQueue } from './autosave.mjs';
-import { deviceValue, mergeSnapshot, escapeHtml, headerIdentity, initial, messageParts, numericId, playbackFallbackNotice, qrNeedsRoomFallback, uiIsActive, validUid } from './helpers.mjs';
+import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, headerIdentity, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, uiIsActive, validUid } from './helpers.mjs';
 
 function appContext() {
   const surface = { listeners: {}, addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }, querySelector() { return null; }, querySelectorAll() { return []; } };
@@ -17,6 +17,7 @@ function appContext() {
     crypto: { randomUUID: () => 'stable-role-id' },
     FormData: class { constructor(form) { this.form = form; } get(key) { return this.form.fields[key] ?? null; } has(key) { return Object.hasOwn(this.form.fields, key); } },
     esc: escapeHtml,
+    errorMessage,
     mergeSnapshot,
     providerLabel: provider => provider,
     structuredClone,
@@ -25,6 +26,7 @@ function appContext() {
     messageParts,
     numericId,
     playbackFallbackNotice,
+    playbackIssue,
     qrNeedsRoomFallback,
     uiIsActive,
     validUid,
@@ -42,6 +44,30 @@ function appContext() {
   }; editor = { type: 'preset', id: '', connectionId: 'dots-connection', makePreferred: true }; referenceProfiles = [];`, context);
   return context;
 }
+
+test('audition page receives asynchronous playback diagnostics without closing settings', () => {
+  const context = appContext();
+  const alert = { textContent: '', hidden: true };
+  context.document.querySelector = selector => selector === '#voice-playback-error, #audio-playback-error' ? alert : null;
+  vm.runInContext(`snapshot.queue = { history: [{ state: 'failed', detail: '豆包 响应无效：登录状态无效（710012001）' }] }; updateServiceIndicators();`, context);
+  assert.equal(alert.hidden, false);
+  assert.match(alert.textContent, /710012001/);
+  vm.runInContext(`snapshot.queue.history.push({ state: 'played' }); updateServiceIndicators();`, context);
+  assert.equal(alert.hidden, true);
+  assert.equal(alert.textContent, '');
+  assert.match(vm.runInContext('renderVoiceAudition([], null)', context), /id="voice-playback-error"[^>]*role="alert"/);
+});
+
+test('audio settings offer a local sound test and show asynchronous output errors', async () => {
+  const context = appContext();
+  context.calls = [];
+  vm.runInContext(`snapshot.preferences = { output: {kind:'default'} }; command = async action => calls.push(action); flushAutosaves = async () => true;`, context);
+  const html = vm.runInContext('renderAudioSettings()', context);
+  assert.match(html, /data-action="audio.test"/);
+  assert.match(html, /id="audio-playback-error"/);
+  await vm.runInContext("handleAction('audio.test', '', null)", context);
+  assert.deepEqual(Array.from(context.calls), ['audio.test']);
+});
 
 test('header identity updates after login and logout without repeated image loads', () => {
   const context = appContext();
@@ -1103,4 +1129,14 @@ test('about shows versions and update states without development provenance', ()
   assert.match(vm.runInContext('renderAbout()', context), /disabled/);
   vm.runInContext("updateBusy = false; updateError = '<网络失败>';", context);
   assert.match(vm.runInContext('renderAbout()', context), /&lt;网络失败&gt;/);
+});
+
+
+test('Store installation offers Store updates and never portable downloads', () => {
+  const ctx = appContext();
+  vm.runInContext(`snapshot = { update_channel: 'store', app_version: '0.2.2', data_dir: 'test' }; updateInfo = { status: 'available', download_url: 'https://example.test/old.exe' };`, ctx);
+  const html = vm.runInContext('renderAbout()', ctx);
+  assert.match(html, /Microsoft Store 更新/);
+  assert.match(html, /store_updates/);
+  assert.doesNotMatch(html, /下载新版|解压 ZIP|update_download|data-id="releases"/);
 });

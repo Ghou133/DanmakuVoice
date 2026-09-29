@@ -1,4 +1,13 @@
-import { mergeSnapshot } from './helpers.mjs';
+import { errorMessage, mergeSnapshot } from './helpers.mjs';
+
+test('support codes survive wrapping and runtime display without duplicated generic labels', () => {
+  const original = 'FFmpeg 无法启动（系统错误 5） [DV-C02]';
+  assert.equal(errorMessage(new Error(original)), original);
+  assert.equal(errorMessage(errorMessage(original)), original);
+  assert.equal(runtimeIssue({ queue: { history: [{ state: 'failed', detail: original }] } }), `播报未能播放：${original}`);
+  assert.equal(errorMessage('保存失败 [DV-S01]；草稿已保留'), '保存失败；草稿已保留 [DV-S01]');
+  assert.equal(errorMessage('保存失败'), '保存失败 [DV-UI01]');
+});
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { escapeHtml, headerIdentity, initial, eventText, eventKeys, validUid, numericId, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, qrNeedsRoomFallback } from './helpers.mjs';
@@ -106,7 +115,7 @@ test('only a completed fallback gets a brief status without speech text', () => 
 });
 
 test('asynchronous speech failures are actionable instead of appearing healthy', () => {
-  assert.equal(runtimeIssue({ status: { error: true, message: '设备已断开' } }), '设备已断开');
+  assert.equal(runtimeIssue({ status: { error: true, message: '设备已断开' } }), '设备已断开 [DV-X00]');
   assert.match(runtimeIssue({ queue: { history: [{ state: 'failed', detail: 'timeout' }] } }), /未能播放/);
   assert.equal(runtimeIssue({ queue: { history: [{ state: 'failed' }, { state: 'played' }] } }), '');
   assert.match(runtimeIssue({ live: { running: true, no_voice: 1 }, setup: { tts_enabled: true }, rules: {} }), /未能播报/);
@@ -115,6 +124,20 @@ test('asynchronous speech failures are actionable instead of appearing healthy',
   assert.equal(runtimeIssue({ live: { running: false, errors: 1 } }), '');
   assert.equal(runtimeIssue({ live: { state: 'reconnecting', running: true } }), '');
   assert.match(runtimeIssue({ live: { state: 'session_expired', running: false } }), /重新扫码/);
+});
+
+test('playback failures preserve the engine diagnosis with an empty-detail fallback', () => {
+  for (const detail of [
+    '豆包 响应无效：登录状态无效，请重新登录（710012001）',
+    '豆包 返回 HTTP 403：账号或设备语音请求受限',
+    '豆包 连接请求失败：连接超时',
+    '音频解码失败或文件不完整',
+  ]) {
+    assert.equal(runtimeIssue({ queue: { history: [{ state: 'failed', detail }] } }), `播报未能播放：${detail} [DV-Q01]`);
+  }
+  for (const detail of [undefined, null, '  ', {}]) {
+    assert.match(runtimeIssue({ queue: { history: [{ state: 'failed', detail }] } }), /请检查声音服务和输出设备/);
+  }
 });
 
 test('live connection display follows the actual room state', () => {

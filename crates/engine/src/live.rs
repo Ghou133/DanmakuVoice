@@ -126,13 +126,13 @@ impl Default for LiveSnapshot {
 
 #[derive(Debug, Error)]
 pub enum LiveError {
-    #[error("直播会话已启动")]
+    #[error("直播会话已启动 [DV-V01]")]
     AlreadyRunning,
-    #[error("直播间连接失败：{0}")]
+    #[error("直播间连接失败：{0} [DV-V02]")]
     Room(#[from] BiliError),
-    #[error("播放调度器已关闭")]
+    #[error("播放调度器已关闭 [DV-V03]")]
     Scheduler,
-    #[error("仅显示弹幕的会话没有播放组件，请启用语音后重新连接")]
+    #[error("仅显示弹幕的会话没有播放组件，请启用语音后重新连接 [DV-V04]")]
     PlaybackUnavailable,
 }
 

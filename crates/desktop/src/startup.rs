@@ -109,6 +109,13 @@ fn command_line(exe: &Path, data_dir: &Path) -> io::Result<Vec<u16>> {
 }
 
 pub fn is_enabled(exe: &Path, data_dir: &Path) -> io::Result<bool> {
+    if crate::package::installed_root()
+        .map_err(io::Error::other)?
+        .is_some()
+    {
+        let state = store_task()?.State().map_err(io::Error::other)?;
+        return Ok(store_enabled(state));
+    }
     let expected = command_line(exe, data_dir)?;
     let Some(key) = open_run_key(KEY_QUERY_VALUE)? else {
         return Ok(false);
@@ -164,6 +171,27 @@ pub fn is_enabled(exe: &Path, data_dir: &Path) -> io::Result<bool> {
 /// Called only from the user's explicit startup setting. It touches this
 /// application's HKCU Run value and never requests administrator access.
 pub fn set_enabled(exe: &Path, data_dir: &Path, enabled: bool) -> io::Result<()> {
+    if crate::package::installed_root()
+        .map_err(io::Error::other)?
+        .is_some()
+    {
+        let task = store_task()?;
+        if enabled {
+            let state = task
+                .RequestEnableAsync()
+                .map_err(io::Error::other)?
+                .join()
+                .map_err(io::Error::other)?;
+            if !store_enabled(state) {
+                return Err(io::Error::other(
+                    "Windows 已禁用开机启动，请在系统设置的「应用 → 启动」中允许 [DV-X16]",
+                ));
+            }
+        } else {
+            task.Disable().map_err(io::Error::other)?;
+        }
+        return Ok(());
+    }
     // Portable copies and isolated --data-dir sessions share the HKCU Run key
     // name. Turning startup off in one copy must not remove another copy's
     // opt-in entry.
@@ -203,6 +231,20 @@ pub fn set_enabled(exe: &Path, data_dir: &Path, enabled: bool) -> io::Result<()>
     } else {
         Err(io::Error::from_raw_os_error(status as i32))
     }
+}
+
+fn store_task() -> io::Result<windows::ApplicationModel::StartupTask> {
+    windows::ApplicationModel::StartupTask::GetAsync(&windows_core::HSTRING::from(
+        "DanmakuVoiceStartup",
+    ))
+    .map_err(io::Error::other)?
+    .join()
+    .map_err(io::Error::other)
+}
+
+fn store_enabled(state: windows::ApplicationModel::StartupTaskState) -> bool {
+    use windows::ApplicationModel::StartupTaskState;
+    state == StartupTaskState::Enabled || state == StartupTaskState::EnabledByPolicy
 }
 
 #[cfg(test)]

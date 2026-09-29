@@ -48,30 +48,32 @@ pub struct LegacyImportReport {
 
 #[derive(Debug, Error)]
 pub enum LegacyImportError {
-    #[error("旧配置预览后已变化，请重新预览")]
+    #[error("旧配置预览后已变化，请重新预览 [DV-M01]")]
     StalePreview,
-    #[error("选择了预览中不存在或重复的音效")]
+    #[error("选择了预览中不存在或重复的音效 [DV-M02]")]
     InvalidSoundSelection,
-    #[error("所选音效不是可用的本机绝对文件")]
+    #[error("所选音效不是可用的本机绝对文件 [DV-M03]")]
     InvalidSoundPath,
-    #[error("所选音效内容在预览后发生变化，请重新预览")]
+    #[error("所选音效内容在预览后发生变化，请重新预览 [DV-M04]")]
     SoundChanged,
-    #[error("必须同时选择导入规则才能导入音效")]
+    #[error("必须同时选择导入规则才能导入音效 [DV-M05]")]
     SoundsNeedRules,
-    #[error("当前规则已有修改，需明确选择覆盖规则")]
+    #[error("当前规则已有修改，需明确选择覆盖规则 [DV-M06]")]
     RulesConflict,
-    #[error("当前直播设置已有修改，需明确选择覆盖直播设置")]
+    #[error("当前直播设置已有修改，需明确选择覆盖直播设置 [DV-M07]")]
     LiveSettingsConflict,
-    #[error("无法读取旧配置：{0}")]
+    #[error("无法读取旧配置：{0} [DV-M08]")]
     Legacy(#[from] LegacyError),
     #[error("无法导入旧配置：{0}")]
     Storage(#[from] StorageError),
-    #[error("导入失败且数据库回滚失败；原错误：{apply}；回滚错误：{rollback}")]
+    #[error("导入失败且数据库回滚失败；原错误：{apply}；回滚错误：{rollback} [DV-M10]")]
     Rollback {
         apply: Box<LegacyImportError>,
         rollback: StorageError,
     },
-    #[error("数据库已回滚，但新复制的音效文件清理失败；原错误：{apply}；清理错误：{cleanup}")]
+    #[error(
+        "数据库已回滚，但新复制的音效文件清理失败；原错误：{apply}；清理错误：{cleanup} [DV-M11]"
+    )]
     Cleanup {
         apply: Box<LegacyImportError>,
         cleanup: io::Error,

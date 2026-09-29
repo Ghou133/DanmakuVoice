@@ -379,7 +379,7 @@ impl Application {
         };
         if !audio::default_output_available() {
             if let Ok(mut state) = self.lock() {
-                state.status = "系统默认输出设备不可用，等待设备恢复".into();
+                state.status = "系统默认输出设备不可用，等待设备恢复 [DV-A01]".into();
                 state.status_error = true;
             }
             return;
@@ -473,6 +473,7 @@ impl Application {
             let startup_enabled = false;
             state.config_snapshot = Some(json!({
                 "app_version": env!("CARGO_PKG_VERSION"),
+                "update_channel": if crate::package::installed_root()?.is_some() { "store" } else { "github" },
                 "connections":connections,
                 "fish_audio_settings":fish_audio_settings,
                 "presets":state.store.presets().map_err(display)?,
@@ -509,6 +510,13 @@ impl Application {
             .audio
             .as_ref()
             .is_some_and(|a| a.writer.disconnected());
+        let status_message = if device_lost {
+            "输出设备已断开，请在设置中重新应用设备 [DV-A07]".to_owned()
+        } else if state.status_error {
+            danmakuvoice_engine::error_codes::tag(&state.status, "DV-X00")
+        } else {
+            state.status.clone()
+        };
         let dynamic = json!({
             "config_revision": state.config_revision,
             "config_unchanged": config_unchanged,
@@ -517,7 +525,7 @@ impl Application {
             "account":{"user_id":state.bili_user_id,"name":state.bili_profile.as_ref().map(|p| &p.name),"avatar_url":state.bili_profile.as_ref().and_then(|p| p.avatar_url.as_deref())}, "qr":state.qr,
             "live":{"running":live.running,"connecting":state.connecting,"room_id":live.room_id.or(room),"state":if state.connecting {"connecting"} else {live_state},"message":live_message,"received":live.received,"events":live.recent_events,"errors":live.errors,"no_voice":live.no_voice},
             "queue":queue_json(&queue), "preferences":state.prefs,
-            "status":{"error":state.status_error || device_lost,"message":if device_lost {"输出设备已断开，请在设置中重新应用设备"} else {&state.status}},
+            "status":{"error":state.status_error || device_lost,"message":status_message},
             "data_dir":state.store.data_dir(),
             "network_disabled":state.network_disabled
         });
@@ -540,7 +548,12 @@ impl Application {
             let mut state = self.lock()?;
             state.explicit_stop_epoch = state.explicit_stop_epoch.wrapping_add(1);
         }
-        let result = self.execute(action, payload).await;
+        let result = self.execute(action, payload).await.map_err(|error| {
+            danmakuvoice_engine::error_codes::tag(
+                error,
+                danmakuvoice_engine::error_codes::command_code(action),
+            )
+        });
         {
             let mut state = self.lock()?;
             // Failed actions may have written a partial result before an
@@ -688,7 +701,8 @@ impl Application {
                     .map_err(display)?;
             }
             "connections.probe" => return self.probe(required_str(&payload, "id")?).await,
-            "audition" => self.audition(&payload).await?,
+            "audition" => self.audition(&payload, false).await?,
+            "audio.test" => self.audition(&payload, true).await?,
             "preferences.save" => self.preferences(&payload).await?,
             "migration.apply" => {
                 confirmed(&payload)?;
@@ -1309,7 +1323,7 @@ impl Controller {
 
     fn ensure_audio(&mut self) -> Result<SchedulerHandle, String> {
         if self.audio.as_ref().is_some_and(|a| a.writer.disconnected()) {
-            return Err("输出设备已断开，请在设置中重新应用设备".into());
+            return Err("输出设备已断开，请在设置中重新应用设备 [DV-A07]".into());
         }
         if let Some(scheduler) = &self.scheduler {
             return Ok(scheduler.clone());
@@ -2053,8 +2067,10 @@ impl Application {
         Ok(())
     }
 
-    async fn audition(&self, payload: &Value) -> Result<(), String> {
-        self.require_network()?;
+    async fn audition(&self, payload: &Value, output_test: bool) -> Result<(), String> {
+        if !output_test {
+            self.require_network()?;
+        }
         let gate = self.lock()?.activity_gate.clone();
         let _activity = gate.lock().await;
         let (preview, prepared, scheduler, generation, cancel) = {
@@ -2063,26 +2079,35 @@ impl Application {
             {
                 return Err("正在处理上一项操作，请稍候".into());
             }
-            let preview = if let Some(preset_id) = payload.get("preset_id").and_then(Value::as_str)
-            {
-                state
-                    .store
-                    .voice_audition_preview(preset_id, required_str(payload, "text")?)
-                    .map_err(display)?
+            if output_test && state.prefs.playback_volume() <= 0.0 {
+                return Err("请先取消静音并调高主音量，再测试声音".into());
+            }
+            let (preview, prepared) = if output_test {
+                PreparedPlayback::output_test()
             } else {
-                state.preview(payload)?
+                let preview =
+                    if let Some(preset_id) = payload.get("preset_id").and_then(Value::as_str) {
+                        state
+                            .store
+                            .voice_audition_preview(preset_id, required_str(payload, "text")?)
+                            .map_err(display)?
+                    } else {
+                        state.preview(payload)?
+                    };
+                let device = if preview
+                    .voice
+                    .as_ref()
+                    .is_some_and(|v| v.provider == Provider::Doubao)
+                {
+                    Some(state.store.load_or_create_dobao_device().map_err(display)?)
+                } else {
+                    None
+                };
+                let prepared =
+                    PreparedPlayback::from_store(&state.store, &preview, device.as_ref())
+                        .map_err(display)?;
+                (preview, prepared)
             };
-            let device = if preview
-                .voice
-                .as_ref()
-                .is_some_and(|v| v.provider == Provider::Doubao)
-            {
-                Some(state.store.load_or_create_dobao_device().map_err(display)?)
-            } else {
-                None
-            };
-            let prepared = PreparedPlayback::from_store(&state.store, &preview, device.as_ref())
-                .map_err(display)?;
             let scheduler = state.ensure_audio()?;
             state.audition_cancel = CancellationToken::new();
             state.audition_starting = true;
@@ -3002,9 +3027,10 @@ fn queue_json(q: &QueueSnapshot) -> Value {
 fn room_state(state: &RoomState) -> (&'static str, String) {
     match state {
         RoomState::Stopped => ("stopped", "尚未连接".into()),
-        RoomState::SessionExpired { .. } => {
-            ("session_expired", "哔哩哔哩登录已失效，请重新扫码".into())
-        }
+        RoomState::SessionExpired { .. } => (
+            "session_expired",
+            "哔哩哔哩登录已失效，请重新扫码 [DV-B09]".into(),
+        ),
         RoomState::Connecting { .. } => ("connecting", "正在连接".into()),
         RoomState::Connected { .. } => ("connected", "已连接，等待弹幕".into()),
         RoomState::Reconnecting { .. } => ("reconnecting", "连接中断，正在重连".into()),
