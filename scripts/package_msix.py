@@ -115,7 +115,7 @@ def stage(audit, exe, ffmpeg, output, version, commit, source=None, development=
             if item.is_dir() or not item.filename.startswith('DanmakuVoice/'):
                 continue
             name = item.filename.removeprefix('DanmakuVoice/')
-            if name in ('LICENSE', 'NOTICE.md', 'BUILD-SOURCE.txt', 'WORKTREE-SOURCE.json') or name.startswith(('third-party/Rust/', 'third-party/license-supplements/')) or name in ('third-party/FFmpeg/COPYING.LGPLv2.1', 'third-party/FFmpeg/LICENSE.md'):
+            if name in ('LICENSE', 'NOTICE.md', 'BUILD-SOURCE.txt', 'WORKTREE-SOURCE.json') or name.startswith(('third-party/Rust/', 'third-party/license-supplements/', 'third-party/Fonts/')) or name in ('third-party/FFmpeg/COPYING.LGPLv2.1', 'third-party/FFmpeg/LICENSE.md'):
                 safe_member(name)
                 if name in files:
                     raise ValueError('Duplicate license material')

@@ -2590,3 +2590,157 @@ fn speech_restart_keeps_chat_in_order_and_bounded() {
     assert_eq!(bounded.last().unwrap().message, "4");
     assert!(carried_chat(&[], &[]).is_empty());
 }
+
+#[tokio::test]
+async fn overlay_switch_server_items_and_token_reset_stay_local() {
+    let (directory, app) = isolated(true);
+    let first = app.snapshot().unwrap();
+    let token = first["overlay"]["settings"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(token.len(), 32);
+    assert_eq!(first["overlay"]["running"], false);
+    assert!(app.overlay_tick(&mut OverlayCursor::default()).is_ok());
+    assert!(
+        app.dispatch("overlay.test", json!({"kind":"danmaku"}))
+            .await
+            .is_err()
+    );
+
+    // Edits never replace the app-owned token or port.
+    let mut edited = first["overlay"]["settings"].clone();
+    edited["enabled"] = json!(true);
+    edited["title"] = json!("  上分夜  ");
+    edited["names"] = json!("none");
+    edited["token"] = json!("ffffffffffffffffffffffffffffffff");
+    edited["port"] = json!(2000);
+    let saved = app
+        .dispatch("overlay.save", json!({"settings": edited}))
+        .await
+        .unwrap();
+    assert_eq!(saved["overlay"]["settings"]["title"], "上分夜");
+    assert_eq!(saved["overlay"]["settings"]["token"], token.as_str());
+    assert_eq!(saved["overlay"]["settings"]["port"], 47823);
+    // The host has not supplied fonts yet, so only the switch is saved.
+    assert_eq!(saved["overlay"]["running"], false);
+
+    app.lock().unwrap().overlay_settings.port = 0;
+    app.start_overlay(Arc::new(|_: &str| None)).await;
+    let running = app.snapshot().unwrap();
+    assert_eq!(running["overlay"]["running"], true);
+    let port = running["overlay"]["port"].as_u64().unwrap();
+    assert!(port >= 1024);
+    assert_eq!(running["overlay"]["settings"]["port"], port);
+    assert_eq!(
+        running["overlay"]["url"],
+        format!("http://127.0.0.1:{port}/overlay?token={token}")
+    );
+    app.dispatch("overlay.test", json!({"kind":"super_chat"}))
+        .await
+        .unwrap();
+    assert!(
+        app.dispatch("overlay.test", json!({"kind":"<script>"}))
+            .await
+            .is_err()
+    );
+
+    let reset = app
+        .dispatch("overlay.token.reset", json!({}))
+        .await
+        .unwrap();
+    let new_token = reset["overlay"]["settings"]["token"].as_str().unwrap();
+    assert_ne!(new_token, token);
+    assert!(
+        reset["overlay"]["url"]
+            .as_str()
+            .unwrap()
+            .ends_with(new_token)
+    );
+
+    let mut off = reset["overlay"]["settings"].clone();
+    off["enabled"] = json!(false);
+    let stopped = app
+        .dispatch("overlay.save", json!({"settings": off}))
+        .await
+        .unwrap();
+    assert_eq!(stopped["overlay"]["running"], false);
+    drop(app);
+    let reopened = Application::new(directory.path().to_owned(), true).unwrap();
+    let restored = reopened.snapshot().unwrap();
+    assert_eq!(restored["overlay"]["settings"]["title"], "上分夜");
+    assert_eq!(restored["overlay"]["settings"]["token"], new_token);
+}
+
+#[test]
+fn overlay_items_follow_switches_and_hide_names_in_the_app() {
+    let settings = OverlaySettings::default();
+    let read = ProcessedLiveEvent {
+        event: LiveEvent::danmaku(1, Some(7), "观众甲", "你好"),
+        outcome: LiveEventOutcome::Enqueued { job_id: 3 },
+    };
+    let item = overlay_item(&read, &settings).unwrap();
+    assert_eq!(item["name"], "");
+    assert_eq!(item["message"], "你好");
+    assert_eq!(item["job_id"], 3);
+    assert_eq!(item["viewer"].as_str().unwrap().len(), 16);
+    assert!(!item.to_string().contains("观众甲"));
+    let mut gift = LiveEvent::danmaku(1, Some(8), "观众乙", "");
+    gift.kind = EventKind::Gift;
+    gift.gift_name = "小心心".into();
+    gift.quantity = 66;
+    let gift = ProcessedLiveEvent {
+        event: gift,
+        outcome: LiveEventOutcome::DisplayOnly,
+    };
+    let shown = overlay_item(&gift, &settings).unwrap();
+    assert_eq!(shown["name"], "观众乙");
+    assert_eq!(shown["job_id"], Value::Null);
+    let hidden = OverlaySettings {
+        names: OverlayNames::None,
+        show_danmaku: false,
+        ..OverlaySettings::default()
+    };
+    assert!(overlay_item(&read, &hidden).is_none());
+    assert_eq!(overlay_item(&gift, &hidden).unwrap()["name"], "");
+    let demo = overlay_demo_item("danmaku", &settings).unwrap();
+    assert_eq!(demo["demo"], true);
+    assert!(demo.get("job_id").is_none());
+}
+
+#[test]
+fn overlay_feed_sends_each_result_once_and_replays_only_fresh_chat() {
+    let result = |text: &str, at: u64| {
+        let mut event = LiveEvent::danmaku(1, Some(9), "观众", text);
+        event.observed_at_ms = at;
+        ProcessedLiveEvent {
+            event,
+            outcome: LiveEventOutcome::DisplayOnly,
+        }
+    };
+    let results = vec![
+        result("一", 1_000),
+        result("二", 50_000),
+        result("三", 55_000),
+        result("四", 58_000),
+        result("五", 59_000),
+    ];
+    // A page connecting at 60 s with 14 s linger sees at most three fresh lines.
+    assert_eq!(overlay_feed_start(&results, None, 60_000, 14_000), 2);
+    assert_eq!(overlay_feed_start(&results, None, 600_000, 14_000), 5);
+    assert_eq!(overlay_feed_start(&results, Some(None), 60_000, 14_000), 0);
+    assert_eq!(
+        overlay_feed_start(&results, Some(Some(&results[2])), 60_000, 14_000),
+        3
+    );
+    assert_eq!(
+        overlay_feed_start(&results, Some(Some(&results[4])), 60_000, 14_000),
+        5
+    );
+    // The last sent line scrolled out of the bounded list: resume by time.
+    let gone = result("零", 52_000);
+    assert_eq!(
+        overlay_feed_start(&results, Some(Some(&gone)), 60_000, 14_000),
+        2
+    );
+}

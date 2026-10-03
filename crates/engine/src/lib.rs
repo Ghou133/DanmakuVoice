@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod bilibili;
+pub mod broadcast;
 pub mod diagnostics;
 pub mod error_codes;
 pub mod event_pipeline;

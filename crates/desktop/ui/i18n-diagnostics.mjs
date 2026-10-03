@@ -3,6 +3,12 @@ import { getLanguage } from './i18n.mjs';
 // Structured error templates preserve dynamic identifiers, names, paths and
 // numeric system/service codes. Unknown diagnostics remain available verbatim.
 const copy = `
+不支持的开播管理操作	Unsupported broadcast management action
+开播管理正在处理请求，请稍候	Broadcast management is processing a request. Please wait.
+当前没有推流信息，请点击开播获取	No stream details are available. Open the room to get them.
+请先扫码登录哔哩哔哩，再管理自己的直播间	Sign in to Bilibili by QR code to manage your own room
+账号已变更，开播管理请求已取消；请刷新房间状态	Account changed. The broadcast request was cancelled; refresh the room status.
+账号已变更，请重新加载自己的直播间	Account changed. Load your own room again.
 服务地址已更新，尚未检查服务	Service address updated; awaiting a check
 服务检查超时，请稍后重试	Service check timed out; try again shortly
 本地服务连接不存在或类型不一致	Local service connection is missing or has a different service type
@@ -56,6 +62,10 @@ Fish Audio 音色名称不能为空	Fish Audio voice name cannot be empty
 Fish Audio 音色 ID 或页面链接无效	Invalid Fish Audio voice ID or page link
 试听文本不能为空、不能超过 2000 字，且不能包含控制字符	Preview text must contain 1–2000 characters with no control characters
 数据已重置，但数据库仍被其他实例占用；请关闭其他实例后重新清除	Data reset, but the database is in use by another instance. Close other instances and clear data again
+OBS 叠加层设置无效	Invalid OBS overlay settings
+OBS 叠加层无法使用本机端口 {0} 起的 {1} 个端口：{2}	The OBS overlay could not use any of {1} local ports starting at {0}: {2}
+请先启用 OBS 叠加层	Turn on the OBS overlay first
+缺少叠加层设置	Overlay settings are missing
 凭据为空	Credentials are empty
 凭据超过系统加密接口的长度限制	Credentials exceed the system encryption length limit
 Windows 凭据保护失败：{0}	Windows credential protection failed: {0}

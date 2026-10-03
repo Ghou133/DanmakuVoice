@@ -21,7 +21,8 @@ const state = {
   presets:[{id:'voice',connection_id:'local',name:'中文音色设置',provider:'dots',voice_id:'reference.wav',speed:1,volume:1}],
   bindings:[],assets:[],devices:[{name:'中文设备声音',is_default:true}],account:null,qr:{status:'idle'},
   local_services:{dots:{state:'ready',message:'本地服务已就绪'},gpt_sovits:{state:'unconfigured',message:'尚未配置本地服务目录'}},
-  doubao_voices:[],fish_audio_settings:{},startup_enabled:false,status:{}
+  doubao_voices:[],fish_audio_settings:{},startup_enabled:false,status:{},
+  overlay:{settings:{enabled:false,style:'spine',corner:'top_left',scale:1,vignette:.6,title:'Tonight',tagline:'',show_danmaku:true,show_gift:true,show_super_chat:true,show_guard:true,names:'special',merge_duplicates:true,linger_seconds:14,port:47823,token:'0123456789abcdef0123456789abcdef'},running:false,port:47823,url:'http://127.0.0.1:47823/overlay?token=0123456789abcdef0123456789abcdef',error:null,clients:[]}
 };
 const calls = [];
 let failLanguage = false;
@@ -34,7 +35,9 @@ let failLanguage = false;
       const target = path.resolve(root,'.'+(pathname==='/'?'/index.html':decodeURIComponent(pathname)));
       if (!target.startsWith(root+path.sep)) {response.writeHead(403).end();return;}
       const type = {'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.png':'image/png'}[path.extname(target)];
-      response.writeHead(200,{'Content-Type':type||'application/octet-stream'}).end(await fs.readFile(target));
+      // Tauri serves embedded files by file name, so ./Font.woff2 comes from ui/fonts.
+      const bytes = await fs.readFile(target).catch(() => fs.readFile(path.join(root,'fonts',path.basename(target))));
+      response.writeHead(200,{'Content-Type':type||'application/octet-stream'}).end(bytes);
     } catch {response.writeHead(404).end();}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -81,7 +84,7 @@ let failLanguage = false;
     assert.equal(state.rules.templates.danmaku,'{user_name}说：{message}');
     assert.equal(state.presets[0].name,'中文音色设置');
     await page.screenshot({path:path.join(output,'appearance-en-dark.png')});
-    for(const id of ['room','voices','rules','assets','general','data']) {
+    for(const id of ['room','voices','rules','assets','overlay','general','data']) {
       await tab(id);
       assert.ok(await page.locator('#settings-content').innerText(),id);
       const overflow = await page.locator('#settings-content').evaluate(node=>node.scrollWidth>node.clientWidth+2);

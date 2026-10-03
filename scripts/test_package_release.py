@@ -32,6 +32,7 @@ class ReleaseTests(unittest.TestCase):
                 "third-party/FFmpeg/LICENSE.md", "third-party/Rust/Cargo.lock",
                 "third-party/Rust/licenses/example/LICENSE", "third-party/license-supplements/example/LICENSE")},
             "PROGRESS.md": b"Not for the application ZIP",
+            "third-party/Fonts/fixture-OFL.txt": b"font copyright and license",
             "third-party/FFmpeg/ffmpeg.tar.xz": b"Sources stay in the separate source ZIP",
         }
         self.source_files = {
@@ -73,6 +74,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(archive.testzip(), None)
         with ZipFile(self.out / "DanmakuVoice-licenses.zip") as archive:
             self.assertIn("third-party/license-supplements/example/LICENSE", archive.namelist())
+            self.assertEqual(archive.read("third-party/Fonts/fixture-OFL.txt"), b"font copyright and license")
             self.assertNotIn("DanmakuVoice.exe", archive.namelist())
         for line in (self.out / "SHA256SUMS.txt").read_text().splitlines():
             digest, name = line.split("  ")

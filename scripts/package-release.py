@@ -63,7 +63,7 @@ def package(audit, exe, source, output, commit, version, development=False):
             if entry.is_dir() or not entry.filename.startswith("DanmakuVoice/"):
                 continue
             name = entry.filename.removeprefix("DanmakuVoice/")
-            if name in exact or name.startswith(("third-party/Rust/", "third-party/license-supplements/")):
+            if name in exact or name.startswith(("third-party/Rust/", "third-party/license-supplements/", "third-party/Fonts/")):
                 if "\\" in name or ':' in name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts:
                     raise ValueError(f"Unsafe ZIP path: {name}")
                 if name in licenses:

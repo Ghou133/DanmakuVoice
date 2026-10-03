@@ -97,6 +97,8 @@ pub enum StorageError {
     InvalidAuditionText,
     #[error("数据已重置，但数据库仍被其他实例占用；请关闭其他实例后重新清除 [DV-S36]")]
     DataResetBusy,
+    #[error("OBS 叠加层设置无效 [DV-S37]")]
+    InvalidOverlaySettings,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -131,6 +133,8 @@ pub struct DesktopPreferences {
     pub broadcaster_uid: Option<u64>,
     pub authenticated: bool,
     pub tts_enabled: bool,
+    /// Experimental: show the broadcast console (open/close the own room) on the main screen.
+    pub broadcast_console: bool,
 }
 
 impl Default for DesktopPreferences {
@@ -146,6 +150,7 @@ impl Default for DesktopPreferences {
             broadcaster_uid: None,
             authenticated: false,
             tts_enabled: true,
+            broadcast_console: false,
         }
     }
 }
@@ -177,6 +182,129 @@ impl DesktopPreferences {
                     !name.trim().is_empty() && name.len() <= 512 && !name.contains('\0')
                 }
             }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayStyle {
+    /// A glass card wraps the masthead and the messages while anyone speaks.
+    Card,
+    /// The masthead and messages hang on one vertical line.
+    #[default]
+    Spine,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayCorner {
+    #[default]
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayNames {
+    /// Content only.
+    None,
+    /// Names only for gifts, Super Chat and guard purchases.
+    #[default]
+    Special,
+    All,
+}
+
+pub const OVERLAY_DEFAULT_PORT: u16 = 47823;
+pub const OVERLAY_DEFAULT_TITLE: &str = "今晚的弹幕";
+const OVERLAY_TITLE_LIMIT: usize = 24;
+const OVERLAY_TAGLINE_LIMIT: usize = 64;
+
+/// Experimental OBS browser-source overlay. The token only gates the local
+/// loopback server; it is not an account credential and is not exported.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlaySettings {
+    pub enabled: bool,
+    pub style: OverlayStyle,
+    pub corner: OverlayCorner,
+    pub scale: f32,
+    pub vignette: f32,
+    pub title: String,
+    /// Shown while nobody is speaking. Empty means the built-in line.
+    pub tagline: String,
+    pub show_danmaku: bool,
+    pub show_gift: bool,
+    pub show_super_chat: bool,
+    pub show_guard: bool,
+    pub names: OverlayNames,
+    pub merge_duplicates: bool,
+    pub linger_seconds: u32,
+    pub port: u16,
+    pub token: String,
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            style: OverlayStyle::Spine,
+            corner: OverlayCorner::TopLeft,
+            scale: 1.0,
+            vignette: 0.6,
+            title: OVERLAY_DEFAULT_TITLE.into(),
+            tagline: String::new(),
+            show_danmaku: true,
+            show_gift: true,
+            show_super_chat: true,
+            show_guard: true,
+            names: OverlayNames::Special,
+            merge_duplicates: true,
+            linger_seconds: 14,
+            port: OVERLAY_DEFAULT_PORT,
+            token: String::new(),
+        }
+    }
+}
+
+impl OverlaySettings {
+    pub fn validate(&self) -> Result<(), StorageError> {
+        let text_ok = |text: &str, limit: usize| {
+            text.chars().count() <= limit && !text.chars().any(char::is_control)
+        };
+        let valid = self.scale.is_finite()
+            && (0.5..=2.0).contains(&self.scale)
+            && self.vignette.is_finite()
+            && (0.0..=1.0).contains(&self.vignette)
+            && !self.title.trim().is_empty()
+            && text_ok(&self.title, OVERLAY_TITLE_LIMIT)
+            && text_ok(&self.tagline, OVERLAY_TAGLINE_LIMIT)
+            && (3..=120).contains(&self.linger_seconds)
+            && self.port >= 1024
+            && (self.token.is_empty()
+                || (self.token.len() == 32
+                    && self
+                        .token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))));
+        if valid {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidOverlaySettings)
+        }
+    }
+
+    /// Copy the user-editable fields and keep the server identity (port and
+    /// token) owned by the application.
+    pub fn with_edits_from(&self, edited: &OverlaySettings) -> OverlaySettings {
+        OverlaySettings {
+            title: edited.title.trim().to_owned(),
+            tagline: edited.tagline.trim().to_owned(),
+            port: self.port,
+            token: self.token.clone(),
+            ..edited.clone()
+        }
     }
 }
 
@@ -608,6 +736,35 @@ impl DataStore {
         if settings.room_id == Some(0) || !settings.gift_merge.is_valid() {
             return Err(StorageError::InvalidLiveSettings);
         }
+        Ok(settings)
+    }
+
+    pub fn save_overlay_settings(
+        &mut self,
+        settings: &OverlaySettings,
+    ) -> Result<(), StorageError> {
+        settings.validate()?;
+        let json = serde_json::to_string(settings)?;
+        self.conn.execute(
+            "INSERT INTO settings(key,json) VALUES('overlay',?1)\
+            ON CONFLICT(key) DO UPDATE SET json=excluded.json",
+            params![json],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_overlay_settings(&self) -> Result<OverlaySettings, StorageError> {
+        let json: Option<String> = self
+            .conn
+            .query_row("SELECT json FROM settings WHERE key='overlay'", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let settings = match json {
+            Some(value) => serde_json::from_str(&value)?,
+            None => OverlaySettings::default(),
+        };
+        settings.validate()?;
         Ok(settings)
     }
 
@@ -2824,6 +2981,7 @@ mod tests {
             broadcaster_uid: Some(42),
             authenticated: false,
             tts_enabled: false,
+            broadcast_console: true,
         };
         store.save_desktop_preferences(&preferences).unwrap();
         drop(store);
@@ -2854,6 +3012,91 @@ mod tests {
     }
 
     #[test]
+    fn overlay_settings_round_trip_validate_and_stay_out_of_exports() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let defaults = store.load_overlay_settings().unwrap();
+        assert_eq!(defaults, OverlaySettings::default());
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.port, OVERLAY_DEFAULT_PORT);
+        let settings = OverlaySettings {
+            enabled: true,
+            style: OverlayStyle::Card,
+            corner: OverlayCorner::BottomRight,
+            scale: 1.25,
+            vignette: 0.8,
+            title: "上分夜".into(),
+            tagline: "say a word — it'll be read aloud.".into(),
+            names: OverlayNames::None,
+            linger_seconds: 30,
+            token: "0123456789abcdef0123456789abcdef".into(),
+            ..OverlaySettings::default()
+        };
+        store.save_overlay_settings(&settings).unwrap();
+        drop(store);
+        let mut reopened = DataStore::open(temp.path()).unwrap();
+        assert_eq!(reopened.load_overlay_settings().unwrap(), settings);
+        let exported = serde_json::to_string(&reopened.export_configuration().unwrap()).unwrap();
+        assert!(!exported.contains("0123456789abcdef"));
+        for broken in [
+            OverlaySettings {
+                scale: f32::NAN,
+                ..settings.clone()
+            },
+            OverlaySettings {
+                scale: 3.0,
+                ..settings.clone()
+            },
+            OverlaySettings {
+                vignette: -0.1,
+                ..settings.clone()
+            },
+            OverlaySettings {
+                title: "  ".into(),
+                ..settings.clone()
+            },
+            OverlaySettings {
+                title: "长".repeat(25),
+                ..settings.clone()
+            },
+            OverlaySettings {
+                tagline: "line\nbreak".into(),
+                ..settings.clone()
+            },
+            OverlaySettings {
+                linger_seconds: 2,
+                ..settings.clone()
+            },
+            OverlaySettings {
+                port: 80,
+                ..settings.clone()
+            },
+            OverlaySettings {
+                token: "ABCDEF".into(),
+                ..settings.clone()
+            },
+        ] {
+            assert!(matches!(
+                reopened.save_overlay_settings(&broken),
+                Err(StorageError::InvalidOverlaySettings)
+            ));
+        }
+        let edited = OverlaySettings {
+            title: "  夜聊  ".into(),
+            port: 2000,
+            token: String::new(),
+            ..settings.clone()
+        };
+        let merged = settings.with_edits_from(&edited);
+        assert_eq!(merged.title, "夜聊");
+        assert_eq!(merged.port, settings.port);
+        assert_eq!(merged.token, settings.token);
+        let old: OverlaySettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(old.style, OverlayStyle::Spine);
+        assert_eq!(old.title, OVERLAY_DEFAULT_TITLE);
+    }
+
+    #[test]
     fn old_desktop_preferences_keep_saved_theme_and_speech_behavior() {
         let old: DesktopPreferences = serde_json::from_str(
             r#"{"appearance":"dark","scale":1.0,"output":"default","master_volume":0.8,"onboarding_done":true}"#,
@@ -2865,6 +3108,7 @@ mod tests {
         assert!(old.tts_enabled);
         assert!(!old.muted);
         assert!(!old.authenticated);
+        assert!(!old.broadcast_console);
         assert_eq!(old.broadcaster_uid, None);
         let new: DesktopPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(new.appearance, AppearancePreference::System);

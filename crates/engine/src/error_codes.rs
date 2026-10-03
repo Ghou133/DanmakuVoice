@@ -56,6 +56,7 @@ pub fn command_code(action: &str) -> &'static str {
         "preferences" | "rules" | "startup" => "DV-X09",
         "migration" | "data" | "assets" | "aliases" => "DV-X10",
         "external" => "DV-X11",
+        "overlay" => "DV-X17",
         _ => "DV-X00",
     }
 }

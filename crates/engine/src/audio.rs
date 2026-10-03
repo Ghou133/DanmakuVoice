@@ -82,6 +82,22 @@ struct Shared {
     volume_bits: AtomicU32,
     disconnected: AtomicBool,
     underruns: AtomicU64,
+    /// Samples of the active job the device callback actually consumed.
+    /// Reset when a job is activated; read for the overlay's progress line.
+    played_samples: AtomicU64,
+    /// Samples of the active job that entered the bounded device queue.
+    pushed_samples: AtomicU64,
+}
+
+/// Real output position of the job that currently owns the device queue.
+/// `played` is what the listener has heard; `queued` is decoded audio still
+/// waiting in the ring. Synthesis may still be streaming, so the total length
+/// is not known until the job finishes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OutputProgress {
+    pub job_id: u64,
+    pub played_ms: u64,
+    pub queued_ms: u64,
 }
 
 /// Cloneable writer used by the async decode task; capacity is fixed at open.
@@ -123,7 +139,26 @@ impl AudioWriter {
         self.shared.active_job.store(0, Ordering::Release);
         while self.shared.samples.pop().is_some() {}
         self.shared.queued_audio_job.store(0, Ordering::Release);
+        self.shared.played_samples.store(0, Ordering::Relaxed);
+        self.shared.pushed_samples.store(0, Ordering::Relaxed);
         self.shared.active_job.store(job_id, Ordering::Release);
+    }
+
+    /// Lock-free read for display only. A fallback route re-activates the
+    /// same job id, which restarts its position from zero.
+    pub fn progress(&self) -> OutputProgress {
+        let job_id = self.shared.active_job.load(Ordering::Acquire);
+        if job_id == 0 {
+            return OutputProgress::default();
+        }
+        let played = self.shared.played_samples.load(Ordering::Relaxed);
+        let pushed = self.shared.pushed_samples.load(Ordering::Relaxed);
+        let per_second = u64::from(self.sample_rate.max(1)) * u64::from(self.channels.max(1));
+        OutputProgress {
+            job_id,
+            played_ms: played.saturating_mul(1000) / per_second,
+            queued_ms: pushed.saturating_sub(played).saturating_mul(1000) / per_second,
+        }
     }
 
     pub fn has_queued_audio(&self, job_id: u64) -> bool {
@@ -246,6 +281,7 @@ impl AudioWriter {
                     self.shared
                         .queued_audio_job
                         .store(job_id, Ordering::Release);
+                    self.shared.pushed_samples.fetch_add(1, Ordering::Relaxed);
                     if !marked_progress {
                         if let Some(progress) = progress {
                             progress.store(true, Ordering::Release);
@@ -413,6 +449,8 @@ impl AudioOutput {
             volume_bits: AtomicU32::new(master_volume.clamp(0.0, 2.0).to_bits()),
             disconnected: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
+            played_samples: AtomicU64::new(0),
+            pushed_samples: AtomicU64::new(0),
         });
         let writer = AudioWriter {
             shared: shared.clone(),
@@ -493,10 +531,12 @@ fn default_route_changed(
 fn fill<T: Copy>(data: &mut [T], shared: &Shared, convert: impl Fn(f32) -> T) {
     let volume = f32::from_bits(shared.volume_bits.load(Ordering::Relaxed));
     let mut empty = false;
+    let mut played = 0u64;
     for out in data {
         let value = loop {
             match shared.samples.pop() {
                 Some(tagged) if tagged.job_id == shared.active_job.load(Ordering::Acquire) => {
+                    played += 1;
                     break tagged.value;
                 }
                 Some(_) => continue,
@@ -507,6 +547,9 @@ fn fill<T: Copy>(data: &mut [T], shared: &Shared, convert: impl Fn(f32) -> T) {
             }
         };
         *out = convert((value * volume).clamp(-1.0, 1.0));
+    }
+    if played > 0 {
+        shared.played_samples.fetch_add(played, Ordering::Relaxed);
     }
     if empty {
         shared.underruns.fetch_add(1, Ordering::Relaxed);
@@ -524,6 +567,8 @@ pub(crate) fn test_writer(sample_rate: u32, channels: u16, capacity: usize) -> A
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             disconnected: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
+            played_samples: AtomicU64::new(0),
+            pushed_samples: AtomicU64::new(0),
         }),
         sample_rate,
         channels,
@@ -554,6 +599,48 @@ impl AudioWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn progress_counts_only_heard_samples_of_the_active_job() {
+        let writer = test_writer(1_000, 1, 4_000);
+        let cancel = CancellationToken::new();
+        assert_eq!(writer.progress(), OutputProgress::default());
+        writer.activate(7);
+        writer
+            .push_interleaved(7, &[0.1; 1_500], &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            writer.progress(),
+            OutputProgress {
+                job_id: 7,
+                played_ms: 0,
+                queued_ms: 1_500
+            }
+        );
+        writer.render_test_frames(500);
+        assert_eq!(
+            writer.progress(),
+            OutputProgress {
+                job_id: 7,
+                played_ms: 500,
+                queued_ms: 1_000
+            }
+        );
+        // A new job starts from zero; stale samples of job 7 are discarded.
+        writer.activate(8);
+        writer.render_test_frames(200);
+        assert_eq!(
+            writer.progress(),
+            OutputProgress {
+                job_id: 8,
+                played_ms: 0,
+                queued_ms: 0
+            }
+        );
+        writer.deactivate_if(8);
+        assert_eq!(writer.progress(), OutputProgress::default());
+    }
 
     #[tokio::test]
     async fn cancelled_job_cannot_reactivate_or_erase_next_jobs_pcm() {
@@ -613,6 +700,8 @@ mod tests {
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             disconnected: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
+            played_samples: AtomicU64::new(0),
+            pushed_samples: AtomicU64::new(0),
         });
         let writer = AudioWriter {
             shared,

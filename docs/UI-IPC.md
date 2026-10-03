@@ -127,6 +127,9 @@ is a test-only process flag: network commands reject with a clear error.
 | `devices.refresh` | `{}` |
 | `audio.test` | `{}` queues a 600 ms local calibration tone through the bundled FFmpeg and selected output, without a TTS account or network. Uses existing master volume and queue cancellation; muted/zero volume is rejected. Completion or sanitized failure appears in queue history. |
 | `startup.set` | `{enabled:true}` |
+| `overlay.save` | `{settings:OverlaySettings}` validates and saves the experimental OBS overlay, then starts or stops its loopback server to match `enabled`; the app keeps its own `port` and `token`, whatever the payload carries |
+| `overlay.token.reset` | `{}` replaces the overlay token; connected overlay pages receive `reset` and the old address stops working immediately |
+| `overlay.test` | `{kind:"danmaku"\|"super_chat"}` sends one clearly marked demo item to connected overlay pages only; it never enters the speech queue. Rejected while the overlay is off |
 | `configuration.export` | `{path:"new absolute file path"}` never overwrites |
 | `migration.preview` | `{path:"old config.json"}` result is engine LegacyPreview |
 | `migration.apply` | `{confirmed:true,options:LegacyImportOptions}` applies the last exact preview, creates backup |
@@ -164,11 +167,45 @@ by preset ID. Real Fish login, synthesis,
 charge behavior, and complete GUI flow have not been validated by offline IPC tests.
 Preferences include `{appearance:"system"|"light"|"dark",language:"zh-CN"|"en",scale:1,output:"default",
 master_volume:1,muted:false,onboarding_done:false,broadcaster_uid:null,authenticated:false,
-tts_enabled:true}`. Only specified preference fields are merged into current values.
+tts_enabled:true,broadcast_console:false}`. `broadcast_console` is the experimental 开播 switch: it only shows the
+broadcast console on the main screen and allows the UI's read-only `bili.broadcast.refresh` calls; it changes no reception,
+speech or room state. Only specified preference fields are merged into current values.
 Missing language defaults to `zh-CN`; unsupported language values are rejected before changing settings.
 Changing only language preserves playback, speech templates, names and existing credentials.
 The frontend applies the saved language immediately; the host also updates the window title and tray menu.
 Changing `tts_enabled` keeps live reception/display; a speech-capable live session switches its speech gate without reconnecting. A receive-only session needs playback initialization when speech is first enabled. The visible chat is carried through required session replacement. Legacy FFmpeg path values are ignored and are absent from snapshots/exports.
+`snapshot.overlay` is dynamic: `{settings:OverlaySettings,running,port,url,error,clients:[{width,height}]}`.
+`OverlaySettings` is `{enabled:false,style:"card"|"spine",corner:"top_left"|"top_right"|"bottom_left"|"bottom_right",
+scale:0.5..2,vignette:0..1,title,tagline,show_danmaku,show_gift,show_super_chat,show_guard,
+names:"none"|"special"|"all",merge_duplicates,linger_seconds:3..120,port,token}`. Defaults: spine, top left,
+scale 1, vignette 0.6, title `今晚的弹幕`, empty tagline (the page then uses its English default), names `special`,
+14 seconds, port 47823. The token is a 32-hex local address secret: it is in the snapshot so the settings page can
+copy the address (the page shows it masked) and is excluded from configuration export. `clients` are the browser
+sources currently reading the event stream and the canvas size each reported. The overlay page itself is served at
+`http://127.0.0.1:{port}/overlay?token=…`; its event stream `/overlay/events` sends `hello`, `config`, `status`,
+`item`, `reading`, `clear` and `reset`.
 Migration options: `import_rules`, `import_live_settings`, `selected_sound_ids`,
 `import_connections`, `import_pending_bindings`, `replace_existing_rules`,
 `replace_existing_live_settings`; all false/empty unless explicitly selected.
+
+Broadcast commands (independent of chat reception and OBS media output):
+
+| Action | Payload | Result |
+| --- | --- | --- |
+| `bili.broadcast.refresh` | `{}` | Resolve the authenticated account's own room and current areas. |
+| `bili.broadcast.update` | `{confirmed:true,title,area_id}` | Update the title and valid subcategory on Bilibili. |
+| `bili.broadcast.start` | `{confirmed:true,area_id}` | Fetch current desktop version and sign the start request; retain push credentials or show a face-verification QR. |
+| `bili.broadcast.stop` | `{confirmed:true}` | Close the own room; preserve chat/TTS reception. |
+| `bili.broadcast.credentials` | `{confirmed:true}` | Transient `result:{address,stream_key}` for explicit reveal/copy only. |
+| `bili.broadcast.forget` | `{}` | Cancel pending management and clear retained push credentials and face QR; do not close the room. |
+
+The public `broadcast` snapshot has `{room,areas,busy,has_stream_key,face_image}`. `room` contains
+`{room_id,title,parent_area_id,area_id,live_status,live_since}`; `live_since` is Unix seconds from Bilibili's
+`live_time` (UTC+8) while `live_status` is 1, otherwise `null`, and only drives the elapsed-time display; `areas` contains `{id,name,children:[{id,name}]}`.
+Ordinary polling, configuration export and migration never include push credentials. The UI must remove the
+credentials command's `result` before accepting the returned snapshot, keep cleartext out of form drafts,
+and clear revealed inputs when settings or the main-screen push panel close, or the account changes. With
+`broadcast_console` on and a signed-in account, the UI refreshes the own room when the main screen or the 开播
+settings page is visible and active: once per account and then at most every 60 s; it never refreshes automatically
+while a request is busy or the window is in the background. Do not replay start/update/stop after
+network failure; refresh public room state before another explicit action. Offline mode rejects network operations.

@@ -58,6 +58,7 @@
 | `DV-S34` | `storage.rs / StorageError::InvalidFishVoiceId` | Fish Audio 音色 ID 或页面链接无效 |
 | `DV-S35` | `storage.rs / StorageError::InvalidAuditionText` | 试听文本不能为空、不能超过 2000 字，且不能包含控制字符 |
 | `DV-S36` | `storage.rs / StorageError::DataResetBusy` | 数据已重置，但数据库仍被其他实例占用；请关闭其他实例后重新清除 |
+| `DV-S37` | `storage.rs / StorageError::InvalidOverlaySettings` | OBS 叠加层设置超出范围（标题为空或过长、大小/暗角/停留时间越界、端口或令牌格式不对） |
 | `DV-K01` | `secrets.rs / SecretError::Empty` | 凭据为空 |
 | `DV-K02` | `secrets.rs / SecretError::TooLarge` | 凭据超过系统加密接口的长度限制 |
 | `DV-K03` | `secrets.rs / SecretError::Protect` | Windows 凭据保护失败：{0} |
@@ -180,9 +181,16 @@
 | `DV-X12` | 读取桌面状态/快照 |
 | `DV-X13` | 程序启动失败 |
 | `DV-X14` | 缺少 WebView2 Runtime |
+| `DV-X17` | OBS 叠加层设置、地址重新生成或测试内容 |
 | `DV-U01` | GitHub 更新检查 |
 | `DV-UI01` | 前端校验/操作失败，没有更具体的后端代码 |
 | `DV-UI02` | 桌面 IPC / 界面启动失败，没有更具体的后端代码 |
+
+### OBS 叠加层（实验性）
+
+| 代码 | 含义 |
+|---|---|
+| `DV-O01` | `overlay.rs / OverlayServer::bind`：从已保存端口起连续 10 个本机端口都无法监听（常见原因：被其他程序占用或安全软件拦截）。消息保留系统原因 |
 
 ## 维护与反馈
 
@@ -195,3 +203,7 @@
 | DV-C09 | 安装包中的 FFmpeg 缺失或哈希损坏；不解包回退，需修复安装 |
 | DV-X15 | Windows 包身份／安装目录查询失败 |
 | DV-X16 | Windows 用户或策略禁止启动任务，需要系统设置允许 |
+
+## B站开播管理补充
+
+`DV-B10` 表示开播管理命令的前置条件或状态问题：尚未扫码登录、未确认操作、没有可用推流信息、请求正在处理中或账号已变更。B站 HTTP/协议/权限错误继续保留 `DV-B03` / `DV-B04` / `DV-B05` / `DV-B09`，不输出原始响应或推流密钥。使用方法见 [BROADCAST.md](BROADCAST.md)。

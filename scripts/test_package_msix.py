@@ -83,6 +83,7 @@ class MsixTests(unittest.TestCase):
                     archive.writestr('DanmakuVoice/' + name, b'license fixture')
                 archive.writestr('DanmakuVoice/danmakuvoice.exe', binary.read_bytes())
                 archive.writestr('DanmakuVoice/third-party/Rust/Cargo.lock', b'lock fixture')
+                archive.writestr('DanmakuVoice/third-party/Fonts/fixture-OFL.txt', b'font copyright and license')
                 archive.writestr('DanmakuVoice/WORKTREE-SOURCE.json', tree)
                 archive.writestr('DanmakuVoice/BUILD-SOURCE.txt', f'Source Git commit: {commit}\nCheckout clean before build: False\n' + claims)
             prefix = f'DanmakuVoice-source-{commit[:12]}/'
@@ -94,6 +95,7 @@ class MsixTests(unittest.TestCase):
             files = stage(audit, binary, decoder, root / 'staged', '0.2.2', commit,
                           source=source, development=True)
             self.assertEqual(files['PRIVACY.md'], source_files['docs/PRIVACY.md'])
+            self.assertEqual(files['third-party/Fonts/fixture-OFL.txt'], b'font copyright and license')
             self.assertEqual(files['WORKTREE-SOURCE.json'], tree)
             self.assertIn(identity.encode(), files['SOURCE-AVAILABILITY.txt'])
             self.assertNotIn(b'/releases/download/', files['SOURCE-AVAILABILITY.txt'])

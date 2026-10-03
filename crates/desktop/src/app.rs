@@ -1,20 +1,28 @@
 //! Application orchestration shared by the local WebView commands and tray.
 //! The engine owns rules, credentials, live packets and the single playback FIFO.
+#[path = "broadcast.rs"]
+mod broadcast;
 use crate::embedded_ffmpeg;
 use crate::local_service::{self, Endpoint, Health, Kind, LocalServices};
+use crate::overlay::{AssetLoader, OverlayHub, OverlayServer};
 use base64::Engine;
 use danmakuvoice_engine::{
     audio::{self, AudioOutput},
     bilibili::{BiliAccountProfile, BiliSession, QrChallenge, QrLoginClient, QrPoll, RoomState},
     diagnostics,
     legacy::{self, LegacyPreview},
-    live::{LIVE_RECENT_EVENT_LIMIT, LiveController, LiveSnapshot},
+    live::{
+        LIVE_RECENT_EVENT_LIMIT, LiveController, LiveEventOutcome, LiveSnapshot, ProcessedLiveEvent,
+    },
     migration::{self, LegacyImportOptions},
-    model::{LiveEvent, Provider, VoiceBinding, VoicePreset},
+    model::{EventKind, LiveEvent, Provider, VoiceBinding, VoicePreset},
     playback::{PlaybackExecutor, PreparedPlayback},
     rules::{RulePreview, RuleSet},
     scheduler::{self, JobOrigin, QueueSnapshot, SchedulerHandle, SpeechJob},
-    storage::{ConnectionSettings, DataStore, DesktopPreferences, ServiceConnection},
+    storage::{
+        ConnectionSettings, DataStore, DesktopPreferences, OverlayNames, OverlaySettings,
+        ServiceConnection,
+    },
     tts::{
         dobao::{self, DEFAULT_VOICE_ID},
         dobao_auth::{DoubaoQrAuth, QrSession as DoubaoSession, QrStatus, QrVisual},
@@ -127,6 +135,7 @@ struct Controller {
     bili_user_id: Option<u64>,
     bili_profile: Option<BiliAccountProfile>,
     bili_profile_epoch: u64,
+    broadcast: broadcast::BroadcastState,
     qr: QrView,
     qr_generation: u64,
     qr_cancel: CancellationToken,
@@ -162,6 +171,20 @@ struct Controller {
     config_snapshot: Option<Value>,
     config_revision: u64,
     migration: Option<(PathBuf, LegacyPreview)>,
+    overlay_settings: OverlaySettings,
+    overlay_hub: Arc<OverlayHub>,
+    overlay_server: Option<OverlayServer>,
+    overlay_error: Option<String>,
+    overlay_assets: Option<AssetLoader>,
+}
+
+/// Progress of the overlay feed between ticks. Only live results after the
+/// moment a page connected are sent; older chat stays in the app.
+#[derive(Default)]
+pub struct OverlayCursor {
+    controller: usize,
+    last: Option<ProcessedLiveEvent>,
+    primed: bool,
 }
 
 impl Application {
@@ -176,6 +199,10 @@ impl Application {
     pub fn new(data_dir: PathBuf, network_disabled: bool) -> Result<Self, String> {
         let store = DataStore::open(&data_dir).map_err(display)?;
         let prefs = store.load_desktop_preferences().map_err(display)?;
+        // A damaged overlay record must not stop the app; it reverts to off.
+        let overlay_settings = store.load_overlay_settings().unwrap_or_default();
+        let overlay_hub = OverlayHub::new();
+        overlay_hub.set_config(overlay_config(&overlay_settings));
         let bili_session = store.load_bili_session().ok().flatten();
         let bili_user_id = bili_session.as_ref().map(BiliSession::user_id);
         let bili_profile = bili_session
@@ -201,6 +228,7 @@ impl Application {
             bili_user_id,
             bili_profile,
             bili_profile_epoch: 0,
+            broadcast: broadcast::BroadcastState::default(),
             qr: QrView {
                 status: "idle",
                 ..Default::default()
@@ -236,8 +264,14 @@ impl Application {
             config_snapshot: None,
             config_revision: 0,
             migration: None,
+            overlay_settings,
+            overlay_hub,
+            overlay_server: None,
+            overlay_error: None,
+            overlay_assets: None,
         })));
         app.lock()?.ensure_first_default(None)?;
+        app.lock()?.ensure_overlay_token()?;
         Ok(app)
     }
 
@@ -438,6 +472,174 @@ impl Application {
         self.snapshot_since(None)
     }
 
+    /// The host supplies embedded fonts once the WebView assets exist, then
+    /// the overlay starts if the user enabled it earlier.
+    pub async fn start_overlay(&self, assets: AssetLoader) {
+        if let Ok(mut state) = self.lock() {
+            state.overlay_assets = Some(assets);
+        }
+        let _ = self.apply_overlay().await;
+    }
+
+    /// Start or stop the loopback server to match the saved switch.
+    async fn apply_overlay(&self) -> Result<(), String> {
+        let (enabled, port, hub, assets) = {
+            let state = self.lock()?;
+            (
+                state.overlay_settings.enabled,
+                state.overlay_settings.port,
+                state.overlay_hub.clone(),
+                state.overlay_assets.clone(),
+            )
+        };
+        if !enabled {
+            let mut state = self.lock()?;
+            state.overlay_server = None;
+            state.overlay_error = None;
+            return Ok(());
+        }
+        if self.lock()?.overlay_server.is_some() {
+            return Ok(());
+        }
+        let Some(assets) = assets else {
+            // Commands can run before the window finished setup; start_overlay
+            // applies the saved switch as soon as the assets are available.
+            return Ok(());
+        };
+        let bound = OverlayServer::bind(port, hub, assets).await;
+        let mut state = self.lock()?;
+        if !state.overlay_settings.enabled {
+            return Ok(());
+        }
+        match bound {
+            Ok(server) => {
+                if server.port() != state.overlay_settings.port {
+                    let mut settings = state.overlay_settings.clone();
+                    settings.port = server.port();
+                    state
+                        .store
+                        .save_overlay_settings(&settings)
+                        .map_err(display)?;
+                    state.overlay_settings = settings;
+                }
+                state.overlay_server = Some(server);
+                state.overlay_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                state.overlay_error = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    async fn save_overlay(&self, payload: &Value) -> Result<(), String> {
+        let edited: OverlaySettings = parse(payload.get("settings").ok_or("缺少叠加层设置")?)?;
+        {
+            let mut state = self.lock()?;
+            let merged = state.overlay_settings.with_edits_from(&edited);
+            state
+                .store
+                .save_overlay_settings(&merged)
+                .map_err(display)?;
+            state.overlay_hub.set_config(overlay_config(&merged));
+            state.overlay_settings = merged;
+        }
+        self.apply_overlay().await
+    }
+
+    /// Feed connected overlay pages. Runs for the app lifetime but does no
+    /// work while the overlay is off or no OBS page is connected.
+    pub async fn run_overlay_feed(&self) {
+        let mut cursor = OverlayCursor::default();
+        let mut interval = tokio::time::interval(Duration::from_millis(150));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if self.overlay_tick(&mut cursor).is_err() {
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn overlay_tick(&self, cursor: &mut OverlayCursor) -> Result<(), String> {
+        let (hub, settings, live, current, writer, tts, connecting) = {
+            let state = self.lock()?;
+            if state.overlay_server.is_none() || !state.overlay_hub.has_clients() {
+                cursor.primed = false;
+                return Ok(());
+            }
+            (
+                state.overlay_hub.clone(),
+                state.overlay_settings.clone(),
+                state.live.clone(),
+                state
+                    .scheduler
+                    .as_ref()
+                    .and_then(|scheduler| scheduler.state().borrow().current.clone()),
+                state.audio.as_ref().map(|audio| audio.writer.clone()),
+                state.prefs.tts_enabled,
+                state.connecting,
+            )
+        };
+        let snapshot = live.as_ref().map(|live| live.snapshot());
+        let connection = if connecting {
+            "connecting"
+        } else {
+            snapshot
+                .as_ref()
+                .filter(|snapshot| snapshot.running)
+                .map_or("stopped", |snapshot| room_state(&snapshot.room_state).0)
+        };
+        hub.set_status(json!({
+            "connection": connection,
+            "tts": tts,
+            "words": snapshot.as_ref().map_or(0, |snapshot| snapshot.received),
+        }));
+        let key = live.as_ref().map_or(0, |live| Arc::as_ptr(live) as usize);
+        if key != cursor.controller {
+            cursor.controller = key;
+            cursor.last = None;
+            if cursor.primed {
+                hub.clear_items();
+            }
+        }
+        if let Some(snapshot) = &snapshot {
+            let results = &snapshot.recent_results;
+            let start = overlay_feed_start(
+                results,
+                cursor.primed.then_some(cursor.last.as_ref()),
+                now_ms(),
+                u64::from(settings.linger_seconds) * 1000,
+            );
+            for result in &results[start..] {
+                if let Some(item) = overlay_item(result, &settings) {
+                    hub.publish_item(item);
+                }
+            }
+            cursor.last = results.last().cloned();
+        }
+        cursor.primed = true;
+        let reading = current
+            .filter(|job| job.origin == JobOrigin::Live)
+            .map(|job| {
+                let progress = writer
+                    .as_ref()
+                    .map(|writer| writer.progress())
+                    .filter(|progress| progress.job_id == job.id)
+                    .unwrap_or_default();
+                json!({
+                    "job_id": job.id,
+                    "played_ms": progress.played_ms,
+                    "queued_ms": progress.queued_ms,
+                    "chars": job.preview.final_text.chars().count(),
+                })
+            })
+            .unwrap_or(Value::Null);
+        hub.set_reading(reading);
+        Ok(())
+    }
+
     pub fn network_disabled(&self) -> Result<bool, String> {
         Ok(self.lock()?.network_disabled)
     }
@@ -549,8 +751,10 @@ impl Application {
             "queue":queue_json(&queue), "preferences":state.prefs,
             "status":{"error":state.status_error || device_lost,"message":status_message},
             "data_dir":state.store.data_dir(),
-            "network_disabled":state.network_disabled
+            "network_disabled":state.network_disabled,
+            "overlay":state.overlay_view()
         });
+        snapshot["broadcast"] = state.broadcast.view();
         let Value::Object(dynamic) = dynamic else {
             unreachable!("dynamic snapshot is an object")
         };
@@ -630,6 +834,9 @@ impl Application {
             return Err("正在应用设置，请稍候".into());
         }
         match action {
+            action if action.starts_with("bili.broadcast.") => {
+                return self.broadcast_command(action, &payload).await;
+            }
             "data.clear" => {
                 confirmed(&payload)?;
                 return self.clear_data().await;
@@ -741,10 +948,12 @@ impl Application {
             }
             "bili.logout" => {
                 confirmed(&payload)?;
+                self.lock()?.broadcast.invalidate();
                 self.stop(false).await?;
                 let mut state = self.lock()?;
                 state.cancel_qr();
                 state.store.clear_bili_session().map_err(display)?;
+                state.broadcast.invalidate();
                 state.bili_user_id = None;
                 state.bili_profile = None;
                 state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
@@ -764,6 +973,31 @@ impl Application {
             "audition" => self.audition(&payload, false).await?,
             "audio.test" => self.audition(&payload, true).await?,
             "preferences.save" => self.preferences(&payload).await?,
+            "overlay.save" => self.save_overlay(&payload).await?,
+            "overlay.token.reset" => {
+                let mut state = self.lock()?;
+                let mut settings = state.overlay_settings.clone();
+                settings.token = new_overlay_token();
+                state
+                    .store
+                    .save_overlay_settings(&settings)
+                    .map_err(display)?;
+                state.overlay_hub.set_token(&settings.token);
+                state.overlay_settings = settings;
+            }
+            "overlay.test" => {
+                let state = self.lock()?;
+                if state.overlay_server.is_none() {
+                    return Err("请先启用 OBS 叠加层".into());
+                }
+                let kind = payload
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("danmaku");
+                state
+                    .overlay_hub
+                    .publish_item(overlay_demo_item(kind, &state.overlay_settings)?);
+            }
             "migration.apply" => {
                 confirmed(&payload)?;
                 let _transition = self.begin_reconfiguration()?;
@@ -1350,6 +1584,35 @@ impl Controller {
         Ok(())
     }
 
+    fn ensure_overlay_token(&mut self) -> Result<(), String> {
+        if self.overlay_settings.token.is_empty() {
+            let mut settings = self.overlay_settings.clone();
+            settings.token = new_overlay_token();
+            self.store
+                .save_overlay_settings(&settings)
+                .map_err(display)?;
+            self.overlay_settings = settings;
+        }
+        self.overlay_hub.set_token(&self.overlay_settings.token);
+        Ok(())
+    }
+
+    fn overlay_view(&self) -> Value {
+        let settings = &self.overlay_settings;
+        let port = self
+            .overlay_server
+            .as_ref()
+            .map_or(settings.port, OverlayServer::port);
+        json!({
+            "settings": settings,
+            "running": self.overlay_server.is_some(),
+            "port": port,
+            "url": format!("http://127.0.0.1:{port}/overlay?token={}", settings.token),
+            "error": self.overlay_error,
+            "clients": self.overlay_hub.clients(),
+        })
+    }
+
     fn ensure_first_default(&mut self, preferred_id: Option<&str>) -> Result<(), String> {
         let mut rules = self.store.load_rules().map_err(display)?;
         if rules.default_preset_explicitly_cleared {
@@ -1634,6 +1897,7 @@ impl Application {
                     return Ok(());
                 }
                 state.store.save_bili_session(&session).map_err(display)?;
+                state.broadcast.invalidate();
                 state.bili_user_id = Some(session.user_id());
                 state.bili_profile = None;
                 state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
@@ -2003,14 +2267,22 @@ impl Application {
         // Preflight every managed location before changing either storage or
         // runtime state. Explicit --data-dir may contain unrelated user files.
         let plan = DataResetPlan::inspect(&data_dir)?;
+        self.lock()?.broadcast.invalidate();
         self.lock()?.cancel_qr();
         self.stop(true).await?;
         let mut state = self.lock()?;
         state.store.clear_application_data().map_err(display)?;
         state.prefs = state.store.load_desktop_preferences().map_err(display)?;
+        state.overlay_server = None;
+        state.overlay_error = None;
+        state.overlay_settings = state.store.load_overlay_settings().unwrap_or_default();
+        let overlay_config = overlay_config(&state.overlay_settings);
+        state.overlay_hub.set_config(overlay_config);
+        state.overlay_hub.clear_items();
         state.bili_user_id = None;
         state.bili_profile = None;
         state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
+        state.broadcast.invalidate();
         state.scheduler = None;
         state.audio = None;
         state.resume_live_after_default_device_change = false;
@@ -2759,6 +3031,7 @@ impl Application {
 
     pub fn stop_owned_local_services(&self) {
         if let Ok(mut state) = self.lock() {
+            state.broadcast.invalidate();
             state.local_services.stop_owned();
         }
     }
@@ -3112,34 +3385,166 @@ fn carried_chat(carried: &[LiveEvent], current: &[LiveEvent]) -> Vec<LiveEvent> 
 }
 
 fn command_changes_configuration(action: &str) -> bool {
-    !matches!(
-        action,
-        "bili.qr.begin"
-            | "bili.qr.cancel"
-            | "doubao.qr.begin"
-            | "doubao.qr.cancel"
-            | "live.connect"
-            | "live.disconnect"
-            | "queue.stop"
-            | "queue.skip"
-            | "queue.clear"
-            | "queue.jump"
-            | "audition"
-            | "audio.test"
-            | "rules.preview"
-            | "models.scan"
-            | "references.list"
-            | "fish.settings.get"
-            | "fish.voice.lookup"
-            | "connections.probe"
-            | "configuration.export"
-            | "migration.preview"
-            | "migration.cancel"
-            | "local_services.check"
-            | "local_services.start"
-            | "local_services.stop"
-    )
+    !action.starts_with("bili.broadcast.")
+        && !matches!(
+            action,
+            "bili.qr.begin"
+                | "bili.qr.cancel"
+                | "doubao.qr.begin"
+                | "doubao.qr.cancel"
+                | "live.connect"
+                | "live.disconnect"
+                | "queue.stop"
+                | "queue.skip"
+                | "queue.clear"
+                | "queue.jump"
+                | "audition"
+                | "audio.test"
+                | "rules.preview"
+                | "models.scan"
+                | "references.list"
+                | "fish.settings.get"
+                | "fish.voice.lookup"
+                | "connections.probe"
+                | "configuration.export"
+                | "migration.preview"
+                | "migration.cancel"
+                | "local_services.check"
+                | "local_services.start"
+                | "local_services.stop"
+        )
 }
+fn new_overlay_token() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
+/// Render options sent to overlay pages. The token and port stay in the app.
+fn overlay_config(settings: &OverlaySettings) -> Value {
+    json!({
+        "style": settings.style,
+        "corner": settings.corner,
+        "scale": settings.scale,
+        "vignette": settings.vignette,
+        "title": settings.title,
+        "tagline": settings.tagline,
+        "merge": settings.merge_duplicates,
+        "linger_seconds": settings.linger_seconds,
+    })
+}
+
+/// First result to send. `previous` is `None` when a page just connected:
+/// then only the last few messages still on screen are replayed. Otherwise
+/// it holds the last result already sent in this live session.
+fn overlay_feed_start(
+    results: &[ProcessedLiveEvent],
+    previous: Option<Option<&ProcessedLiveEvent>>,
+    now_ms: u64,
+    linger_ms: u64,
+) -> usize {
+    let start = match previous {
+        None => {
+            let fresh = results
+                .iter()
+                .rposition(|result| now_ms.saturating_sub(result.event.observed_at_ms) > linger_ms)
+                .map_or(0, |index| index + 1);
+            fresh.max(results.len().saturating_sub(3))
+        }
+        Some(None) => 0,
+        Some(Some(last)) => results
+            .iter()
+            .rposition(|result| result == last)
+            .map(|index| index + 1)
+            .unwrap_or_else(|| {
+                results
+                    .iter()
+                    .position(|result| result.event.observed_at_ms > last.event.observed_at_ms)
+                    .unwrap_or(results.len())
+            }),
+    };
+    start.min(results.len())
+}
+
+/// A stable, non-reversible viewer key for avatar colors and grouping.
+fn viewer_key(event: &LiveEvent) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match event.user_id {
+        Some(id) => id.hash(&mut hasher),
+        None => event.user_name.hash(&mut hasher),
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Copy of one processed live message for overlay pages, filtered by the
+/// overlay switches. Names are removed here, not in the page.
+fn overlay_item(result: &ProcessedLiveEvent, settings: &OverlaySettings) -> Option<Value> {
+    let event = &result.event;
+    let shown = match event.kind {
+        EventKind::Danmaku => settings.show_danmaku,
+        EventKind::Gift => settings.show_gift,
+        EventKind::SuperChat => settings.show_super_chat,
+        EventKind::Guard => settings.show_guard,
+    };
+    if !shown {
+        return None;
+    }
+    let named = match settings.names {
+        OverlayNames::None => false,
+        OverlayNames::Special => event.kind != EventKind::Danmaku,
+        OverlayNames::All => true,
+    };
+    Some(json!({
+        "kind": event.kind,
+        "viewer": viewer_key(event),
+        "name": if named { event.user_name.as_str() } else { "" },
+        "avatar": event.avatar_url,
+        "message": event.message,
+        "emotes": event.emotes,
+        "sticker": event.is_bilibili_emoticon,
+        "gift": event.gift_name,
+        "quantity": event.quantity,
+        "price": event.price_yuan,
+        "guard": event.guard_name,
+        "at": event.observed_at_ms,
+        "job_id": match result.outcome {
+            LiveEventOutcome::Enqueued { job_id } => Some(job_id),
+            _ => None,
+        },
+    }))
+}
+
+/// Test messages appear only on overlay pages: they are not chat, never
+/// enter the playback queue and never reach the B站 connection.
+fn overlay_demo_item(kind: &str, settings: &OverlaySettings) -> Result<Value, String> {
+    let named = settings.names != OverlayNames::None;
+    let item = match kind {
+        "danmaku" => json!({
+            "kind": "danmaku",
+            "message": "这是一条测试弹幕，OBS 里看到它就说明已经连好了",
+            "demo_read_ms": 4200,
+        }),
+        "super_chat" => json!({
+            "kind": "super_chat",
+            "name": if named { "弹幕姬测试" } else { "" },
+            "message": "测试醒目留言：今晚也要开开心心～",
+            "price": 50,
+            "demo_read_ms": 3600,
+        }),
+        _ => return Err("不支持的测试内容".into()),
+    };
+    let mut item = item;
+    item["viewer"] = json!("demo");
+    item["demo"] = json!(true);
+    item["at"] = json!(now_ms());
+    Ok(item)
+}
+
 fn display(error: impl std::fmt::Display) -> String {
     error.to_string()
 }

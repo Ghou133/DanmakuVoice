@@ -28,6 +28,11 @@ const icons = {
   arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   navRoom: '<path d="M3 6h18v11H3zM8 21h8M12 17v4"/>', navVoice: '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/>',
   navRules: '<path d="M4 6h10M4 12h16M4 18h7M18 4v4M14 16v4"/>', navSounds: '<path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>',
+  navOverlay: '<path d="m12 3 9 5-9 5-9-5Z"/><path d="m3 13 9 5 9-5"/>',
+  navBroadcast: '<circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="m10.8 12.2 9.2-9.2M17 6l3 3M14.5 8.5l2 2"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
   navGeneral: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18"/>', navAbout: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/>',
   chat: '<path d="M12 12h52a9 9 0 0 1 9 9v22a9 9 0 0 1-9 9H36L21 64V52h-9a9 9 0 0 1-9-9V21a9 9 0 0 1 9-9Z"/><path d="M24 32h.01M38 32h.01M52 32h.01"/>',
 };
@@ -70,8 +75,8 @@ const toggle = (name, label, checked, description = '') => `<label class="toggle
 const heading = (title, description = '') => `<h2 class="settings-page-title">${esc(title)}</h2>${description ? `<p class="settings-page-description">${esc(description)}</p>` : ''}`;
 const saveButton = (label = t('保存更改')) => `<button type="submit" class="button primary">${esc(label)}</button>`;
 const autoStatus = () => t('<div class="autosave-status" role="status" aria-live="polite" hidden><span data-autosave-label></span><button type="button" class="text-button" data-action="autosave.retry" hidden>重试</button><button type="button" class="text-button" data-action="autosave.discard" hidden>丢弃草稿</button></div>');
-const autoFormTypes = new Set(['room-uid', 'gift-merge', 'preset', 'binding', 'tts-toggle', 'rules', 'sound-words', 'audio', 'appearance', 'startup', 'service-local', 'fish-settings', 'fish-preset']);
-const manualSaveFormTypes = new Set(['service-fish', 'fish-voice', 'alias', 'asset', 'migration-apply']);
+const autoFormTypes = new Set(['room-uid', 'gift-merge', 'preset', 'binding', 'tts-toggle', 'rules', 'sound-words', 'audio', 'appearance', 'startup', 'service-local', 'fish-settings', 'fish-preset', 'overlay']);
+const manualSaveFormTypes = new Set(['service-fish', 'fish-voice', 'alias', 'asset', 'migration-apply', 'broadcast-room']);
 const autosaves = new Map();
 const formDrafts = new Map();
 const dotsSaves = new WeakMap();
@@ -143,6 +148,9 @@ let currentSpotKey = '';
 let lastQueueCount = 0;
 let lastSettingsTab = '';
 let settingsInkTop = null;
+// Preview-only choices for the OBS overlay page; they never reach OBS.
+let overlayPreview = { backdrop: 'dark' };
+let broadcastBusy = false;
 
 // Motion: script-driven animations follow the same rules as CSS ones — none when the
 // system asks for reduced motion, and none while the window is in the background.
@@ -285,7 +293,7 @@ function acceptSnapshot(next) {
   if (languageChanged && settingsDialog.open) renderSettings();
   if (snapshot.onboarding_done && step !== 'main') { stopQrPolling(); step = 'main'; renderApp(); }
   if (step === 'main') updateLive();
-  if (settingsDialog.open) { updateVoiceSettings(); updateServiceIndicators(); }
+  if (settingsDialog.open) { updateVoiceSettings(); updateServiceIndicators(); updateOverlayStatus(); updateBroadcastSettings(); }
   updateQr();
 }
 
@@ -333,8 +341,8 @@ function renderApp() {
   updateTitlebar();
   if (step === 'main') {
     const volume = Math.round((snapshot.preferences?.master_volume ?? 1) * 100);
-    app.innerHTML = ui`<div class="app-shell live-shell" id="live-shell"><div class="live-aura one" aria-hidden="true"></div><div class="live-aura two" aria-hidden="true"></div><div class="live-grain" aria-hidden="true"></div>${snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : ''}<main class="chat-main live-stage"><header class="masthead"><div class="masthead-kicker" id="masthead-kicker"><span id="connection-dot" class="status-dot"></span><span aria-hidden="true">LIVE</span><span id="room-caption" class="sr-only"></span></div><h1 class="masthead-title"><span id="masthead-name" class="masthead-name"></span><span id="masthead-suffix" class="masthead-suffix"></span></h1><span class="masthead-rule" aria-hidden="true"></span></header><div id="live-error" class="live-error" role="status" hidden><span></span>${button(t('查看'), 'settings.room', { class: 'quiet small' })}</div><div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="收到的弹幕"><div id="chat-empty" class="chat-empty"></div><div id="chat-feed" class="chat-feed" role="log" aria-label="实时弹幕" aria-live="polite" aria-relevant="additions"></div></div><button id="new-messages" class="new-messages" data-action="chat.bottom" hidden>${icon('down')}回到最新弹幕</button></main><div class="dock-wrap"><div id="tts-menu" class="voice-panel" role="dialog" aria-label="播报声音" hidden></div><div id="queue-panel" class="queue-panel" role="list" aria-label="待读弹幕" hidden></div><div class="dock"><button type="button" id="tts-switch" class="dock-voice" data-action="tts.open" aria-haspopup="dialog" aria-expanded="false"></button><span class="dock-sep" aria-hidden="true"></span><div class="dock-volume"><button type="button" class="dock-mute" data-action="audio.mute"></button><label class="sr-only" for="main-volume-range">播报主音量</label><input id="main-volume-range" type="range" min="0" max="200" step="5" value="${volume}"><output id="main-volume-value" for="main-volume-range">${volume}</output></div><span id="queue-sep" class="dock-sep" aria-hidden="true" hidden></span><button type="button" id="queue-pill" class="queue-pill" data-action="queue.toggle" aria-expanded="false" hidden></button><span class="dock-sep" aria-hidden="true"></span><button type="button" id="speech-switch" class="speech-switch" role="switch" data-action="speech.toggle" aria-label="弹幕播报" aria-checked="false"><span></span></button></div></div><div id="viewer-drawer" class="viewer-layer" hidden></div></div>`;
-    feedSignature = ''; feedLastKey = ''; feedEvents.clear(); viewerContext = null; viewerOpenIdentity = ''; liveMainSignature = ''; liveRenderSignature = ''; queueSignature = '';
+    app.innerHTML = ui`<div class="app-shell live-shell" id="live-shell"><div class="live-aura one" aria-hidden="true"></div><div class="live-aura two" aria-hidden="true"></div><div class="live-grain" aria-hidden="true"></div>${snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : ''}<main class="chat-main live-stage"><header class="masthead"><div class="masthead-kicker" id="masthead-kicker"><span id="connection-dot" class="status-dot"></span><span aria-hidden="true">LIVE</span><span id="room-caption" class="sr-only"></span></div><h1 class="masthead-title"><span id="masthead-name" class="masthead-name"></span><span id="masthead-suffix" class="masthead-suffix"></span></h1><span class="masthead-rule" aria-hidden="true"></span></header><div class="onair-wrap" data-broadcast-scope="main"><div id="onair" class="onair" role="group" aria-label="开播" hidden></div><div id="onair-panel" class="onair-panel" role="dialog" aria-label="开播" hidden></div></div><div id="live-error" class="live-error" role="status" hidden><span></span>${button(t('查看'), 'settings.room', { class: 'quiet small' })}</div><div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="收到的弹幕"><div id="chat-empty" class="chat-empty"></div><div id="chat-feed" class="chat-feed" role="log" aria-label="实时弹幕" aria-live="polite" aria-relevant="additions"></div></div><button id="new-messages" class="new-messages" data-action="chat.bottom" hidden>${icon('down')}回到最新弹幕</button></main><div class="dock-wrap"><div id="tts-menu" class="voice-panel" role="dialog" aria-label="播报声音" hidden></div><div id="queue-panel" class="queue-panel" role="list" aria-label="待读弹幕" hidden></div><div class="dock"><button type="button" id="tts-switch" class="dock-voice" data-action="tts.open" aria-haspopup="dialog" aria-expanded="false"></button><span class="dock-sep" aria-hidden="true"></span><div class="dock-volume"><button type="button" class="dock-mute" data-action="audio.mute"></button><label class="sr-only" for="main-volume-range">播报主音量</label><input id="main-volume-range" type="range" min="0" max="200" step="5" value="${volume}"><output id="main-volume-value" for="main-volume-range">${volume}</output></div><span id="queue-sep" class="dock-sep" aria-hidden="true" hidden></span><button type="button" id="queue-pill" class="queue-pill" data-action="queue.toggle" aria-expanded="false" hidden></button><span class="dock-sep" aria-hidden="true"></span><button type="button" id="speech-switch" class="speech-switch" role="switch" data-action="speech.toggle" aria-label="弹幕播报" aria-checked="false"><span></span></button></div></div><div id="viewer-drawer" class="viewer-layer" hidden></div></div>`;
+    feedSignature = ''; feedLastKey = ''; onAirSignature = ''; onAirPanelMode = ''; feedEvents.clear(); viewerContext = null; viewerOpenIdentity = ''; liveMainSignature = ''; liveRenderSignature = ''; queueSignature = '';
     document.querySelector('#chat-scroll').addEventListener('scroll', event => {
       const node = event.currentTarget;
       if (node.scrollHeight - node.scrollTop - node.clientHeight < 70) document.querySelector('#new-messages').hidden = true;
@@ -386,12 +394,12 @@ function renderStep() {
   const back = step === 'ready' && snapshot.onboarding_done ? '' : ui`<button type="button" class="back-button" data-action="setup.back">${icon('back')}返回</button>`;
   if (step === 'connect') return ui`${back}<h1>连接直播间</h1><p class="setup-description">选择接收弹幕的方式，之后也可以在设置里更改。</p><div class="choice-grid"><button type="button" class="choice-card" data-action="setup.qr"><span class="choice-top"><span class="choice-glyph pink">${icon('qr')}</span><span class="choice-badge">推荐</span></span><strong>扫码登录</strong><span>用哔哩哔哩 App 扫码，自动找到你的直播间。</span></button><button type="button" class="choice-card" data-action="setup.uid"><span class="choice-top"><span class="choice-glyph blue">${icon('person')}</span></span><strong>输入主播 UID</strong><span>免登录，接收任意主播直播间的弹幕。</span></button></div>${errorSlot()}`;
   if (step === 'login') return ui`${back}<div class="qr-layout"><div class="qr-copy"><h1>用哔哩哔哩扫码</h1><ol class="qr-steps"><li><span>1</span>打开哔哩哔哩 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol><button type="button" class="text-link onboard-link" data-action="setup.uid">改用主播 UID</button></div>${qrMarkup('bilibili')}</div>${errorSlot()}`;
-  if (step === 'uid') return ui`${back}<h1>输入主播 UID</h1><p class="setup-description">填写主播个人主页中的 UID，会自动查找直播间。</p><form data-form="anonymous" class="anonymous-form uid-form"><label for="anonymous-uid" class="onboard-field-label">主播 UID</label><div class="anonymous-input"><input id="anonymous-uid" name="uid" inputmode="numeric" autocomplete="off" placeholder="输入主播 UID" required pattern="[1-9][0-9]{0,19}" maxlength="20"><button type="submit" class="onboard-cta" aria-label="使用主播 UID 匿名继续">继续 ${icon('arrow')}</button></div><p class="setup-footnote">UID 可在主播的个人主页找到</p></form>${errorSlot()}`;
+  if (step === 'uid') return ui`${back}<h1>输入主播 UID</h1><p class="setup-description">填写主播个人主页中的 UID，会自动查找直播间。</p><form data-form="anonymous" class="anonymous-form uid-form"><label for="anonymous-uid" class="onboard-field-label">主播 UID</label><div class="anonymous-input"><input id="anonymous-uid" name="uid" inputmode="numeric" autocomplete="off" placeholder="输入主播 UID" required pattern="[1-9][0-9]{0,19}" maxlength="20"><button type="submit" class="onboard-cta" aria-label="使用主播 UID 匿名继续">继续 ${icon('arrow')}</button></div></form>${errorSlot()}`;
   if (step === 'tts') return ui`${back}<h1>要读出弹幕吗？</h1><p class="setup-description">其他语音服务可以稍后在设置中添加。</p><div class="choice-grid"><button type="button" class="choice-card" data-action="setup.doubao"><span class="choice-top"><span class="choice-glyph gradient">${icon('voice')}</span></span><strong>用豆包朗读</strong><span>扫码连接豆包，使用默认音色朗读新弹幕。</span></button><button type="button" class="choice-card" data-action="setup.silent"><span class="choice-top"><span class="choice-glyph quiet">${icon('chatSmall')}</span></span><strong>暂时只看弹幕</strong><span>不需要音频设备，随时可以在设置中开启。</span></button></div>${errorSlot()}`;
   if (step === 'doubaoQr') return ui`${back}<div class="qr-layout"><div class="qr-copy"><h1>扫码连接豆包</h1><ol class="qr-steps"><li><span>1</span>打开豆包 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol><button type="button" class="text-link onboard-link" data-action="setup.silent">暂时只看弹幕</button></div>${qrMarkup('doubao')}</div>${errorSlot()}`;
   const room = snapshot.setup?.room_id;
   const voice = setupTts ? `${providerLabel(snapshot.presets?.find(p => p.id === snapshot.rules?.default_preset_id)?.provider || 'doubao')}` : t('仅显示弹幕');
-  return ui`${back}<h1>一切就绪</h1><p class="setup-description">现在可以接收直播间的弹幕了。</p><dl class="setup-summary-card"><div><dt>直播间</dt><dd>${snapshot.setup?.mode === 'anonymous' ? t('匿名接收') : t('我的直播间')} · <span class="num">${esc(room || '')}</span></dd></div><div><dt>播报</dt><dd>${esc(voice)}</dd></div></dl><button type="button" class="onboard-cta" data-action="setup.finish">开始接收弹幕${icon('arrow')}</button>${errorSlot()}`;
+  return ui`${back}<h1>一切就绪</h1><dl class="setup-summary-card"><div><dt>直播间</dt><dd>${snapshot.setup?.mode === 'anonymous' ? t('匿名接收') : t('我的直播间')} · <span class="num">${esc(room || '')}</span></dd></div><div><dt>播报</dt><dd>${esc(voice)}</dd></div></dl><button type="button" class="onboard-cta" data-action="setup.finish">开始接收弹幕${icon('arrow')}</button>${errorSlot()}`;
 }
 
 function updateQr() {
@@ -1005,6 +1013,7 @@ function updateLive() {
   if (settingsDialog.open) return;
   const scroll = document.querySelector('#chat-scroll');
   if (!scroll || !snapshot) return;
+  updateOnAir();
   const notice = updateFallbackStatus(snapshot.queue || {});
   const renderSignature = JSON.stringify([snapshot.live, snapshot.queue, snapshot.setup, snapshot.account, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, notice, viewerOpenIdentity]);
   if (liveRenderSignature === renderSignature) return;
@@ -1101,7 +1110,7 @@ function updateVolumeControls() {
   }
 }
 
-const tabs = [['room', 'navRoom', '直播间'], ['voices', 'navVoice', '声音'], ['rules', 'navRules', '播报内容'], ['assets', 'navSounds', '音效'], ['general', 'navGeneral', '通用'], ['data', 'navAbout', '数据与关于']];
+const tabs = [['room', 'navRoom', '直播间'], ['voices', 'navVoice', '声音'], ['rules', 'navRules', '播报内容'], ['assets', 'navSounds', '音效'], ['broadcast', 'navBroadcast', '开播'], ['overlay', 'navOverlay', 'OBS 叠加层'], ['general', 'navGeneral', '通用'], ['data', 'navAbout', '数据与关于']];
 // Older entry points still name the pages that were merged into 通用 and 数据与关于.
 const legacyTabs = { audio: 'general', appearance: 'general', about: 'data' };
 const settingsTabId = id => legacyTabs[id] || (tabs.some(([tab]) => tab === id) ? id : 'voices');
@@ -1285,6 +1294,14 @@ function collectAutosave(form) {
   if (type === 'audio') return { action: 'preferences.save', payload: { preferences: { output: value('output') ? { named: value('output') } : 'default' }, confirmed: true } };
   if (type === 'appearance') return { action: 'preferences.save', payload: { preferences: { appearance: value('appearance'), scale: number('scale') } } };
   if (type === 'startup') return { action: 'startup.set', payload: { enabled: checked('enabled') } };
+  if (type === 'overlay') {
+    const current = snapshot.overlay?.settings;
+    if (!current) throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
+    if (!value('title')) throw new Error(t('请填写叠加层标题'));
+    const settings = { ...current, enabled: checked('enabled'), style: value('style'), corner: value('corner'), scale: number('scale'), vignette: number('vignette'), title: value('title'), tagline: value('tagline'), show_danmaku: checked('show_danmaku'), show_gift: checked('show_gift'), show_super_chat: checked('show_super_chat'), show_guard: checked('show_guard'), names: value('names'), merge_duplicates: checked('merge_duplicates'), linger_seconds: number('linger_seconds') };
+    if (!Number.isInteger(settings.linger_seconds) || settings.linger_seconds < 3 || settings.linger_seconds > 120) throw new Error(t('停留时间需在 3 到 120 秒之间'));
+    return { action: 'overlay.save', payload: { settings } };
+  }
   throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
 }
 
@@ -1483,13 +1500,16 @@ function renderSettings() {
   closeSelect();
   unmountAutosaves();
   settingsDirty = false;
-  settingsDialog.innerHTML = ui`<div class="settings-shell"><header class="settings-heading" data-tauri-drag-region><button type="button" class="settings-back" data-action="settings.close">${icon('back')}<span>返回直播</span></button><span class="settings-heading-space" data-tauri-drag-region></span>${iconButton('moon', t('切换深浅色'), 'theme.toggle')}<span class="titlebar-divider" aria-hidden="true"></span>${windowControls()}</header><div id="settings-error" class="settings-status" role="alert" hidden></div><div class="settings-body"><label class="settings-category-label" for="settings-category"><span class="sr-only">设置分类</span><select id="settings-category" aria-label="设置分类">${tabs.map(([id, , title]) => option(id, t(title), settingsTab)).join('')}</select></label><nav class="settings-nav" aria-label="设置分类"><h2 id="settings-title" class="settings-nav-title">设置</h2><span class="settings-nav-ink" aria-hidden="true"></span>${tabs.map(([id, glyph, title]) => `<button type="button" data-action="settings.tab" data-id="${id}"${settingsTab === id ? ' aria-current="page"' : ''}>${icon(glyph)}${t(title)}</button>`).join('')}</nav><section class="settings-content" id="settings-content" tabindex="-1">${editor ? `<div class="editor-navigation">${button(aliasReturnContext && editor?.type === 'alias' ? t('返回主界面') : `${t('返回')} ${t(tabs.find(([id]) => id === settingsTab)?.[2] || '设置')}`, 'editor.cancel', { class: 'small quiet', icon: 'back' })}</div>` : ''}${renderSettingsPage()}</section></div></div>`;
+  settingsDialog.innerHTML = ui`<div class="settings-shell"><header class="settings-heading" data-tauri-drag-region><button type="button" class="settings-back" data-action="settings.close">${icon('back')}<span>返回直播</span></button><span class="settings-heading-space" data-tauri-drag-region></span>${iconButton('moon', t('切换深浅色'), 'theme.toggle')}<span class="titlebar-divider" aria-hidden="true"></span>${windowControls()}</header><div id="settings-error" class="settings-status" role="alert" hidden></div><div class="settings-body"><label class="settings-category-label" for="settings-category"><span class="sr-only">设置分类</span><select id="settings-category" aria-label="设置分类">${tabs.map(([id, , title]) => option(id, t(title), settingsTab)).join('')}</select></label><nav class="settings-nav" aria-label="设置分类"><h2 id="settings-title" class="settings-nav-title">设置</h2><span class="settings-nav-ink" aria-hidden="true"></span>${tabs.map(([id, glyph, title]) => `<button type="button" data-action="settings.tab" data-id="${id}"${settingsTab === id ? ' aria-current="page"' : ''}>${icon(glyph)}${t(title)}${id === 'overlay' || id === 'broadcast' ? `<span class="settings-nav-badge">${esc(t('实验'))}</span>` : ''}</button>`).join('')}</nav><section class="settings-content" id="settings-content" tabindex="-1">${editor ? `<div class="editor-navigation">${button(aliasReturnContext && editor?.type === 'alias' ? t('返回主界面') : `${t('返回')} ${t(tabs.find(([id]) => id === settingsTab)?.[2] || '设置')}`, 'editor.cancel', { class: 'small quiet', icon: 'back' })}</div>` : ''}${renderSettingsPage()}</section></div></div>`;
   settleSettingsMotion();
   mountAutosaves();
   if (editor?.type === 'preset') hideLegacyVoiceFields();
   if (editor?.type === 'preset' && !editor.id) applyModelPairToForm(false);
   updateVoiceSettings();
   updateServiceIndicators();
+  updateOverlayStatus();
+  updateOverlayPreview();
+  updateBroadcastSettings();
   mountSelects(settingsDialog);
   updateQr();
 }
@@ -1547,6 +1567,8 @@ function renderSettingsPage() {
   if (settingsTab === 'voices') return renderVoicesSettings();
   if (settingsTab === 'rules') return renderRulesSettings();
   if (settingsTab === 'assets') return renderAssetsSettings();
+  if (settingsTab === 'broadcast') return renderBroadcastSettings();
+  if (settingsTab === 'overlay') return renderOverlaySettings();
   if (settingsTab === 'general') {
     const reset = ui`<section class="s-section">${sLabel(t('初次设置'))}<div class="s-card"><div class="s-row"><span class="s-text"><span>重新打开引导</span><small>重新走一遍扫码、直播间和豆包设置。已有声音和规则仍会保留。</small></span>${button(t('重新打开'), 'onboarding.reset', { class: 'small' })}</div></div></section>`;
     return `<div class="s-page">${heading(t('通用'))}${renderAppearanceSettings()}${renderAudioSettings()}${reset}</div>`;
@@ -1583,6 +1605,357 @@ function renderRoomSettings() {
   const card = showUid ? `<form data-form="room-uid" class="s-card">${uidRow}${roomRow}${autoStatus()}</form>` : `<div class="s-card">${roomRow}</div>`;
   const targetNote = needsRoom ? t('未找到本账号直播间，可以通过主播 UID 接收弹幕。') : '';
   return `<div class="s-page">${heading(t('直播间'))}${hero}${sSection(t('接收目标'), seg + card, '', targetNote)}${sSection(t('礼物合并'), renderGiftMerge(), '', t('断开直播间后可更改。礼物先按播报规则过滤，再合并数量。'))}</div>`;
+}
+
+// ---- 开播 (experimental) ----
+// The console manages the signed-in account's own room only; chat reception, speech and
+// OBS media output stay independent. Push credentials never enter snapshots or drafts.
+const BROADCAST_REFRESH_MS = 60000;
+let broadcastRefreshAt = 0;
+let broadcastRefreshAccount = '';
+let broadcastRefreshError = '';
+let broadcastRefreshing = false;
+let onAirPanelMode = '';
+let onAirClockTimer = null;
+let onAirSignature = '';
+
+const broadcastEnabled = () => !!snapshot?.preferences?.broadcast_console;
+const broadcastAccount = () => String(snapshot?.account?.user_id || '');
+const broadcastLive = room => room?.live_status === 1;
+
+function broadcastAreaPath(view = snapshot.broadcast || {}, room = view.room) {
+  if (!room) return '';
+  const parent = (view.areas || []).find(item => item.children.some(child => child.id === room.area_id)) || (view.areas || []).find(item => item.id === room.parent_area_id);
+  const child = parent?.children.find(item => item.id === room.area_id);
+  return [parent?.name, child?.name].filter(Boolean).join(' · ');
+}
+
+function onAirElapsed(since) {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(since || 0));
+  const two = value => String(value).padStart(2, '0');
+  return `${two(Math.floor(seconds / 3600))}:${two(Math.floor(seconds / 60) % 60)}:${two(seconds % 60)}`;
+}
+
+function tickOnAirClocks() {
+  const clocks = document.querySelectorAll('[data-onair-since]');
+  if (!clocks.length) { clearInterval(onAirClockTimer); onAirClockTimer = null; return; }
+  if (document.documentElement.dataset.inactive === 'true') return;
+  for (const node of clocks) {
+    const text = onAirElapsed(node.dataset.onairSince);
+    if (node.textContent !== text) node.textContent = text;
+  }
+}
+
+function startOnAirClocks() {
+  tickOnAirClocks();
+  if (!onAirClockTimer && document.querySelector('[data-onair-since]')) onAirClockTimer = setInterval(tickOnAirClocks, 1000);
+}
+
+const onAirClock = room => broadcastLive(room) && room.live_since ? `<span class="onair-clock" data-onair-since="${esc(room.live_since)}">${onAirElapsed(room.live_since)}</span>` : '';
+
+// Reading the own room is read-only; it happens only after the person turned the console on.
+async function refreshBroadcast(force = false) {
+  const account = broadcastAccount();
+  if (!broadcastEnabled() || !account || snapshot.network_disabled || broadcastBusy || broadcastRefreshing || snapshot.broadcast?.busy) return;
+  const visible = (step === 'main' && !settingsDialog.open) || (settingsDialog.open && settingsTab === 'broadcast');
+  if (!visible || !uiIsActive(nativeActive, windowFocused, document.hidden)) return;
+  const due = force || broadcastRefreshAccount !== account || Date.now() - broadcastRefreshAt > BROADCAST_REFRESH_MS;
+  if (!due) return;
+  broadcastRefreshing = true;
+  broadcastRefreshAt = Date.now();
+  broadcastRefreshAccount = account;
+  updateBroadcastViews();
+  try {
+    await command('bili.broadcast.refresh', {}, { quiet: true, silent: true });
+    broadcastRefreshError = '';
+  } catch (error) {
+    if (broadcastAccount() === account) broadcastRefreshError = errorMessage(error);
+  } finally {
+    broadcastRefreshing = false;
+    updateBroadcastViews();
+  }
+}
+
+function updateBroadcastViews() {
+  updateOnAir();
+  updateBroadcastSettings();
+}
+
+function hidePushCredentials(root = document) {
+  const all = selector => [...(root?.querySelectorAll?.(selector) || [])];
+  for (const input of all('[data-push-address], [data-push-key]')) input.value = '';
+  for (const key of all('[data-push-key]')) key.type = 'password';
+  for (const button of all('[data-action="broadcast.hide"]')) {
+    button.dataset.action = 'broadcast.reveal';
+    button.innerHTML = `${icon('eye')}${esc(t('显示'))}`;
+  }
+}
+
+async function runBroadcastAction(action, payload = {}) {
+  if (broadcastBusy) return;
+  broadcastBusy = true;
+  const scopes = [...document.querySelectorAll('[data-broadcast-scope]')];
+  const controls = scopes.flatMap(scope => [...scope.querySelectorAll('button, input, select')]).map(node => [node, node.disabled]);
+  controls.forEach(([node]) => { node.disabled = true; });
+  for (const scope of scopes) scope.classList.add('broadcast-busy');
+  for (const go of document.querySelectorAll('[data-onair-go]')) go.classList.add('working');
+  try { return await command(`bili.broadcast.${action}`, payload); }
+  finally {
+    broadcastBusy = false;
+    controls.forEach(([node, disabled]) => { if (node.isConnected) node.disabled = disabled; });
+    for (const scope of scopes) scope.classList.remove('broadcast-busy');
+    for (const go of document.querySelectorAll('[data-onair-go]')) go.classList.remove('working');
+    if (action === 'refresh') { broadcastRefreshAt = Date.now(); broadcastRefreshAccount = broadcastAccount(); broadcastRefreshError = ''; }
+    updateBroadcastViews();
+  }
+}
+
+function broadcastFormValues(form) {
+  const title = form.elements.title.value.trim();
+  const area_id = Number(form.elements.area_id.value);
+  if (!title || Array.from(title).length > 40 || !Number.isSafeInteger(area_id) || area_id <= 0) throw new Error(t('请填写 1 到 40 字的标题，并选择直播子分区。'));
+  return { title, area_id };
+}
+
+async function saveBroadcastForm(form) {
+  if (!form?.reportValidity() || broadcastBusy) return false;
+  const { title, area_id } = broadcastFormValues(form);
+  await runBroadcastAction('update', { confirmed: true, title, area_id });
+  delete form.dataset.dirty;
+  if (form.closest('#onair-panel')) closeOnAirPanel();
+  updateBroadcastViews();
+  showToast(t('直播标题与分区已更新'));
+  return true;
+}
+
+// A changed title or category is submitted first, so the room opens with what is on screen.
+async function startBroadcast() {
+  if (broadcastBusy) return;
+  if (!snapshot.broadcast?.room) await runBroadcastAction('refresh');
+  const room = snapshot.broadcast?.room;
+  if (!room) return;
+  const form = document.querySelector('[data-broadcast-scope] form[data-form="broadcast-room"][data-dirty]');
+  if (form && !await saveBroadcastForm(form)) return;
+  await runBroadcastAction('start', { confirmed: true, area_id: snapshot.broadcast.room.area_id });
+  if (snapshot.broadcast?.face_image) {
+    if (step === 'main' && !settingsDialog.open) openOnAirPanel('face');
+    showToast(t('请先扫码完成人脸验证'));
+    return;
+  }
+  if (step === 'main' && !settingsDialog.open) openOnAirPanel('push');
+  showToast(t('已开播，请在 OBS 中开始推流'));
+}
+
+async function stopBroadcast() {
+  closeOnAirPanel();
+  if (!await confirmAction(t('下播？'), t('请先在 OBS 中停止推流。下播只关闭 B站直播间，弹幕接收和播报会继续。'), t('下播'))) return;
+  await runBroadcastAction('stop', { confirmed: true });
+  hidePushCredentials();
+  showToast(t('已下播'));
+}
+
+async function revealOrCopyCredentials(action, target) {
+  if (broadcastBusy) return;
+  const account = snapshot.account?.user_id;
+  // Do not put credentials in the retained application snapshot or drafts.
+  const next = await invoke('dispatch', { action: 'bili.broadcast.credentials', payload: { confirmed: true } });
+  const credentials = next.result; delete next.result; acceptSnapshot(next);
+  try {
+    if (snapshot.account?.user_id !== account || !snapshot.broadcast?.has_stream_key) return;
+    if (action === 'broadcast.reveal') {
+      const scope = target.closest('[data-broadcast-scope]') || document;
+      const address = scope.querySelector('[data-push-address]');
+      const key = scope.querySelector('[data-push-key]');
+      if (address && key) { address.value = credentials.address; key.value = credentials.stream_key; key.type = 'text'; }
+      target.dataset.action = 'broadcast.hide'; target.innerHTML = `${icon('eye')}${esc(t('隐藏'))}`;
+    } else {
+      await copyText(action === 'broadcast.copy.address' ? credentials.address : credentials.stream_key);
+      showToast(t(action === 'broadcast.copy.address' ? '服务器已复制，请粘贴到 OBS' : '推流码已复制，请粘贴到 OBS'));
+      const row = target.closest('.onair-push-row, .s-onair-push-row');
+      if (row && motionAllowed()) { row.classList.remove('copied'); row.getBoundingClientRect(); row.classList.add('copied'); }
+    }
+  } finally { if (credentials) { credentials.address = ''; credentials.stream_key = ''; } }
+}
+
+// Shared markup ---------------------------------------------------------------------------
+let broadcastFieldSequence = 0;
+function broadcastInfoFields(view, room) {
+  const areas = view.areas || [];
+  const parent = areas.find(item => item.children.some(child => child.id === room.area_id)) || areas.find(item => item.id === room.parent_area_id) || areas[0];
+  const children = parent?.children || [];
+  const id = `broadcast-title-${++broadcastFieldSequence}`;
+  const length = Array.from(room.title || '').length;
+  return ui`<div class="onair-field"><label for="${id}">直播标题</label><span class="onair-input"><input id="${id}" name="title" value="${esc(room.title)}" maxlength="40" required autocomplete="off" spellcheck="false"><output class="onair-count" data-title-count>${length}/40</output></span></div><div class="onair-areas"><label class="onair-field"><span>分区</span><select name="parent_area_id" aria-label="${esc(t('直播分区'))}">${areas.map(item => option(item.id, item.name, parent?.id)).join('')}</select></label><label class="onair-field"><span>子分区</span><select name="area_id" aria-label="${esc(t('直播子分区'))}" required>${children.map(child => option(child.id, child.name, room.area_id)).join('')}</select></label></div>`;
+}
+
+function broadcastPushRows(view, room) {
+  if (!view.has_stream_key) {
+    const live = broadcastLive(room);
+    return ui`<p class="onair-push-empty">${live ? t('推流码只保存在本次运行的内存里。需要时可以重新获取。') : t('开播后，这里会给出 OBS 需要的服务器和推流码。')}</p>${live ? button(t('重新获取推流码'), 'broadcast.start', { class: 'small', icon: 'key' }) : ''}`;
+  }
+  const row = (label, attrs, action, copyLabel) => `<div class="onair-push-row"><span class="onair-push-label">${esc(label)}</span><input class="onair-push-value" ${attrs} readonly autocomplete="off" spellcheck="false" placeholder="••••••••••••" aria-label="${esc(label)}"><button type="button" class="onair-copy-btn" data-action="${action}" title="${esc(copyLabel)}" aria-label="${esc(copyLabel)}">${icon('copy')}<span>${esc(t('复制'))}</span></button></div>`;
+  return `${row(t('服务器'), 'data-push-address', 'broadcast.copy.address', t('复制服务器'))}${row(t('推流码'), 'data-push-key type="password"', 'broadcast.copy.key', t('复制推流码'))}<ol class="onair-steps">${ui`<li>打开 OBS「设置 → 直播」</li><li>服务选「自定义」</li><li>粘贴服务器和推流码，再点「开始直播」</li>`}</ol><div class="onair-push-tools">${`<button type="button" class="onair-text-button" data-action="broadcast.reveal">${icon('eye')}${esc(t('显示'))}</button><button type="button" class="onair-text-button" data-action="broadcast.forget">${icon('trash')}${esc(t('清除'))}</button>`}<span>${esc(t('仅保存在本次运行的内存中'))}</span></div>`;
+}
+
+const broadcastFace = view => ui`<div class="onair-face"><span class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></span><div><strong>开播前需要人脸验证</strong><p>用哔哩哔哩 App 扫码完成验证，然后点「继续开播」。</p></div></div>`;
+
+// Main screen -------------------------------------------------------------------------------
+function onAirGoButton(room, view, label = '') {
+  const live = broadcastLive(room);
+  const busy = broadcastBusy || view.busy;
+  const text = label || (live ? t('下播') : view.face_image ? t('继续开播') : t('开播'));
+  return `<button type="button" class="onair-go ${live && !label ? 'live' : ''}${busy ? ' working' : ''}" data-onair-go data-action="${live && !label ? 'broadcast.stop' : 'broadcast.start'}"${busy || snapshot.network_disabled ? ' disabled' : ''}><i aria-hidden="true"></i><span>${esc(text)}</span></button>`;
+}
+
+// Sign-in and retry are side roads, not the main act: a quiet pill with its own icon.
+const onAirSideButton = (label, action, glyph) => `<button type="button" class="onair-side" data-action="${esc(action)}"${action === 'settings.room' ? '' : ' data-onair-go'}>${icon(glyph)}<span>${esc(label)}</span></button>`;
+
+function updateOnAir() {
+  const host = document.querySelector('#onair');
+  if (!host) return;
+  const enabled = broadcastEnabled() && step === 'main';
+  const shell = document.querySelector('#live-shell');
+  const view = snapshot.broadcast || {};
+  const room = view.room;
+  const account = broadcastAccount();
+  shell?.classList.toggle('onair-mode', enabled);
+  shell?.classList.toggle('on-air', enabled && !!account && broadcastLive(room));
+  if (!enabled) {
+    if (!host.hidden) { host.hidden = true; host.innerHTML = ''; onAirSignature = ''; }
+    closeOnAirPanel();
+    return;
+  }
+  void refreshBroadcast();
+  const signature = JSON.stringify([account, view, broadcastBusy, broadcastRefreshing, broadcastRefreshError, getLanguage(), !!snapshot.network_disabled]);
+  if (signature === onAirSignature && !host.hidden) return;
+  onAirSignature = signature;
+  host.hidden = false;
+  const live = broadcastLive(room);
+  const kicker = (text, extra = '') => `<span class="onair-kicker"><i class="onair-dot" aria-hidden="true"></i><span>${text}</span>${extra}</span>`;
+  let copy;
+  let actions;
+  if (!account) {
+    copy = `${kicker('OFF AIR')}<span class="onair-title static">${esc(t('登录 B站账号后即可开播'))}</span>`;
+    actions = onAirSideButton(t('扫码登录'), 'settings.room', 'qr');
+  } else if (!room) {
+    const failed = broadcastRefreshError && !broadcastRefreshing;
+    copy = `${kicker('OFF AIR')}<span class="onair-title static${failed ? ' error' : ' loading'}">${esc(failed ? t('读取开播状态失败') : t('正在读取开播状态…'))}</span>${failed ? `<span class="onair-area" title="${esc(broadcastRefreshError)}">${esc(broadcastRefreshError)}</span>` : ''}`;
+    actions = failed ? onAirSideButton(t('重试'), 'broadcast.refresh', 'refresh') : onAirGoButton(room, { ...view, busy: true });
+  } else {
+    const state = live ? 'ON AIR' : room.live_status === 2 ? 'REPLAY' : 'OFF AIR';
+    const area = broadcastAreaPath(view, room);
+    copy = ui`${kicker(state, onAirClock(room))}<button type="button" class="onair-title" data-action="onair.info" title="修改直播标题和分区"><span>${esc(room.title)}</span>${icon('edit')}</button>${area ? `<span class="onair-area">${esc(area)}</span>` : ''}`;
+    const push = live || view.has_stream_key ? `<button type="button" class="onair-key${view.has_stream_key ? ' ready' : ''}" data-action="onair.push" aria-haspopup="dialog" aria-expanded="${onAirPanelMode === 'push'}" title="${esc(t('推流到 OBS'))}" aria-label="${esc(t('推流到 OBS'))}">${icon('key')}</button>` : '';
+    // While face verification waits, the panel carries the "continue" action next to its QR.
+    actions = push + onAirGoButton(room, { ...view, face_image: onAirPanelMode === 'face' ? null : view.face_image });
+  }
+  host.innerHTML = `<div class="onair-copy">${copy}</div><div class="onair-actions">${actions}</div>`;
+  host.dataset.state = !account ? 'signed-out' : !room ? 'loading' : live ? 'live' : 'off';
+  startOnAirClocks();
+  if (onAirPanelMode) renderOnAirPanel();
+  if (!room || !account) closeOnAirPanel();
+}
+
+function renderOnAirPanel() {
+  const panel = document.querySelector('#onair-panel');
+  const view = snapshot.broadcast || {};
+  const room = view.room;
+  if (!panel || !room) return;
+  // A form someone is editing, or credentials on show, must not be replaced underneath them.
+  if (panel.querySelector('form[data-dirty]') || panel.querySelector('[data-push-key][type="text"]')) return;
+  const signature = JSON.stringify([onAirPanelMode, view, getLanguage()]);
+  if (panel.dataset.signature === signature && !panel.hidden) return;
+  panel.dataset.signature = signature;
+  const head = (title, note = '') => `<header class="onair-panel-head"><div><strong>${esc(title)}</strong>${note ? `<small>${esc(note)}</small>` : ''}</div><button type="button" class="onair-close" data-action="onair.close" aria-label="${esc(t('关闭'))}" title="${esc(t('关闭'))}">${icon('close')}</button></header>`;
+  if (onAirPanelMode === 'info') {
+    panel.innerHTML = `${head(t('直播信息'), t('保存后立刻在 B站生效'))}<form data-form="broadcast-room" class="onair-info" novalidate>${broadcastInfoFields(view, room)}<div class="onair-panel-foot"><button type="button" class="onair-text-button" data-action="onair.close">${esc(t('取消'))}</button><button type="submit" class="onair-save">${esc(t('保存到 B站'))}</button></div></form>`;
+    mountSelects(panel);
+  } else if (onAirPanelMode === 'face' && view.face_image) {
+    panel.innerHTML = `${head(t('人脸验证'))}${broadcastFace(view)}<div class="onair-panel-foot">${onAirGoButton(room, view, t('继续开播'))}</div>`;
+  } else {
+    panel.innerHTML = `${head(t('推流到 OBS'), broadcastLive(room) ? t('直播间已打开，等待 OBS 推流') : '')}<div class="onair-push">${broadcastPushRows(view, room)}</div>`;
+  }
+  panel.dataset.mode = onAirPanelMode;
+}
+
+function openOnAirPanel(mode) {
+  const panel = document.querySelector('#onair-panel');
+  if (!panel || !snapshot.broadcast?.room) return;
+  closeVoicePanel(); closeQueuePanel();
+  if (!panel.hidden && onAirPanelMode === mode) { closeOnAirPanel(); return; }
+  if (!panel.hidden) hidePushCredentials(panel);
+  onAirPanelMode = mode;
+  panel.dataset.signature = '';
+  renderOnAirPanel();
+  panel.hidden = false;
+  document.querySelector('[data-action="onair.push"]')?.setAttribute('aria-expanded', String(mode === 'push'));
+  if (mode === 'info') panel.querySelector('input[name="title"]')?.focus({ preventScroll: true });
+}
+
+function closeOnAirPanel(focus = false) {
+  const panel = document.querySelector('#onair-panel');
+  onAirPanelMode = '';
+  if (!panel || panel.hidden) return;
+  closeSelect();
+  hidePushCredentials(panel);
+  leaveGhost(panel, 220);
+  panel.hidden = true;
+  panel.innerHTML = '';
+  panel.dataset.signature = '';
+  document.querySelector('[data-action="onair.push"]')?.setAttribute('aria-expanded', 'false');
+  if (focus) document.querySelector('#onair .onair-go')?.focus();
+}
+
+// Settings page -----------------------------------------------------------------------------
+function renderBroadcastSettings() {
+  const enabled = broadcastEnabled();
+  const id = `field-${++fieldSequence}`;
+  return ui`<div class="s-page s-onair" data-broadcast-scope="settings"><div class="s-page-head"><div class="s-ovl-head"><div class="s-ovl-title-row">${heading(t('开播'))}<span class="s-ovl-badge">实验性</span></div><p class="s-ovl-lede">在弹幕姬里开播、下播，随时改标题和分区。画面和声音仍由 OBS 推流。</p></div><label class="s-ovl-enable" for="${id}"><span>启用</span><input id="${id}" class="s-switch" type="checkbox" role="switch" data-broadcast-enable${enabled ? ' checked' : ''}></label></div><div class="s-onair-body" data-broadcast-body></div></div>`;
+}
+
+function broadcastPreview() {
+  const sample = ui`<div class="s-onair-preview" aria-hidden="true"><div class="s-onair-stage"><div class="s-onair-mast"><span class="s-onair-mini-kicker"><i></i>LIVE</span><strong>主播的直播间</strong><i class="s-onair-mini-rule"></i></div><div class="onair s-onair-mini" data-state="live"><div class="onair-copy"><span class="onair-kicker"><i class="onair-dot"></i><span>ON AIR</span><span class="onair-clock">01:24:10</span></span><span class="onair-title static"><span>今晚一起听歌</span></span><span class="onair-area">娱乐 · 视频唱见</span></div><div class="onair-actions"><span class="onair-key ready">${icon('key')}</span><span class="onair-go live"><i></i><span>下播</span></span></div></div><div class="s-onair-lines"><i></i><i></i><i></i></div></div></div>`;
+  const points = ui`<ul class="s-onair-points"><li><strong>一键开播、下播</strong><span>主界面右上角出现开播台，直播时显示已开播时长。</span></li><li><strong>随时改标题和分区</strong><span>点标题即可修改，保存后立刻在 B站生效。</span></li><li><strong>推流码一键复制</strong><span>开播后直接复制到 OBS，不用再打开直播姬。</span></li></ul>`;
+  return `${sample}${points}`;
+}
+
+function updateBroadcastSettings() {
+  const body = settingsDialog.open ? settingsDialog.querySelector('[data-broadcast-body]') : null;
+  if (!body) return;
+  void refreshBroadcast();
+  const enabled = broadcastEnabled();
+  const account = broadcastAccount();
+  const view = snapshot.broadcast || {};
+  const toggle = settingsDialog.querySelector('[data-broadcast-enable]');
+  if (toggle && !toggle.disabled && toggle.checked !== enabled) toggle.checked = enabled;
+  const signature = JSON.stringify([enabled, account, view, broadcastRefreshing, broadcastRefreshError, getLanguage(), !!snapshot.network_disabled]);
+  const changedAccount = body.dataset.account !== account;
+  if (!changedAccount && (broadcastBusy || body.querySelector('form[data-dirty]') || body.querySelector('[data-push-key][type="text"]'))) return;
+  if (body.dataset.signature === signature) return;
+  body.dataset.signature = signature; body.dataset.account = account;
+  const room = view.room;
+  if (!enabled) { body.innerHTML = broadcastPreview(); return; }
+  if (snapshot.network_disabled) { body.innerHTML = `<div class="s-card"><div class="s-row"><span class="s-text"><small>${esc(t('离线测试窗口不能管理直播间。'))}</small></span></div></div>`; return; }
+  if (!account) {
+    body.innerHTML = ui`<section class="s-hero s-onair-signin"><span class="s-hero-glow" aria-hidden="true"></span><span class="s-onair-signin-mark" aria-hidden="true">${icon('navBroadcast')}</span><div class="s-account-text"><strong>先登录自己的 B站账号</strong><span>开播管理只作用于扫码登录账号自己的直播间。</span></div><div class="s-hero-actions">${button(t('去扫码登录'), 'settings.tab', { id: 'room', class: 'primary small', icon: 'qr' })}</div></section>`;
+    return;
+  }
+  if (!room) {
+    const failed = broadcastRefreshError && !broadcastRefreshing;
+    body.innerHTML = `<div class="s-card"><div class="s-row s-wrap"><span class="s-text"><span>${esc(failed ? t('读取开播状态失败') : t('正在读取开播状态…'))}</span>${failed ? `<small class="field-error">${esc(broadcastRefreshError)}</small>` : ''}</span>${failed ? button(t('重试'), 'broadcast.refresh', { class: 'small', icon: 'refresh' }) : '<span class="spinner" aria-hidden="true"></span>'}</div></div>`;
+    return;
+  }
+  const live = broadcastLive(room);
+  const stateText = live ? t('直播中') : room.live_status === 2 ? t('轮播中') : t('未开播');
+  const area = broadcastAreaPath(view, room);
+  const hero = ui`<section class="s-hero s-onair-hero" data-state="${live ? 'live' : 'off'}"><span class="s-hero-glow" aria-hidden="true"></span><div class="s-onair-state"><span class="onair-kicker"><i class="onair-dot" aria-hidden="true"></i><span>${live ? 'ON AIR' : room.live_status === 2 ? 'REPLAY' : 'OFF AIR'}</span></span><strong>${esc(stateText)}${live && room.live_since ? `<span class="s-onair-clock" data-onair-since="${esc(room.live_since)}">${onAirElapsed(room.live_since)}</span>` : ''}</strong><small>房间 <span class="s-num">${esc(room.room_id)}</span>${area ? ` · ${esc(area)}` : ''}</small></div><div class="s-onair-hero-actions"><span class="s-onair-tools">${iconButton('refresh', t('刷新开播状态'), 'broadcast.refresh')}${iconButton('external', t('打开直播间'), 'external.open', 'bili_broadcast_room')}</span>${onAirGoButton(room, view)}</div></section>`;
+  const info = ui`<section class="s-section">${sLabel(t('直播信息'), `<span class="s-label-note">${esc(t('保存后立刻在 B站生效'))}</span>`)}<form data-form="broadcast-room" class="s-card s-onair-info" novalidate>${broadcastInfoFields(view, room)}<div class="s-onair-info-foot"><small>${esc(t('开播时如有未保存的修改，会先保存再开播。'))}</small><button type="submit" class="button small">${esc(t('保存到 B站'))}</button></div></form></section>`;
+  const face = view.face_image ? `<section class="s-section">${sLabel(t('人脸验证'))}<div class="s-card s-onair-face-card">${broadcastFace(view)}</div></section>` : '';
+  const push = ui`<section class="s-section">${sLabel(t('推流到 OBS'))}<div class="s-card onair-push s-onair-push">${broadcastPushRows(view, room)}</div></section>`;
+  const note = `<p class="s-note">${esc(t('开播只打开 B站直播间；画面和声音由 OBS 推送。退出弹幕姬不会自动下播。启用期间，弹幕姬约每分钟读取一次自己房间的开播状态。'))}</p>`;
+  body.innerHTML = `${hero}${face}${info}${push}${note}`;
+  mountSelects(body);
+  startOnAirClocks();
 }
 
 function renderGiftMerge() {
@@ -1989,11 +2362,131 @@ function renderAssetsSettings() {
   return `<div class="s-page"><div class="s-page-head">${heading(t('关键词音效'))}${add}</div><form data-form="sound-words" class="s-sound-form">${dictionaryRows('sounds', sounds)}${autoStatus()}</form><p class="s-note">${esc(t('弹幕包含触发词时会播放对应音效。'))}</p>${sSection(t('音效素材'), library + importForm)}</div>`;
 }
 
+// ---------- OBS overlay (experimental) ----------
+const overlayDefaultTagline = "say a word — it'll be read aloud.";
+const overlayWeekdays = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+
+function overlayMaskedUrl(url, token) {
+  if (!url || !token) return '';
+  return url.replace(token, `${token.slice(0, 4)}${'•'.repeat(8)}${token.slice(-4)}`);
+}
+
+// The preview uses the canvas OBS reports for its browser source, and 1080p until one connects.
+function overlayPreviewSize() {
+  const client = (snapshot.overlay?.clients || [])[0];
+  return client ? { width: client.width, height: client.height, note: t('来自 OBS') } : { width: 1920, height: 1080, note: t('连上 OBS 后按实际画布显示') };
+}
+
+function overlayStatus() {
+  const view = snapshot.overlay || {};
+  const clients = view.clients || [];
+  if (!view.settings?.enabled) return { tone: 'idle', text: t('未启用 · 打开右上角的开关后，OBS 才能显示叠加层') };
+  if (view.error) return { tone: 'error', text: errorMessage(view.error) };
+  if (!view.running) return { tone: 'pending', text: t('正在启动…') };
+  if (!clients.length) return { tone: 'pending', text: t('等待 OBS 连接 · 在 OBS 中添加浏览器来源并粘贴地址') };
+  const [first] = clients;
+  return { tone: 'ready', text: ui`OBS 已连接 · ${first.width} × ${first.height}` + (clients.length > 1 ? ui` · ${clients.length} 个画面` : '') };
+}
+
+function renderOverlaySettings() {
+  const view = snapshot.overlay;
+  if (!view?.settings) return `<div class="s-page">${heading(t('OBS 叠加层'))}${empty(t('桌面连接不可用。'))}</div>`;
+  const s = view.settings;
+  const radio = (name, value, label, current) => `<label><input type="radio" name="${name}" value="${value}"${current === value ? ' checked' : ''}><span>${esc(label)}</span></label>`;
+  const backdrop = (value, label) => `<button type="button" class="s-ovl-swatch ${value}" data-action="overlay.preview" data-id="backdrop=${value}" aria-pressed="${overlayPreview.backdrop === value}" aria-label="${esc(label)}" title="${esc(label)}"></button>`;
+  const range = (name, label, value, min, max, step, note = '') => {
+    const id = `field-${++fieldSequence}`;
+    return `<div class="s-row"><label class="s-text" for="${id}"><span>${esc(label)}</span>${note ? `<small>${esc(note)}</small>` : ''}</label><input id="${id}" class="s-range" type="range" name="${name}" min="${min}" max="${max}" step="${step}" value="${esc(displayNumber(value))}"><output class="s-num s-range-value" data-overlay-out="${name}"></output></div>`;
+  };
+  const textRow = (name, label, value, attrs, note) => {
+    const id = `field-${++fieldSequence}`;
+    return `<div class="s-row s-wrap"><label class="s-text" for="${id}"><span>${esc(label)}</span><small>${esc(note)}</small></label><input id="${id}" class="s-input s-overlay-text" name="${name}" value="${esc(value)}" ${attrs}></div>`;
+  };
+  const lingerId = `field-${++fieldSequence}`;
+  const styleCard = (value, name, english, note) => ui`<label class="s-ovl-style"><input type="radio" name="style" value="${value}"${s.style === value ? ' checked' : ''}><span class="s-ovl-thumb ${value}" aria-hidden="true"><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i><i class="e"></i><i class="f"></i></span><span class="s-ovl-style-name"><strong>${esc(name)}</strong><em>${english}</em></span><small>${esc(note)}</small></label>`;
+  const preview = ui`<div class="s-ovl-preview">
+<div class="ovp" data-style="${s.style}" data-corner="${s.corner}" data-backdrop="${overlayPreview.backdrop}"><div class="ovp-stage" aria-hidden="true"><div class="ovp-block"><i class="ovp-vig"></i><i class="ovp-card"></i><i class="ovp-spine"></i>
+<div class="ovp-mast"><div class="ovp-kicker"><i class="ovp-dot"></i><span class="ovp-live">LIVE</span><span class="ovp-sep">·</span><span data-ovp-day>SAT</span><span class="ovp-time" data-ovp-time>21:04</span></div><div class="ovp-title" data-ovp-title></div><div class="ovp-tagrow"><i class="ovp-rule"></i><span class="ovp-tagline" data-ovp-tagline></span></div></div>
+<div class="ovp-list"><div class="ovp-item spot"><span class="ovp-av"><i class="ovp-ring"></i><i class="ovp-face"></i></span><span class="ovp-text"><span class="ovp-lit">${esc(t('这一波要是没闪现就寄了，主播反应好快'))}</span></span><span class="ovp-prog"><i class="ovp-fill"></i><i class="ovp-comet"></i></span></div><div class="ovp-item"><span class="ovp-av"><i class="ovp-face two"></i></span><span class="ovp-text">${esc(t('晚上好呀，今天也来听你读弹幕'))}</span></div></div></div></div>
+</div>
+<div class="s-ovl-under"><div class="s-ovl-backdrops" role="group" aria-label="${esc(t('预览背景'))}">${backdrop('dark', t('深色背景'))}${backdrop('light', t('亮色背景'))}${backdrop('clear', t('透明背景'))}</div><span class="s-ovl-size" data-ovp-size></span><span class="s-ovl-tests" title="${esc(t('发一条测试内容到 OBS 里的叠加层'))}">${button(t('测试弹幕'), 'overlay.test', { id: 'danmaku', class: 'small', icon: 'play' })}${button(t('测试醒目留言'), 'overlay.test', { id: 'super_chat', class: 'small' })}</span></div></div>`;
+  const address = ui`<div class="s-card"><div class="s-row s-wrap s-ovl-address"><span class="s-text"><span>叠加层地址</span><small class="s-ovl-url" data-overlay-url></small></span><span class="s-row-actions">${button(t('复制地址'), 'overlay.copy', { class: 'small primary', icon: 'check' })}${button(t('重新生成'), 'overlay.token.reset', { class: 'small', icon: 'refresh' })}</span></div><div class="s-row s-ovl-status" data-overlay-status><span class="service-light idle"></span><span data-overlay-status-text></span></div><div class="s-row"><span class="s-text"><small>在 OBS 里添加“浏览器”来源，粘贴地址，宽和高填 OBS 的画布分辨率（设置 → 视频 → 基础分辨率）。叠加层按画面大小自动缩放，1080p、2K、4K、16:10 和带鱼屏都能直接用。</small></span></div></div>`;
+  const look = ui`<div class="s-ovl-styles" role="radiogroup" aria-label="${esc(t('样式'))}">${styleCard('card', t('一体卡'), 'one card', t('刊头和弹幕收进一张玻璃卡片，读完的弹幕变成小行。'))}${styleCard('spine', t('光脊'), 'spine', t('一条发光的竖线串起刊头和弹幕，没有底板，最轻。'))}</div><div class="s-card"><div class="s-row s-wrap"><span class="s-text"><span id="overlay-corner-label">位置</span></span><div class="s-seg" role="radiogroup" aria-labelledby="overlay-corner-label">${radio('corner', 'top_left', t('左上'), s.corner)}${radio('corner', 'top_right', t('右上'), s.corner)}${radio('corner', 'bottom_left', t('左下'), s.corner)}${radio('corner', 'bottom_right', t('右下'), s.corner)}</div></div>${range('scale', t('大小'), s.scale, .5, 2, .05)}${range('vignette', t('暗角深浅'), s.vignette, 0, 1, .05, t('在亮的游戏画面上调深一些，文字更清楚。'))}</div>`;
+  const masthead = ui`<div class="s-card">${textRow('title', t('标题'), s.title, 'maxlength="12" required', t('最多 12 个字，例如“今晚的弹幕”。'))}${textRow('tagline', t('副标题'), s.tagline, `maxlength="48" placeholder="${esc(overlayDefaultTagline)}"`, t('冷场时显示。建议写英文，留空用默认的一句。'))}</div>`;
+  const content = ui`<div class="s-card">${sSwitch('show_danmaku', t('弹幕'), s.show_danmaku)}${sSwitch('show_gift', t('礼物'), s.show_gift)}${sSwitch('show_super_chat', t('醒目留言'), s.show_super_chat, t('单独显示在画面上方正中。'))}${sSwitch('show_guard', t('大航海'), s.show_guard)}<div class="s-row s-wrap"><span class="s-text"><span id="overlay-names-label">观众名字</span><small>看直播和录播的观众只需要看到内容，默认只在礼物和醒目留言旁显示名字。</small></span><div class="s-seg" role="radiogroup" aria-labelledby="overlay-names-label">${radio('names', 'none', t('不显示'), s.names)}${radio('names', 'special', t('仅礼物与醒目留言'), s.names)}${radio('names', 'all', t('全部'), s.names)}</div></div>${sSwitch('merge_duplicates', t('合并重复弹幕'), s.merge_duplicates, t('同样的话连着出现时显示为“×N”。'))}<div class="s-row"><label class="s-text" for="${lingerId}"><span>停留时间</span><small>没有在朗读的弹幕显示多久后淡出。</small></label><span class="s-amount"><input id="${lingerId}" name="linger_seconds" type="number" min="3" max="120" step="1" required value="${esc(s.linger_seconds)}"><span>秒</span></span></div></div>`;
+  const enabledId = `field-${++fieldSequence}`;
+  return ui`<form data-form="overlay" class="s-page s-ovl" novalidate><div class="s-page-head"><div class="s-ovl-head"><div class="s-ovl-title-row">${heading(t('OBS 叠加层'))}<span class="s-ovl-badge">实验性</span></div><p class="s-ovl-lede">把弹幕和正在朗读的内容画进直播画面，看录播的观众也能看到。</p></div><label class="s-ovl-enable" for="${enabledId}"><span>启用</span><input id="${enabledId}" class="s-switch" type="checkbox" role="switch" name="enabled"${s.enabled ? ' checked' : ''}></label></div>${preview}${sSection(t('添加到 OBS'), address, `<span class="s-label-note">${esc(t('地址只在本机可用，重新生成会让旧地址失效'))}</span>`)}${sSection(t('样式'), look)}${sSection(t('刊头文字'), masthead)}${sSection(t('显示内容'), content)}${autoStatus()}</form>`;
+}
+
+// Connection state changes while the page is open; only the status parts are rewritten.
+function updateOverlayStatus() {
+  const page = settingsDialog.querySelector?.('form[data-form="overlay"]');
+  if (!page || !snapshot.overlay) return;
+  const view = snapshot.overlay;
+  const status = overlayStatus();
+  const light = page.querySelector('[data-overlay-status] .service-light');
+  const lightClass = `service-light ${status.tone}`;
+  if (light && light.className !== lightClass) light.className = lightClass;
+  const text = page.querySelector('[data-overlay-status-text]');
+  if (text && text.textContent !== status.text) text.textContent = status.text;
+  const url = page.querySelector('[data-overlay-url]');
+  const masked = view.settings?.enabled ? overlayMaskedUrl(view.url, view.settings?.token) : t('启用后生成本机地址');
+  if (url && url.textContent !== masked) url.textContent = masked;
+  for (const node of page.querySelectorAll('[data-action="overlay.copy"]')) node.disabled = !view.settings?.enabled || !view.settings?.token;
+  for (const node of page.querySelectorAll('[data-action="overlay.test"]')) node.disabled = !view.running;
+  updateOverlayPreview();
+}
+
+function updateOverlayPreview() {
+  const frame = settingsDialog.querySelector?.('.ovp');
+  const form = frame?.closest('form');
+  if (!frame || !form) return;
+  const field = name => form.elements[name];
+  const choice = name => form.querySelector(`input[name="${name}"]:checked`)?.value;
+  const scale = Math.min(2, Math.max(.5, Number(field('scale')?.value) || 1));
+  const vignette = Math.min(1, Math.max(0, Number(field('vignette')?.value)));
+  frame.dataset.style = choice('style') || 'spine';
+  frame.dataset.corner = choice('corner') || 'top_left';
+  frame.dataset.backdrop = overlayPreview.backdrop;
+  frame.style.setProperty('--ovp-scale', String(scale));
+  frame.style.setProperty('--ovp-vig', String(Number.isFinite(vignette) ? vignette : .6));
+  const size = overlayPreviewSize();
+  frame.style.setProperty('--ovp-ratio', `${size.width} / ${size.height}`);
+  const title = String(field('title')?.value || '').trim() || '今晚的弹幕';
+  const tagline = String(field('tagline')?.value || '').trim() || overlayDefaultTagline;
+  const now = new Date();
+  const values = {
+    '[data-ovp-title]': title, '[data-ovp-tagline]': tagline,
+    '[data-ovp-day]': overlayWeekdays[now.getDay()], '[data-ovp-time]': `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+    '[data-ovp-size]': `${size.width} × ${size.height} · ${size.note}`,
+    '[data-overlay-out="scale"]': `${Math.round(scale * 100)}%`, '[data-overlay-out="vignette"]': `${Math.round((Number.isFinite(vignette) ? vignette : .6) * 100)}%`,
+  };
+  for (const [selector, value] of Object.entries(values)) {
+    const node = form.querySelector(selector);
+    if (node && node.textContent !== value) node.textContent = value;
+  }
+  for (const button of form.querySelectorAll('[data-action="overlay.preview"]')) {
+    const [key, value] = button.dataset.id.split('=');
+    button.setAttribute('aria-pressed', String(overlayPreview[key] === value));
+  }
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return; }
+  catch { /* Some WebView2 builds refuse the async clipboard; fall back to a selection copy. */ }
+  const area = document.createElement('textarea');
+  area.value = text; area.setAttribute('readonly', ''); area.style.position = 'fixed'; area.style.opacity = '0';
+  document.body.append(area); area.select();
+  const copied = document.execCommand('copy');
+  area.remove();
+  if (!copied) throw new Error(t('无法复制到剪贴板，请稍后重试'));
+}
+
 function renderAudioSettings() {
   const prefs = snapshot.preferences;
   const id = `field-${++fieldSequence}`;
   const volume = prefs.muted ? 0 : Math.round((Number(prefs.master_volume ?? 1) || 0) * 100);
-  return ui`<section class="s-section">${sLabel(t('音频输出'))}<form data-form="audio" class="s-card"><div class="s-row"><label class="s-text" for="${id}"><span>输出设备</span></label><select id="${id}" name="output">${option('', t('跟随系统默认设备'), deviceValue(prefs.output)) + (snapshot.devices || []).map(device => option(device.name, `${device.name}${device.is_default ? t('（系统默认）') : ''}`, deviceValue(prefs.output))).join('')}</select></div><div class="s-row"><span class="s-text"><span>播报主音量</span><small>在直播界面底部调节</small></span><span class="s-num">${volume}</span></div><div class="s-row s-wrap"><span class="s-text"><span>测试与重连</span><small>测试声音会播放一声本地提示音，无需登录语音服务。切换或重新连接输出设备会停止当前播放和待播队列。</small></span><span class="s-row-actions">${button(t('测试声音'), 'audio.test', { class: 'small primary', icon: 'play' })}${button(t('刷新设备'), 'devices.refresh', { class: 'small', icon: 'refresh' })}${button(t('重新连接设备'), 'audio.reconnect', { class: 'small', icon: 'audio' })}</span></div><div id="audio-playback-error" class="inline-error" role="alert" hidden></div>${autoStatus()}</form></section>`;
+  return ui`<section class="s-section">${sLabel(t('音频输出'))}<form data-form="audio" class="s-card"><div class="s-row"><label class="s-text" for="${id}"><span>输出设备</span></label><select id="${id}" name="output">${option('', t('跟随系统默认设备'), deviceValue(prefs.output)) + (snapshot.devices || []).map(device => option(device.name, `${device.name}${device.is_default ? t('（系统默认）') : ''}`, deviceValue(prefs.output))).join('')}</select></div><div class="s-row"><span class="s-text"><span>播报主音量</span><small>在直播界面底部调节</small></span><span class="s-num">${volume}</span></div><div class="s-row s-wrap"><span class="s-text"><span>测试与重连</span><small>切换或重连设备会停止播放并清空待播队列。</small></span><span class="s-row-actions">${button(t('播放测试音'), 'audio.test', { class: 'small primary', icon: 'play' })}${button(t('刷新设备'), 'devices.refresh', { class: 'small', icon: 'refresh' })}${button(t('重新连接设备'), 'audio.reconnect', { class: 'small', icon: 'audio' })}</span></div><div id="audio-playback-error" class="inline-error" role="alert" hidden></div>${autoStatus()}</form></section>`;
 }
 
 function renderAppearanceSettings() {
@@ -2005,7 +2498,7 @@ function renderAppearanceSettings() {
   const scaleId = `field-${++fieldSequence}`;
   const language = prefs.language || 'zh-CN';
   const languages = [['zh-CN', '简体中文'], ['en', 'English']].map(([id, name]) => `<label><input type="radio" name="language" value="${id}"${language === id ? ' checked' : ''}><span>${name}</span></label>`).join('');
-  return ui`<section class="s-section">${sLabel(t('外观'))}<form data-form="appearance"><div class="s-themes" role="radiogroup" aria-label="主题">${themes}</div><div class="s-card"><div class="s-row"><label class="s-text" for="${scaleId}"><span>界面缩放</span></label><select id="${scaleId}" name="scale">${[.8, .9, 1, 1.1, 1.2, 1.3, 1.4].map(scale => option(scale, `${Math.round(scale * 100)}%`, selectedScale)).join('')}</select></div></div>${autoStatus()}</form></section><div class="s-card"><form data-form="language" class="s-row"><span class="s-text"><span id="language-label">界面语言</span><small>语言切换后立即生效，并自动保存。</small></span><div class="s-seg" role="radiogroup" aria-labelledby="language-label">${languages}</div></form><form data-form="startup">${sSwitch('enabled', t('开机时启动'), snapshot.startup_enabled, t('登录 Windows 后打开超绝可爱弹幕姬。'))}${autoStatus()}</form></div>`;
+  return ui`<section class="s-section">${sLabel(t('外观'))}<form data-form="appearance"><div class="s-themes" role="radiogroup" aria-label="主题">${themes}</div><div class="s-card"><div class="s-row"><label class="s-text" for="${scaleId}"><span>界面缩放</span></label><select id="${scaleId}" name="scale">${[.8, .9, 1, 1.1, 1.2, 1.3, 1.4].map(scale => option(scale, `${Math.round(scale * 100)}%`, selectedScale)).join('')}</select></div></div>${autoStatus()}</form></section><div class="s-card"><form data-form="language" class="s-row"><span class="s-text"><span id="language-label">界面语言</span></span><div class="s-seg" role="radiogroup" aria-labelledby="language-label">${languages}</div></form><form data-form="startup">${sSwitch('enabled', t('开机时启动'), snapshot.startup_enabled)}${autoStatus()}</form></div>`;
 }
 
 async function changeLanguage(language) {
@@ -2075,6 +2568,7 @@ async function allowLeaveSettings() {
 async function closeSettings() {
   if (!await allowLeaveSettings()) return;
   if (!await settleVoiceAuditionChoice()) return;
+  hidePushCredentials(settingsDialog);
   closeSelect();
   if (aliasReturnContext && editor?.type === 'alias') { restoreAliasNavigation(); return; }
   if (editor?.type === 'qr') await cancelQr();
@@ -2188,7 +2682,7 @@ async function handleAction(action, id, target) {
     finally { updateBusy = false; if (settingsDialog.open && settingsTab === 'data') renderSettings(); }
     return;
   }
-  if (settingsDialog.open && !['settings.close', 'settings.tab', 'editor.cancel', 'autosave.retry', 'autosave.discard', 'draft.discard'].includes(action) && !action.startsWith('dictionary.')) {
+  if (settingsDialog.open && !['settings.close', 'settings.tab', 'editor.cancel', 'autosave.retry', 'autosave.discard', 'draft.discard', 'overlay.preview', 'overlay.copy'].includes(action) && !action.startsWith('dictionary.')) {
     const replacesSettings = ['room.anonymous', 'bili.use_account', 'bili.logout', 'bili.begin', 'doubao.begin', 'fish.restore_builtin', 'service.configure', 'service.prefer', 'service.add_preset', 'voice-audition.add', 'preset.choose_service', 'preset.default', 'preset.clear-default', 'asset.replace', 'models.refresh', 'onboarding.reset', 'migration.cancel'].includes(action)
       || /^(preset|binding)\.(new|edit|delete)$/.test(action) || action === 'asset.delete';
     if (!await (replacesSettings ? allowLeaveSettings() : flushAutosaves())) return;
@@ -2311,6 +2805,47 @@ async function handleAction(action, id, target) {
     return openSettings(action === 'settings.room' ? 'room' : 'voices');
   }
   if (action === 'settings.close') return closeSettings();
+  if (action === 'broadcast.refresh') {
+    const form = document.querySelector('[data-broadcast-scope] form[data-form="broadcast-room"][data-dirty]');
+    if (form && !await confirmAction(t('放弃未保存的直播信息？'), t('刷新会读取 B站上的标题和分区，本页尚未保存的修改会丢失。'), t('放弃修改'))) return;
+    if (form) delete form.dataset.dirty;
+    return runBroadcastAction('refresh');
+  }
+  if (action === 'broadcast.start') return startBroadcast();
+  if (action === 'broadcast.stop') return stopBroadcast();
+  if (action === 'broadcast.hide') { hidePushCredentials(target.closest('[data-broadcast-scope]') || document); return; }
+  if (action === 'broadcast.forget') { hidePushCredentials(); return runBroadcastAction('forget'); }
+  if (action === 'broadcast.reveal' || action.startsWith('broadcast.copy.')) return revealOrCopyCredentials(action, target);
+  if (action === 'onair.info') return openOnAirPanel('info');
+  if (action === 'onair.push') return openOnAirPanel('push');
+  if (action === 'onair.close') {
+    const form = document.querySelector('#onair-panel form[data-dirty]');
+    if (form && !await confirmAction(t('放弃未保存的直播信息？'), t('关闭后，尚未保存的标题和分区修改会丢失。'), t('放弃修改'))) return;
+    closeOnAirPanel(true); return;
+  }
+  if (action === 'overlay.preview') {
+    const [key, choice] = String(id).split('=');
+    if (key in overlayPreview) overlayPreview[key] = choice;
+    updateOverlayPreview();
+    return;
+  }
+  if (action === 'overlay.copy') {
+    const url = snapshot.overlay?.url;
+    if (!url || !snapshot.overlay?.settings?.token) return;
+    await copyText(url);
+    showToast(t('地址已复制，粘贴到 OBS 的浏览器来源'));
+    return;
+  }
+  if (action === 'overlay.token.reset') {
+    if (!await confirmAction(t('重新生成叠加层地址？'), t('旧地址会立即失效，OBS 里的浏览器来源需要换成新地址。'), t('重新生成'))) return;
+    await command('overlay.token.reset', {}, { success: t('已生成新地址，记得更新 OBS 里的地址') });
+    updateOverlayStatus();
+    return;
+  }
+  if (action === 'overlay.test') {
+    await command('overlay.test', { kind: id === 'super_chat' ? 'super_chat' : 'danmaku' }, { quiet: true });
+    return;
+  }
   if (action === 'settings.tab') {
     if (!await allowLeaveSettings()) return;
     if (editor?.type === 'qr') await cancelQr();
@@ -2525,7 +3060,7 @@ async function handleAction(action, id, target) {
   if (action.startsWith('dictionary.add.')) { const type = action.split('.')[2]; const list = document.querySelector(`[data-dictionary="${type}"]`); list.insertAdjacentHTML('beforeend', dictionaryRow(type)); list.lastElementChild?.classList.add('enter'); mountSelects(list); scheduleAutosave(list.closest('form')); return; }
   if (action === 'dictionary.remove') { const form = target.closest('form'); target.closest('.dict-row').remove(); scheduleAutosave(form, true); return; }
   if (action === 'audio.test') {
-    await command('audio.test', {}, { success: t('测试声音已加入播放队列') });
+    await command('audio.test', {}, { success: t('测试音已加入播放队列') });
     return;
   }
   if (action === 'devices.refresh') {
@@ -2651,6 +3186,7 @@ async function saveReferenceForm(form) {
 
 async function handleForm(form, submitter) {
   const type = form.dataset.form;
+  if (type === 'broadcast-room') return saveBroadcastForm(form);
   const data = new FormData(form);
   const value = key => String(data.get(key) ?? '').trim();
   const number = key => Number(data.get(key));
@@ -2808,6 +3344,10 @@ document.addEventListener('click', async event => {
   if (queuePanel && !queuePanel.hidden && !queuePanel.contains(event.target) && !event.target.closest('[data-action="queue.toggle"]')) {
     closeQueuePanel();
   }
+  const onAirPanel = document.querySelector('#onair-panel');
+  if (onAirPanel && !onAirPanel.hidden && !onAirPanel.contains(event.target) && !event.target.closest('.select-menu, #onair, #confirmation')) {
+    if (!onAirPanel.querySelector('form[data-dirty]')) closeOnAirPanel();
+  }
   const target = event.target.closest('[data-action]');
   if (!target || target.disabled) return;
   const wasDisabled = target.disabled;
@@ -2830,6 +3370,16 @@ document.addEventListener('compositionend', event => {
 });
 
 document.addEventListener('input', event => {
+  const broadcastForm = event.target.closest?.('form[data-form="broadcast-room"]');
+  if (broadcastForm) {
+    broadcastForm.dataset.dirty = 'true';
+    if (event.target.name === 'title') {
+      const count = broadcastForm.querySelector('[data-title-count]');
+      const length = Array.from(event.target.value.trim()).length;
+      if (count) { count.textContent = `${length}/40`; count.classList.toggle('over', length > 40 || !length); }
+    }
+    return;
+  }
   if (event.target.id === 'viewer-alias') { if (!event.isComposing && !composingInputs.has(event.target)) scheduleViewerAlias(event.target.value); return; }
   if (event.target.id !== 'main-volume-range') return;
   volumeDraft = Number(event.target.value);
@@ -2837,6 +3387,14 @@ document.addEventListener('input', event => {
 });
 
 document.addEventListener('change', event => {
+  if (event.target.name === 'parent_area_id' && event.target.closest('form[data-form="broadcast-room"]')) {
+    const form = event.target.closest('form');
+    const parent = snapshot.broadcast?.areas?.find(item => String(item.id) === event.target.value);
+    form.elements.area_id.innerHTML = (parent?.children || []).map(child => option(child.id, child.name, '')).join('');
+    form.dataset.dirty = 'true';
+    mountSelects(form); return;
+  }
+  if (event.target.closest?.('form[data-form="broadcast-room"]')) { event.target.closest('form').dataset.dirty = 'true'; return; }
   if (event.target.id !== 'main-volume-range') return;
   volumeDraft = Number(event.target.value);
   volumeSave.schedule(volumeDraft, { immediate: true });
@@ -2853,7 +3411,8 @@ document.addEventListener('keydown', event => {
   const ttsMenu = document.querySelector('#tts-menu');
   if (ttsMenu && !ttsMenu.hidden) { closeVoicePanel(); document.querySelector('#tts-switch')?.focus(); return; }
   const queuePanel = document.querySelector('#queue-panel');
-  if (queuePanel && !queuePanel.hidden) closeQueuePanel(true);
+  if (queuePanel && !queuePanel.hidden) { closeQueuePanel(true); return; }
+  if (!document.querySelector('#onair-panel')?.hidden) void handleAction('onair.close').catch(showError);
 });
 
 document.addEventListener('error', event => {
@@ -2893,6 +3452,7 @@ settingsDialog.addEventListener('input', event => {
   if (event.target.id === 'settings-category') return;
   const form = event.target.closest('[data-form]');
   if (form?.dataset.form === 'voice-audition') { updateVoiceAudition(form); return; }
+  if (form?.dataset.form === 'overlay') updateOverlayPreview();
   if (event.target.dataset?.template) {
     const preview = event.target.parentElement?.querySelector('[data-template-preview]');
     if (preview) preview.textContent = templatePreview(event.target.dataset.template, event.target.value);
@@ -2904,6 +3464,19 @@ settingsDialog.addEventListener('input', event => {
   if (form && autoFormTypes.has(form.dataset.form)) scheduleAutosave(form, false, event.target.name === 'uid', event.isComposing || composingInputs.has(event.target));
 });
 settingsDialog.addEventListener('change', async event => {
+  if (event.target.closest('[data-form="broadcast-room"]')) return;
+  if (event.target.matches?.('[data-broadcast-enable]')) {
+    const toggle = event.target;
+    const enabled = toggle.checked;
+    toggle.disabled = true;
+    try {
+      broadcastRefreshAccount = ''; broadcastRefreshError = '';
+      await command('preferences.save', { preferences: { broadcast_console: enabled } }, { quiet: true });
+      showToast(t(enabled ? '已启用开播台，主界面右上角可以开播和下播' : '已关闭开播台'));
+    } catch (error) { showError(error); }
+    finally { toggle.disabled = false; toggle.checked = broadcastEnabled(); updateBroadcastSettings(); }
+    return;
+  }
   if (event.target.name === 'language') {
     const selected = event.target.value;
     const radios = event.target.type === 'radio' ? [...event.target.closest('form').querySelectorAll('input[name="language"]')] : [event.target];

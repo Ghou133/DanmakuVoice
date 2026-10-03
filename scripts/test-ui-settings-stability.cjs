@@ -31,7 +31,9 @@ let failChoice = false;
       const target = path.resolve(root, '.' + (pathname === '/' ? '/index.html' : decodeURIComponent(pathname)));
       if (!target.startsWith(root + path.sep)) { response.writeHead(403).end(); return; }
       const type = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.png': 'image/png' }[path.extname(target)];
-      response.writeHead(200, { 'Content-Type': type || 'application/octet-stream' }).end(await fs.readFile(target));
+      // Tauri serves embedded files by file name, so ./Font.woff2 comes from ui/fonts.
+      const bytes = await fs.readFile(target).catch(() => fs.readFile(path.join(root, 'fonts', path.basename(target))));
+      response.writeHead(200, { 'Content-Type': type || 'application/octet-stream' }).end(bytes);
     } catch { response.writeHead(404).end(); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

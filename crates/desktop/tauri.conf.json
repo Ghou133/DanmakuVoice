@@ -1,9 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "超绝可爱弹幕姬",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "identifier": "app.danmakuvoice.desktop",
-  "build": { "frontendDist": ["ui/index.html", "ui/app.js", "ui/helpers.mjs", "ui/autosave.mjs", "ui/select.mjs", "ui/i18n.mjs", "ui/i18n-en.mjs", "ui/i18n-diagnostics.mjs", "ui/startup-theme.js", "ui/titlebar.js", "ui/styles.css", "ui/logo.png"] },
+  "build": { "frontendDist": ["ui/index.html", "ui/app.js", "ui/helpers.mjs", "ui/autosave.mjs", "ui/select.mjs", "ui/i18n.mjs", "ui/i18n-en.mjs", "ui/i18n-diagnostics.mjs", "ui/startup-theme.js", "ui/titlebar.js", "ui/styles.css", "ui/logo.png", "ui/fonts/DanmakuVoiceSerifSC-Medium.woff2", "ui/fonts/DanmakuVoiceSerifSC-Bold.woff2", "ui/fonts/DanmakuVoiceSerifSC-Black.woff2", "ui/fonts/OFL.txt",
+      "ui/fonts/InstrumentSerif-Regular.woff2",
+      "ui/fonts/InstrumentSerif-Italic.woff2",
+      "ui/fonts/OFL-InstrumentSerif.txt"] },
   "app": {
     "withGlobalTauri": true,
     "windows": [],

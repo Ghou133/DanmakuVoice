@@ -202,7 +202,7 @@ impl BiliSession {
         Ok(parsed)
     }
 
-    fn cookie_header(&self) -> String {
+    pub(crate) fn cookie_header(&self) -> String {
         let mut cookie = format!(
             "SESSDATA={}; bili_jct={}; DedeUserID={}",
             self.sessdata, self.bili_jct, self.user_id
@@ -212,6 +212,10 @@ impl BiliSession {
             cookie.push_str(buvid3);
         }
         cookie
+    }
+
+    pub(crate) fn csrf(&self) -> &str {
+        &self.bili_jct
     }
 }
 
@@ -460,7 +464,7 @@ fn parse_uid_room(value: &Value) -> Result<u64, BiliError> {
     }
 }
 
-fn http_client() -> Result<Client, BiliError> {
+pub(crate) fn http_client() -> Result<Client, BiliError> {
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(USER_AGENT_VALUE)
@@ -469,7 +473,7 @@ fn http_client() -> Result<Client, BiliError> {
         .map_err(|_| BiliError::Network)
 }
 
-async fn read_json(response: reqwest::Response) -> Result<Value, BiliError> {
+pub(crate) async fn read_json(response: reqwest::Response) -> Result<Value, BiliError> {
     if !response.status().is_success() {
         return Err(BiliError::Network);
     }

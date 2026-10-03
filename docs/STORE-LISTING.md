@@ -63,13 +63,12 @@
 
 ### 版本新增内容
 
-- 全新界面：刊头式直播主页、聚光朗读卡片与底部控制坞
-- 新增观众卡片：点击弹幕即可设置读法和专属音色
-- 新增待读列表，可点选立即朗读；关闭播报时弹幕照常显示
-- 设置改为六个分类平铺展示，改动自动保存
-- 首次引导重新设计，支持扫码或主播 UID 两种方式
-- 新增中英文界面切换；优化播报队列、音频设备重连和后台运行
-- 修复本地 TTS 服务停止、GPT-SoVITS 角色名称和表情过滤默认值
+0.3.0
+- 新增开播台（实验，默认关闭）：管理自己的直播标题与分区，开播/下播、直播计时、复制推流信息到 OBS 及人脸验证提示
+- 新增 OBS 浏览器叠加层（实验，默认关闭）：弹幕、醒目留言、朗读进度和样式/位置设置
+- 内置中文衬线字体与英文 Instrument Serif 字体
+- 修复设置草稿保持、聚光卡片读完收回和本地 TTS 服务生命周期
+- 实验功能尚未完成真实账号开播及 OBS 推流验收，欢迎反馈
 
 ### 截图说明（与截图依次对应）
 
@@ -148,13 +147,12 @@ danmaku; live chat; text to speech; TTS; Bilibili; streaming; stream tool
 
 ### What's new in this version
 
-- Redesigned interface with a live masthead, spotlight reading card and dock
-- New viewer card: click a message to set pronunciation and a personal voice
-- New Up next queue; turning speech off keeps chat on screen
-- Settings reorganized into six flat categories with automatic saving
-- Redesigned first-run setup with QR sign-in or streamer UID
-- Chinese/English interface; improved speech queue, audio reconnection and background behavior
-- Fixed local TTS shutdown, GPT-SoVITS role names and default emote filtering
+0.3.0
+- Experimental broadcast console, off by default: manage your own room title/category, go live/end live, show elapsed time, copy streaming details to OBS, and display face-verification prompts
+- Experimental OBS browser overlay, off by default: chat, Super Chats, reading progress, styles and placement
+- Bundled Chinese serif and Instrument Serif fonts
+- Fixed settings draft retention, spotlight collapse and local TTS service lifecycle
+- Real-account broadcasting and OBS streaming acceptance remain pending for these experimental features
 
 ### Screenshot captions
 
@@ -184,7 +182,7 @@ Licensed under the GNU Affero General Public License v3.0 only. Complete source 
 
 This is a free, open-source Windows desktop utility for receiving Bilibili live-room messages and playing text-to-speech or user-selected audio. It does not send chat messages or host a social network. Incoming live chat is third-party user-generated content; the age questionnaire declares user content conservatively. User/keyword playback filtering is available, but the app does not implement reporting or server-side chat moderation.
 
-No developer account, payment, or administrator privileges are needed to open the app. The welcome page leads to a choice of QR login or an anonymous broadcaster UID. Bilibili login can be skipped; a broadcaster UID is needed to connect anonymously. On the voice setup step, speech can be disabled. In Settings > General (通用) > Audio output (音频输出), “测试声音” generates a short local tone through the real decoder and selected device, without a cloud account. To test cloud speech, add your own supported provider account/API key; no developer credentials are included. Local TTS requires a separately installed service/model.
+No developer account, payment, or administrator privileges are needed to open the app. The welcome page leads to a choice of QR login or an anonymous broadcaster UID. Bilibili login can be skipped; a broadcaster UID is needed to connect anonymously. On the voice setup step, speech can be disabled. In Settings > General (通用) > Audio output (音频输出), “播放测试音” (Play test tone) generates a short local tone through the real decoder and selected device, without a cloud account. To test cloud speech, add your own supported provider account/API key; no developer credentials are included. Local TTS requires a separately installed service/model.
 
 The runFullTrust capability is required by the Rust/Tauri desktop application for its WebView2 window, system audio output, user-selected files, and spawning its bundled FFmpeg decoder. Optional local TTS services are started only when configured by the user. FFmpeg is launched directly from the installed MSIX directory; no executable is downloaded or extracted to AppData for the Store build. StartupTask is disabled by default and is enabled only through the user's setting. Updates are managed by Microsoft Store.
 

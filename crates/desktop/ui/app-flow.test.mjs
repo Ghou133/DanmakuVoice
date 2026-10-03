@@ -1145,11 +1145,11 @@ test('Fish accepts a manually pasted key without a clipboard watcher', async () 
   assert.equal(form.elements.credential.value, '');
 });
 
-test('settings merge legacy categories into six pages', async () => {
+test('settings merge legacy categories and add the experimental broadcast and overlay pages', async () => {
   const context = appContext();
   context.document.querySelector().focus = () => {};
   vm.runInContext(`settingsTab = 'voices'; editor = null; renderSettings = () => {}; allowLeaveSettings = async () => true;`, context);
-  assert.equal(vm.runInContext('tabs.map(([id]) => id).join()', context), 'room,voices,rules,assets,general,data');
+  assert.equal(vm.runInContext('tabs.map(([id]) => id).join()', context), 'room,voices,rules,assets,broadcast,overlay,general,data');
   for (const [legacy, page] of [['audio', 'general'], ['appearance', 'general'], ['about', 'data'], ['missing', 'voices']]) {
     await vm.runInContext('handleAction', context)('settings.tab', legacy);
     assert.equal(vm.runInContext('settingsTab', context), page);
@@ -1500,4 +1500,227 @@ test('feed groups one viewer, adds time breaks and keeps the read line as its ow
   const jobText = vm.runInContext('jobDisplayText', context);
   assert.equal(jobText({ user_name: '甲', text: '甲说四' }, events), '四');
   assert.equal(jobText({ user_name: '丙', text: '丙说你好' }, events), '丙说你好');
+});
+
+const overlaySnapshot = () => ({
+  settings: { enabled: true, style: 'spine', corner: 'top_right', scale: 1.100000023841858, vignette: 0.6000000238418579, title: '今晚的弹幕', tagline: '', show_danmaku: true, show_gift: true, show_super_chat: true, show_guard: false, names: 'special', merge_duplicates: true, linger_seconds: 14, port: 47823, token: '0123456789abcdef0123456789abcdef' },
+  running: true, port: 47823, url: 'http://127.0.0.1:47823/overlay?token=0123456789abcdef0123456789abcdef', error: null, clients: [{ width: 3840, height: 1728 }],
+});
+
+test('overlay settings render every choice and keep the token off the page', () => {
+  const context = appContext();
+  context.overlay = overlaySnapshot();
+  vm.runInContext("snapshot.overlay = overlay; settingsTab = 'overlay';", context);
+  const html = vm.runInContext('renderSettingsPage()', context);
+  assert.match(html, /data-form="overlay"/);
+  assert.match(html, /name="enabled" checked/);
+  assert.match(html, /name="style" value="spine" checked/);
+  assert.match(html, /name="corner" value="top_right" checked/);
+  assert.match(html, /name="names" value="special" checked/);
+  assert.match(html, /name="show_guard">/);
+  assert.match(html, /name="scale"[^>]+value="1\.1"/);
+  assert.match(html, /name="vignette"[^>]+value="0\.6"/);
+  assert.match(html, /name="title" value="今晚的弹幕" maxlength="12" required/);
+  assert.match(html, /data-action="overlay\.copy"/);
+  assert.match(html, /data-action="overlay\.token\.reset"/);
+  assert.match(html, /data-action="overlay\.test" data-id="super_chat"/);
+  assert.match(html, /data-id="backdrop=dark" aria-pressed="true"/);
+  assert.doesNotMatch(html, /aspect=/);
+  assert.doesNotMatch(html, /0123456789abcdef0123456789abcdef/);
+  assert.equal(vm.runInContext("overlayMaskedUrl(overlay.url, overlay.settings.token)", context), 'http://127.0.0.1:47823/overlay?token=0123••••••••cdef');
+  assert.equal(vm.runInContext('overlayStatus().text', context), 'OBS 已连接 · 3840 × 1728');
+  assert.equal(vm.runInContext('overlayPreviewSize().width', context), 3840);
+});
+
+test('overlay connection states read plainly in both languages', () => {
+  const context = appContext();
+  context.overlay = overlaySnapshot();
+  vm.runInContext("snapshot.overlay = overlay;", context);
+  const status = () => vm.runInContext('overlayStatus()', context);
+  context.overlay.clients.push({ width: 1920, height: 1080 });
+  assert.equal(status().text, 'OBS 已连接 · 3840 × 1728 · 2 个画面');
+  context.overlay.clients = [];
+  assert.equal(status().tone, 'pending');
+  assert.match(status().text, /等待 OBS 连接/);
+  context.overlay.error = 'OBS 叠加层无法使用本机端口 47823 起的 10 个端口：拒绝访问 [DV-O01]';
+  assert.equal(status().tone, 'error');
+  assert.match(status().text, /DV-O01/);
+  context.overlay.settings.enabled = false;
+  assert.equal(status().tone, 'idle');
+  vm.runInContext("snapshot.preferences = { language: 'en' }; applyLanguage(); overlay.settings.title = 'Tonight'; overlay.error = null; overlay.settings.enabled = true; overlay.clients = [{ width: 2560, height: 1600 }];", context);
+  assert.equal(status().text, 'OBS connected · 2560 × 1600');
+  const html = vm.runInContext("settingsTab = 'overlay'; renderSettingsPage()", context);
+  assert.doesNotMatch(html, /\p{Script=Han}/u);
+  assert.match(html, /Add to OBS/);
+});
+
+test('overlay autosave sends the edited settings and keeps app-owned fields', () => {
+  const context = appContext();
+  context.overlay = overlaySnapshot();
+  vm.runInContext("snapshot.overlay = overlay;", context);
+  const fields = { enabled: 'on', style: 'card', corner: 'bottom_left', scale: '1.25', vignette: '0.3', title: ' 深夜电台 ', tagline: 'one more round.', show_danmaku: 'on', show_super_chat: 'on', names: 'none', linger_seconds: '20' };
+  context.overlayForm = { dataset: { form: 'overlay' }, fields, checkValidity: () => true };
+  const envelope = vm.runInContext('collectAutosave(overlayForm)', context);
+  assert.equal(envelope.action, 'overlay.save');
+  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.settings)), { ...context.overlay.settings, enabled: true, style: 'card', corner: 'bottom_left', scale: 1.25, vignette: 0.3, title: '深夜电台', tagline: 'one more round.', show_danmaku: true, show_gift: false, show_super_chat: true, show_guard: false, names: 'none', merge_duplicates: false, linger_seconds: 20 });
+  fields.linger_seconds = '2';
+  assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /停留时间/);
+  fields.linger_seconds = '20'; fields.title = '  ';
+  assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /标题/);
+});
+
+test('overlay actions copy the full address, confirm a new token and send test items', async () => {
+  const context = appContext();
+  context.overlay = overlaySnapshot();
+  context.calls = [];
+  vm.runInContext(`snapshot.overlay = overlay;
+    copyText = async text => calls.push({ copied: text });
+    showToast = message => calls.push({ toast: message });
+    confirmAction = async () => { calls.push('confirm'); return true; };
+    command = async (action, payload) => calls.push({ action, payload });`, context);
+  const act = vm.runInContext('handleAction', context);
+  await act('overlay.copy');
+  assert.equal(context.calls[0].copied, context.overlay.url);
+  await act('overlay.token.reset');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls.slice(2))), ['confirm', { action: 'overlay.token.reset', payload: {} }]);
+  await act('overlay.test', 'super_chat');
+  await act('overlay.test', 'danmaku');
+  assert.deepEqual([...context.calls.slice(-2).map(call => call.payload.kind)], ['super_chat', 'danmaku']);
+  await act('overlay.preview', 'backdrop=light');
+  assert.equal(vm.runInContext('overlayPreview.backdrop', context), 'light');
+  await act('overlay.preview', 'aspect=21:9');
+  assert.equal(vm.runInContext('JSON.stringify(overlayPreview)', context), '{"backdrop":"light"}');
+  assert.equal(vm.runInContext('overlayPreviewSize().height', context), 1728);
+  context.overlay.clients = [];
+  assert.equal(vm.runInContext('overlayPreviewSize().width', context), 1920);
+});
+
+function broadcastSnapshot(extra = {}) {
+  return {
+    room: { room_id: 123, title: '虚构直播间', parent_area_id: 2, area_id: 86, live_status: 0, live_since: null },
+    areas: [{ id: 2, name: '网游', children: [{ id: 86, name: '英雄联盟' }, { id: 87, name: '其他网游' }] }],
+    busy: false, has_stream_key: false, face_image: null, ...extra,
+  };
+}
+
+test('broadcast console formats elapsed time and the server category path verbatim', () => {
+  const context = appContext();
+  context.view = broadcastSnapshot();
+  vm.runInContext('snapshot.broadcast = view;', context);
+  assert.equal(vm.runInContext('broadcastAreaPath()', context), '网游 · 英雄联盟');
+  const now = Math.floor(Date.now() / 1000);
+  context.since = now - (3600 + 23 * 60 + 45);
+  assert.equal(vm.runInContext('onAirElapsed(since)', context), '01:23:45');
+  context.since = now + 30;
+  assert.equal(vm.runInContext('onAirElapsed(since)', context), '00:00:00');
+  setLanguage('en');
+  assert.equal(vm.runInContext('broadcastAreaPath()', context), '网游 · 英雄联盟');
+});
+
+test('broadcast refresh is read-only, opt-in and rate limited', async () => {
+  const context = appContext();
+  context.calls = [];
+  context.view = broadcastSnapshot({ room: null });
+  vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 }; snapshot.preferences = { broadcast_console: false }; step = 'main';
+    command = async (action, payload, options) => { calls.push({ action, options }); return snapshot; };
+    updateBroadcastViews = () => {};`, context);
+  const refresh = vm.runInContext('refreshBroadcast', context);
+  await refresh();
+  assert.equal(context.calls.length, 0);
+  vm.runInContext('snapshot.preferences.broadcast_console = true; snapshot.network_disabled = true;', context);
+  await refresh();
+  assert.equal(context.calls.length, 0);
+  vm.runInContext('snapshot.network_disabled = false;', context);
+  await refresh();
+  await refresh();
+  assert.deepEqual(context.calls.map(call => call.action), ['bili.broadcast.refresh']);
+  assert.equal(context.calls[0].options.silent, true);
+  vm.runInContext('snapshot.account = { user_id: 43 };', context);
+  await refresh();
+  assert.equal(context.calls.length, 2);
+  vm.runInContext('snapshot.account = { user_id: null };', context);
+  await refresh(true);
+  assert.equal(context.calls.length, 2);
+});
+
+test('going live submits pending title edits first, then opens with the saved category', async () => {
+  const context = appContext();
+  context.calls = [];
+  context.view = broadcastSnapshot();
+  const form = { dataset: { dirty: 'true' }, elements: { title: { value: ' 新标题 ' }, area_id: { value: '87' } }, reportValidity: () => true, closest: () => null };
+  context.form = form;
+  vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 }; step = 'main';
+    document.querySelector = selector => selector.includes('[data-dirty]') && form.dataset.dirty ? form : null;
+    document.querySelectorAll = () => [];
+    command = async (action, payload) => { calls.push({ action, payload }); if (action === 'bili.broadcast.update') snapshot.broadcast.room.area_id = payload.area_id; return snapshot; };
+    showToast = message => calls.push({ toast: message });
+    openOnAirPanel = mode => calls.push({ panel: mode });
+    updateBroadcastViews = () => {};`, context);
+  await vm.runInContext('startBroadcast', context)();
+  const actions = context.calls.filter(call => call.action);
+  assert.deepEqual(JSON.parse(JSON.stringify(actions)), [
+    { action: 'bili.broadcast.update', payload: { confirmed: true, title: '新标题', area_id: 87 } },
+    { action: 'bili.broadcast.start', payload: { confirmed: true, area_id: 87 } },
+  ]);
+  assert.equal(form.dataset.dirty, undefined);
+  assert.deepEqual(context.calls.filter(call => call.panel).map(call => call.panel), ['push']);
+});
+
+test('face verification opens its own panel instead of claiming the room is live', async () => {
+  const context = appContext();
+  context.calls = [];
+  context.view = broadcastSnapshot();
+  vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 }; step = 'main';
+    document.querySelector = () => null; document.querySelectorAll = () => [];
+    command = async action => { calls.push({ action }); snapshot.broadcast.face_image = 'data:image/png;base64,AA=='; return snapshot; };
+    showToast = message => calls.push({ toast: message });
+    openOnAirPanel = mode => calls.push({ panel: mode });
+    updateBroadcastViews = () => {};`, context);
+  await vm.runInContext('startBroadcast', context)();
+  assert.deepEqual(context.calls.filter(call => call.panel).map(call => call.panel), ['face']);
+  assert.equal(context.calls.find(call => call.toast).toast, '请先扫码完成人脸验证');
+});
+
+test('ending the stream needs confirmation and never touches chat reception', async () => {
+  const context = appContext();
+  context.calls = [];
+  context.view = broadcastSnapshot({ room: { ...broadcastSnapshot().room, live_status: 1, live_since: 1 }, has_stream_key: true });
+  vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 };
+    let answer = false; document.querySelectorAll = () => [];
+    confirmAction = async () => { calls.push('confirm'); return answer; };
+    command = async action => { calls.push({ action }); return snapshot; };
+    showToast = () => {}; closeOnAirPanel = () => {}; updateBroadcastViews = () => {};
+    globalThis.setAnswer = value => { answer = value; };`, context);
+  const act = vm.runInContext('handleAction', context);
+  await act('broadcast.stop');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls)), ['confirm']);
+  vm.runInContext('setAnswer(true)', context);
+  await act('broadcast.stop');
+  assert.deepEqual(context.calls.filter(call => call.action).map(call => call.action), ['bili.broadcast.stop']);
+});
+
+test('broadcast settings show a preview until enabled and never print push credentials', () => {
+  const context = appContext();
+  context.view = broadcastSnapshot({ room: { ...broadcastSnapshot().room, live_status: 1, live_since: 1 }, has_stream_key: true });
+  const body = { dataset: {}, innerHTML: '', querySelector: () => null, querySelectorAll: () => [] };
+  context.body = body;
+  vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 }; snapshot.preferences = { broadcast_console: false };
+    settingsDialog.open = true; settingsDialog.querySelector = selector => selector === '[data-broadcast-body]' ? body : null;
+    refreshBroadcast = async () => {}; startOnAirClocks = () => {};`, context);
+  const page = vm.runInContext('renderBroadcastSettings()', context);
+  assert.match(page, /data-broadcast-enable/);
+  assert.doesNotMatch(page, /data-broadcast-enable checked/);
+  vm.runInContext('updateBroadcastSettings()', context);
+  assert.match(body.innerHTML, /s-onair-preview/);
+  assert.doesNotMatch(body.innerHTML, /data-push-key/);
+  vm.runInContext('snapshot.preferences.broadcast_console = true;', context);
+  vm.runInContext('updateBroadcastSettings()', context);
+  assert.match(body.innerHTML, /data-push-key type="password"/);
+  assert.match(body.innerHTML, /data-onair-since="1"/);
+  assert.match(body.innerHTML, /data-action="broadcast.stop"/);
+  assert.doesNotMatch(body.innerHTML, /rtmp:|stream_key/);
+  body.dataset.signature = '';
+  vm.runInContext('snapshot.account = { user_id: null };', context);
+  vm.runInContext('updateBroadcastSettings()', context);
+  assert.match(body.innerHTML, /data-id="room"/);
 });

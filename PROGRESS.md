@@ -131,6 +131,53 @@
 - 已核对 README 六张图片与商店十四张截图的 PNG 实际格式及尺寸；商店图均为 1920×1080。素材由当前产品 UI 离线渲染后排版，包含虚构示例数据；不作为原生运行或服务登录证明。
 - GitHub Release、正式 MSIX 上传、微软认证及新版商店发布状态待本次实际操作后记录。旧版商店状态已在 Partner Center 现场确认为 In the Microsoft Store。
 
+## 2026-10-03 内置宋体子集（离线检查，未构建原生程序）
+
+- 用户要求把常用字宋体打包进程序，主界面和后续 OBS 叠加层共用。新增 `crates/desktop/ui/fonts/DanmakuVoiceSerifSC-{Medium,Bold,Black}.woff2`：由 Noto Serif CJK SC 2.002 取 SC 字面，子集为 GB2312 全部 6763 个汉字 + `crates/desktop/ui` 中出现的全部汉字 + 拉丁与中文标点，并改名为 DanmakuVoice Serif SC（OFL 修改版，不使用保留名“Source”）。三档合计约 7.1 MB，会直接增加程序体积。
+- `styles.css` 顶部加入三条 `@font-face`（Medium 覆盖 100–599，Bold 600–849，Black 850–1000；原 400 字重改由 Medium 显示），`--serif` 首位改为 DanmakuVoice Serif SC，原有字体列表保留为逐字回退。`tauri.conf.json` 的 `frontendDist` 加入三个字体文件与 `fonts/OFL.txt`；CSP 的 `font-src 'self'` 无需改动。
+- `embedded-files.test.mjs` 现在也检查 CSS 中 `url(./…)` 引用的文件是否被嵌入，并要求 OFL 许可随附；临时删掉一个字体条目时测试按预期失败。该测试在容器中通过；未运行完整前端回归、Rust 构建、clippy 或原生 WebView2 窗口检查。
+- 在 headless Chromium 中确认刊头（900）、聚光（500）与醒目留言正文（400）实际使用内置字体；子集外的罕见字（如“龘”）逐字回退。`scripts/build-serif-subset.py` 可从 Noto Serif CJK 的 `.ttc` 重新生成字体。
+- 只选 GB2312 一级字时每档约 1.3 MB，但会漏掉“喵、哒、柚、橘”等直播常见字，因此采用 GB2312 全集。
+- 更正（同日）：Tauri 2 的 `frontendDist` 文件列表按文件名嵌入资源（以每个文件的父目录为前缀，见 tauri-codegen 2.7.0 `RawEmbeddedAssets::new`），`ui/fonts/X.woff2` 在程序里位于 `./X.woff2`。上面 `styles.css` 的 `./fonts/…` 引用在原生程序中会找不到字体（浏览器夹具里能找到，所以没发现）。已改为 `./DanmakuVoiceSerifSC-*.woff2`；`embedded-files.test.mjs` 现在按文件名映射、要求文件名唯一并禁止带目录的引用。浏览器回归脚本的本地服务器同样按文件名回退到 `ui/fonts/`。
+
+## 2026-10-03 OBS 叠加层（实验性，离线检查，未构建原生程序、未在 OBS 中验收）
+
+- 用户在 Claude Design 画板中确认设计后要求“直接部署落地”。设计约束写入 `docs/UI-DESIGN.md`“OBS 叠加层”节：光脊（默认）／一体卡两种样式、四角位置、大小与暗角、M2 常驻刊头（英文 kicker、可自定义标题与冷场副标题、按真实状态切换的英文副标题）、朗读同步聚光、读完降级小行、醒目留言金券按价位分四档、名字默认只在礼物／醒目留言／大航海旁显示、按画布大小缩放支持 1080p／2560×1600／4K／3840×1728。
+- 引擎：`audio.rs` 新增 `AudioWriter::progress()`，在输出回调里只累计当前任务真正被设备取走的样本（`played_ms`）和已推入未播放的样本（`queued_ms`）；`storage.rs` 新增 `OverlaySettings`（键 `overlay`，校验范围，`DV-S37`），不进入配置导出；`error_codes.rs` 新增 `overlay` 命令兜底 `DV-X17`（`DV-X13` 已被“程序启动失败”占用，未复用）。
+- 桌面：新增 `crates/desktop/src/overlay.rs`，只在用户启用后监听 `127.0.0.1`（默认 47823，占用时连续尝试 10 个端口并记住实际端口，全部失败为 `DV-O01`）。只接受 GET；Host 必须是本机地址加端口，带 Origin 时必须同源；32 位随机令牌常数时间比较，可重新生成，旧页面收到 `reset`；页面 CSP 只允许本机连接与 B 站头像 CDN；最多 8 个连接；字体只从白名单经 Tauri 资源读取，并只返回真正的 WOFF2（Tauri 对缺失资源回退 `index.html`，已防住）。页面 `crates/desktop/overlay/overlay.html` 编译进程序，不在 `frontendDist` 内。`app.rs` 每 150 ms（无连接时不工作）把新的直播结果按开关和名字策略发给叠加层，并发送当前直播朗读任务的进度；刚连接时只补最近仍未过期的至多 3 条。新增命令 `overlay.save`／`overlay.token.reset`／`overlay.test`，快照新增 `overlay`，见 `docs/UI-IPC.md`。
+- 朗读同步的真实程度：开始、暂停和结束来自设备实际消耗的样本，准确；朗读中的“点亮到第几个字”按已听时长 ÷ max(260 ms × 字数, 已听 + 剩余排队音频) 估算，流式合成时随后续音频到达修正，不是逐字时间戳。
+- 设置：新增“OBS 叠加层（实验）”分类，含启用开关、抽象背景预览（深色／亮色／透明，比例跟随 OBS 报告的画布或 16:9／16:10／21:9，不使用任何真实游戏画面）、测试弹幕／测试醒目留言、打码显示的地址与复制／重新生成、连接状态、样式卡片、位置、大小、暗角、标题（≤12 字）、副标题（≤48 字）、显示项目、名字策略、合并重复和停留时间；全部自动保存并有中英文案。新增 Instrument Serif 拉丁子集（约 55 KB，OFL，见 `NOTICE.md`）。
+- 已运行：容器中 `cargo fmt --check` 通过；clippy 在本次改动文件中无告警（Linux 上另有 `diagnostics.rs`、`local_service.rs` 中仅 Windows 使用的变量/函数告警，非本次引入，Windows 严格 clippy 未运行）；Rust 全 workspace 在 Linux 上新增 9 项叠加层/进度测试全部通过，其余失败 14 项（桌面 10、引擎 4）的报错均为 Linux 上 `Secret(UnsupportedPlatform)` 或 Windows 路径断言，不涉及本次改动；前端 `node --test` 128/128；`test-ui-localization`（含新分类英文无横向溢出）和 `test-ui-settings-stability`、`test-ui-spotlight-transition`、`test-ui-emotes-alias` 改用 Playwright 自带 Chromium 运行通过（脚本原设 Edge 渠道）。叠加层页面用本地 SSE 夹具在 headless Chromium 渲染 1920×1080、2560×1600、3840×1728 各样式与四角，检查了安静、朗读、读完、醒目留言和关闭播报状态；设置页在深浅主题、中英文、560 px 窄窗下截图检查。修复了检查中发现的右侧角落文字从末尾点亮的问题，以及设置页隐藏单选框让整个弹窗可滚动的问题。
+- 未验证：没有构建 Windows 原生程序，没有在 WebView2 中打开设置页，没有在真实 OBS（其 CEF 版本）中加载叠加层，没有真实直播弹幕与真实 TTS 下的朗读同步观感，没有测试 Windows 防火墙或安全软件对本机端口的提示，没有测量 4K 浏览器来源的 GPU/CPU 占用。这些需在 Windows 上实际验收后再作为功能完成记录。
+- 同日按用户确认精简预览：去掉预览上方的比例按钮（只影响预览、连上 OBS 后多余），比例改为自动跟随 OBS 画布、未连接时按 1920×1080；背景切换缩成预览下方三个小色点，与画布尺寸说明、测试按钮同一行，预览上方不再有按钮。前端 128/128、本地化与设置稳定性浏览器回归通过；仍未在 WebView2 原生窗口中查看。
+
+## 2026-10-03：Rust 原生 B站开播管理
+
+- 按用户提供的 `Zarosmm/obs-bilibili-stream` 核对 README、菜单与 HTTP 实现，参照提交为 `051cf769d63a9b7111382f3f6cf7baaed0257b05`。新增独立 Rust 实现 `crates/engine/src/broadcast.rs`，未复制或链接上游 C++、Qt、OBS SDK 代码；不新增运行时 Python/Node 服务，不读取其他 TTS 项目或 OBS 凭据。
+- 入口为“设置 → 直播间 → 开播管理”：复用既有扫码账号，显式加载自己的房间、当前标题/分区/开播状态，支持打开自己的直播网页、修改标题与大分区/子分区、签名开播并获取 RTMP 地址/推流码、60024/60043 人脸验证二维码及手动重试、关闭 B站直播间。编辑草稿保留到明确提交，开播前先提交修改；失败不自动重放请求。
+- 每次账号操作均通过登录 UID 解析房间，并复核房间所有者，不能把正在接收弹幕的另一个房间当作管理目标。开播/关播与 live/TTS 的启动停止路径分开，退出弹幕姬不自动关播。媒体采集、编码与 RTMP 输出仍由 OBS 执行，用户在 OBS 的自定义直播服务中粘贴地址与推流码。
+- 推流信息只保存在 Rust 当前进程内存中；普通快照只给出 `has_stream_key`，手动显示/复制才通过临时命令返回明文，界面在接受快照前移除该临时结果。关闭设置清除明文输入；清除推流信息、扫码换号、退出账号、清空数据、退出程序取消等待并清除保留值。未写入数据库、配置导出、日志或迁移材料；手动复制写入 Windows 剪贴板。Debug 与错误信息不输出密钥、Cookie、服务端原始响应或验证地址。异步结果受账号 epoch 校验保护。
+- 本地协议测试 6 项、桌面状态/凭据/房间链接测试 4 项通过。覆盖真实回环 HTTP 的表单编码、签名、CSRF、账号房间约束、客户端版本参数、开播/关播路由、人脸验证地址限制、错误脱敏、离线/未登录/并发请求拦截、普通快照与配置导出排除推流码、注销取消及旧请求不得释放新请求的 busy 状态。
+- 显式联网只读探测通过：实际 Rust 客户端获得 12 个大分区，签名版本接口返回 `build=11148` / `curr_version=8.9.0.11148`。该探测未登录、未读取用户凭据、未更新标题或分区、未开播或关播。动态版本以接口实时返回为准，不硬编码本次结果。
+- Windows 全量验证通过：`cargo fmt --all --check`、严格 `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`（311 通过 / 8 ignored；测试指定内嵌 FFmpeg）、JS 语法检查、前端单元测试 128/128、Python 回归 27/27、`git diff --check`。最终 Rust/Clippy 日志在 `target/broadcast-20261003/`；顺带修正既有英文叠加层词条行尾空格为等价的 `\u0020`，保留显示语义。
+- `scripts/test-ui-broadcast.cjs` 在 headless Edge 中通过 14 项场景，外网请求全部拦截：主动加载、管理自己的房间与观看目标分离、打开自己的房间命令、分区联动、中文标题、焦点/失败后草稿保留、更新后开播、遮蔽/显示/隐藏/复制、设置关闭清除（包含退出动画副本）、关播保留弹幕接收、人脸验证与重试、清除推流信息、英文 560 px 窄窗布局。结果与截图在 `dist/broadcast-tests/`。测试夹具为虚构账号、房间与推流密钥，仅在测试脚本内存在，不进入生产适配器。初次测试中修正了测试自身的下拉菜单滚动等待、退出动画副本选择器和中文服务端分区名断言；旧诊断截图保留。
+- 现有 headless 本地化（8 场景）、设置稳定性（4 次焦点切换）、表情/别名及聚光收回（10 场景）回归均通过；没有启动或占用用户前台窗口。
+- `cargo build --locked --release -p danmakuvoice` 最终构建成功。本地开发构建为 `dist/broadcast-20261003/DanmakuVoice.exe`（0.2.3，22,685,696 字节，SHA-256 `a110610da52b2f3db0ae89adb903e6ce814800792f2a7a49a0b83e8b84eda498`）；`build-info.json` 标明包含开始时已有未提交修改。未改动之前冻结的交付目录，未提交、推送或发布。新增使用说明 `docs/BROADCAST.md`，更新 IPC、隐私、错误码、README 与功能参照归属。
+- **仍未验证**：没有使用真实账号修改房间、获取真实 RTMP 推流码、开播/关播或完成人脸验证，没有通过真实 OBS 推送音视频，也没有在实际 Tauri/WebView2 窗口点击此新增页面。源码、协议夹具、公开只读接口和 headless UI 通过不能升级为真实账号开播验收；本次产物是本地开发构建，不是正式发布包。
+
+## 2026-10-03：开播台重新设计（实验性，离线检查，未构建 Windows 原生程序）
+
+- 按用户要求不保留上一版“设置 → 直播间 → 开播管理”的按钮组，重新设计界面与操控。开播与 OBS 叠加层定位为同一批主播使用的实验功能：设置新增“开播”分类（标“实验”），紧挨“OBS 叠加层”；页头沿用叠加层的标题＋“实验性”＋启用开关。直播间页的开播区块、对应样式和失效的英文词条已删除。
+- 新增偏好 `broadcast_console`（默认 false，旧配置缺省为关闭，`DesktopPreferences` 往返测试覆盖）。关闭时设置页只显示抽象预览和用途说明，不读取账号或房间；主界面不显示开播台。
+- 启用并扫码登录后，主界面右上角出现与刊头对称的开播台：`OFF AIR`／`ON AIR`＋计时／`REPLAY`，可点击的直播标题与分区，钥匙按钮和“开播／下播”主按钮。点标题在玻璃面板中改标题（40 字计数）和两级分区，“保存到 B站”才提交；开播成功后自动打开“推流到 OBS”面板（服务器、推流码遮住，复制／显示／清除，三步 OBS 指引）；人脸验证在同一面板显示二维码并“继续开播”；下播需确认，只关闭 B站房间，弹幕接收与播报不变。未登录时显示“扫码登录”。
+- 设置 → 开播提供完整版：状态卡（状态、计时、房间号与分区、刷新、浏览器打开、开播／下播）、直播信息、人脸验证、推流到 OBS。开播时如有未保存的标题／分区修改，先提交再开播（沿用上一版语义）。
+- 引擎：`BroadcastRoom` 新增 `live_since`，由 B站 `get_info` 的 `live_time`（UTC+8 字符串）解析为 Unix 秒，仅在 `live_status=1` 时有值，非法或 `0000-00-00 00:00:00` 时为空；开播成功缺少时记为当前时间，下播清空。只用于计时显示。
+- 刷新策略：启用后，主界面或开播设置页在前台可见时，每个账号读取一次，之后最多每 60 秒一次（只读 `bili.broadcast.refresh`）；后台、离线测试窗口、请求进行中不读。标题／分区／开播／下播只在点击后提交，失败不重放。推流明文仍只经 `bili.broadcast.credentials` 临时返回，关闭面板或设置即清空；关闭的设置窗口不再在后台重绘开播页。
+- 已运行（容器，Linux，Rust 1.97 stable，因无法下载 1.98.1 使用 `--ignore-rust-version`）：`cargo fmt --all --check` 通过；引擎 clippy 无新增告警（仅既有 `diagnostics.rs` Linux 未用 `mut`）；引擎 broadcast 8 项（新增开播时间解析测试）与偏好 2 项通过，引擎全库 182 通过、4 项因 Linux 无 DPAPI（`Secret(UnsupportedPlatform)`）失败，与既有情况一致。桌面 crate 在 Linux 下需临时补 `startup` 桩和 RGBA 图标才能编译（未写回仓库），编译与 clippy 通过且无新增告警；桌面 4 项开播测试在 Linux 因 DPAPI 无法运行，需在 Windows 复跑。前端 `node --test` 134/134（新增 5 项：计时与分区、只读刷新的开关／离线／节流／换号、先保存后开播、人脸验证面板、下播确认）。
+- `scripts/test-ui-broadcast.cjs` 重写为 12 个场景（默认 Edge，`DV_BROWSER_CHANNEL=chromium` 可用 Playwright Chromium），本次用 Chromium 通过：禁用时不显示不读取、预览页、启用后只读一次、标题草稿在焦点变化与失败后保留、主界面改标题与分区（下拉菜单不误关面板）、开播后推流面板及显示／隐藏／复制／关闭清空、下播确认与取消、人脸验证与继续、设置页直播状态与打开房间、英文 560 px 设置和 780 px 主界面不重叠不横向滚动、关闭开关移除开播台；外网请求全部拦截，无页面错误。既有本地化（8 场景）、设置稳定性、聚光收回（10 场景）、表情／别名回归改用 Chromium 后通过。深浅主题、中英文、780／1040 px 截图已人工检查。
+- **仍未验证**：没有构建 Windows 原生程序，没有在 WebView2 窗口中操作开播台；没有用真实账号读取 `live_time`、改标题、开播／下播、人脸验证或通过 OBS 推流；Windows 上的严格 clippy 与桌面开播测试未运行。上一节列出的真实账号验收项仍全部待做。
+
+
 ## 2026-10-03 0.2.3 / Store 1.2.3.0 发布与送审结果
 
 - GitHub `Ghou133/DanmakuVoice` 已更新 README、六张公开预览图与发布改动；公开发布标签 `v0.2.3` 和 `store-v1.2.3.0` 均冻结于 `328eb0803336c81743be05c2cd11a6ae19573628`。GitHub 正式 Release https://github.com/Ghou133/DanmakuVoice/releases/tag/v0.2.3 已发布并设为 latest；专用配套源码页 https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.2.3.0 已公开。
@@ -143,3 +190,11 @@
 - 已点击 Submit for certification：Submission 2，ID `1152921505702033559`，现场状态为 **Update in certification / Product update: In certification**；Submission Complete、Pre-processing In progress、Certification / Publishing Not started。已设置通过认证后自动发布。此前 Submission 1 当前仍在商店，不能把旧版已上架标志当作新版发布完成。
 - 送审截图保留在忽略提交的 `dist/store-proof/submitted-1.2.3.0-20261003.jpg`；构建/测试/离线源码日志在 `target/publish-0.2.3/`，正式本地材料在公开 checkout 的 `dist/store-1.2.3.0-final/`。十四张上传素材保留在 `Claude outputs/store-screenshots/`，未加入公开提交。
 - **仍待外部结果**：微软认证、新版公开商店页面与客户端更新；商店签名包的安装、Smart App Control、实际播放和启动项验收未在本轮完成。未进行真实云账号连续合成或主观听音。本记录与版权字段修订是发布后的文档维护，不改已冻结的版本标签或安装包。
+
+## 2026-10-04 0.3.0 / Store 1.3.0.0 发布准备
+
+- 用户明确授权推送当前版本并同步微软商店，版本改为 0.3.0；沿用 Store ID 9P4DFD8HGN03 和已有包身份，对应 MSIX 1.3.0.0。保留之前发布历史，商店截图目录不进入公开源码。
+- 当前已有开播台、OBS 叠加层、中文/英文字体及设置/聚光/本地服务修复全部进入本版。开播台与叠加层继续标为实验并默认关闭；真实账号开播、人脸验证、真实 OBS 推流与朗读同步验收仍待完成。
+- 本轮 Windows fmt、严格 Clippy 与完整 Rust 回归通过；前端 134/134，Python 打包 27/27；headless Edge 的开播 12 场景、本地化、设置稳定性、聚光收回、表情/别名回归通过。测试不使用真实账号、不执行真实开播，不能视作在线合成或主观听音验收。
+- 发布检查补充开播说明到审计包，复制两套字体版权与 OFL 许可到 third-party/Fonts 并保留到 MSIX/许可包；既有打包测试增加实际保留这些材料的断言。
+- 正式构建、源码配对、GitHub 发布和 Partner Center 提交结果待实际完成后追加。浏览器当前需要登录，不导入或导出账号凭据。

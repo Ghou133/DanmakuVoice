@@ -3,6 +3,7 @@
 mod app;
 mod embedded_ffmpeg;
 mod local_service;
+mod overlay;
 mod package;
 mod resources;
 #[cfg(windows)]
@@ -253,6 +254,10 @@ async fn dispatch(
     let payload = payload.unwrap_or_else(|| serde_json::json!({}));
     if action == "external.open" {
         let page = payload.get("page").and_then(Value::as_str).unwrap_or("");
+        if page == "bili_broadcast_room" {
+            open_official_page(&state.own_broadcast_page()?)?;
+            return state.snapshot();
+        }
         let update;
         let url = match page {
             "fish_keys" => fish::API_KEYS_URL,
@@ -502,6 +507,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let state = app.state::<Application>().inner().clone();
             tauri::async_runtime::spawn(async move {
                 state.auto_connect_saved_room().await;
+            });
+            let state = app.state::<Application>().inner().clone();
+            let resolver = app.asset_resolver();
+            tauri::async_runtime::spawn(async move {
+                // Overlay fonts are the WebView's embedded files; no second copy.
+                let assets: overlay::AssetLoader = Arc::new(move |name: &str| {
+                    resolver.get(name.to_owned()).map(|asset| asset.bytes)
+                });
+                state.start_overlay(assets).await;
+                state.run_overlay_feed().await;
             });
             let state = app.state::<Application>().inner().clone();
             tauri::async_runtime::spawn(async move {

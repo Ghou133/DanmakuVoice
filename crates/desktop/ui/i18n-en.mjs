@@ -1,5 +1,19 @@
 // Keys are the original UI copy. Only explicitly marked application text is translated.
 export const english = Object.freeze(Object.fromEntries(`
+打开直播间	Open live room
+刷新开播状态	Refresh broadcast status
+请先扫码登录哔哩哔哩，再管理自己的直播间。	Sign in to Bilibili by QR code to manage your own room.
+未开播	Offline
+轮播中	Replaying
+直播标题	Broadcast title
+直播分区	Category
+直播子分区	Subcategory
+开播人脸验证二维码	Broadcast face verification QR code
+推流码	Stream key
+复制推流码	Copy stream key
+请填写 1 到 40 字的标题，并选择直播子分区。	Enter a title of 1 to 40 characters and choose a subcategory.
+请先扫码完成人脸验证	Complete face verification by scanning the QR code
+直播标题与分区已更新	Broadcast title and category updated
 点击选择文件	Choose a file
 已保存的音色	Saved voice
 保存更改	Save changes
@@ -35,7 +49,6 @@ export const english = Object.freeze(Object.fromEntries(`
 输入主播 UID	Enter streamer UID
 使用主播 UID 匿名继续	Continue anonymously with a streamer UID
 继续	Continue
-UID 可在主播的个人主页找到	Find the UID on the streamer's profile
 返回	Back
 语音播报	Text to speech
 开启豆包播报	Enable Doubao speech
@@ -47,7 +60,6 @@ UID 可在主播的个人主页找到	Find the UID on the streamer's profile
 使用豆包 App 扫描二维码	Scan the QR code with the Doubao app
 在手机上确认登录	Confirm login on your phone
 配置完成	Setup complete
-现在可以接收直播间的弹幕了。	You can now receive live chat messages.
 房间	Room
 播报	Speech
 仅显示弹幕	Messages only
@@ -373,11 +385,11 @@ B站官方表情已过滤	Bilibili standalone emote filtered
 条关键词规则引用	keyword rules reference this sound
 替换	Replace
 还没有音效素材。	No sound effects yet.
-测试声音会播放一声本地提示音，无需登录语音服务。切换或重新连接输出设备会停止当前播放和待播队列。	Plays a local test tone without a speech service login. Switching or reconnecting the output device stops current playback and the pending queue.
+切换或重连设备会停止播放并清空待播队列。	Switching or reconnecting a device stops playback and clears the pending queue.
 输出设备	Output device
 跟随系统默认设备	Use system default device
 （系统默认）	 (system default)
-测试声音	Test sound
+播放测试音	Play test tone
 刷新设备	Refresh devices
 重新连接设备	Reconnect device
 重新走一遍扫码、直播间和豆包设置。已有声音和规则仍会保留。	Repeat QR login, live room, and Doubao setup. Existing voices and rules are kept.
@@ -387,7 +399,6 @@ B站官方表情已过滤	Bilibili standalone emote filtered
 跟随系统	System
 界面缩放	Interface scale
 开机启动	Start with Windows
-登录 Windows 后打开超绝可爱弹幕姬。	Open DanmakuVoice when you sign in to Windows.
 重新打开引导	Restart setup
 当前数据目录	Current data folder
 导出配置	Export configuration
@@ -472,7 +483,7 @@ Fish Audio 账号已验证并连接	Fish Audio account verified and connected
 请重新选择语音服务。	Select the speech service again.
 用户声音绑定	Viewer voice binding
 删除后无法撤销。仍被使用的连接、默认预设或规则素材需要先解除引用。	Deletion cannot be undone. Remove references to any connection, default preset, or sound still in use first.
-测试声音已加入播放队列	Test sound added to the playback queue
+测试音已加入播放队列	Test tone added to the playback queue
 设备列表已刷新	Device list refreshed
 音频输出已重新连接	Audio output reconnected
 重新打开初次设置？	Restart initial setup?
@@ -590,7 +601,6 @@ Fish 音色已保存	Fish voice saved
 请选择	Please select
 语言	Language
 界面语言	Interface language
-语言切换后立即生效，并自动保存。	Applies immediately and saves automatically.
 语言已保存	Language saved
 正在准备直播间…	Preparing your live room…
 ，	,\u0020
@@ -703,7 +713,130 @@ Fish 音色已保存	Fish voice saved
 关闭	Close
 最大化	Maximize
 待读弹幕	Messages to read
+OBS 叠加层	OBS overlay
+实验	Beta
+实验性	Experimental
+把弹幕和正在朗读的内容画进直播画面，看录播的观众也能看到。	Draws chat and the message being read into your stream, so replay viewers can see it too.
+一体卡	One card
+光脊	Spine
+一条发光的竖线串起刊头和弹幕，没有底板，最轻。	A glowing line joins the masthead and chat. No panel, the lightest look.
+刊头和弹幕收进一张玻璃卡片，读完的弹幕变成小行。	Masthead and chat share one glass card. Read messages shrink into small rows.
+不显示	Hidden
+仅礼物与醒目留言	Gifts and Super Chats only
+全部	All
+ 个画面	 views
+亮色	Light
+透明	Transparent
+位置	Position
+左上	Top left
+右上	Top right
+左下	Bottom left
+右下	Bottom right
+大小	Size
+暗角深浅	Shadow depth
+在亮的游戏画面上调深一些，文字更清楚。	Raise it on bright game scenes so the text stays clear.
+停留时间	Display time
+没有在朗读的弹幕显示多久后淡出。	How long messages that are not being read stay before fading out.
+<span>秒</span>	<span>s</span>
+冷场时显示。建议写英文，留空用默认的一句。	Shown when chat is quiet. English reads best; leave empty for the default line.
+刊头文字	Masthead text
+标题	Title
+副标题	Tagline
+最多 12 个字，例如“今晚的弹幕”。	Up to 12 characters, for example “Tonight's chat”.
+单独显示在画面上方正中。	Shown on its own at the top center of the scene.
+发一条测试内容到 OBS 里的叠加层	Send a test item to the overlay in OBS
+叠加层地址	Overlay address
+合并重复弹幕	Merge repeated messages
+同样的话连着出现时显示为“×N”。	Repeated messages show as “×N”.
+启用后生成本机地址	An address on this computer appears once enabled
+在 OBS 里添加“浏览器”来源，粘贴地址，宽和高填 OBS 的画布分辨率（设置 → 视频 → 基础分辨率）。叠加层按画面大小自动缩放，1080p、2K、4K、16:10 和带鱼屏都能直接用。	In OBS, add a Browser source, paste the address, and set its width and height to the OBS canvas resolution (Settings → Video → Base Resolution). The overlay scales with the scene, so 1080p, 2K, 4K, 16:10 and ultrawide all work.
+地址只在本机可用，重新生成会让旧地址失效	The address works only on this computer. Regenerating it disables the old one
+复制地址	Copy address
+重新生成	Regenerate
+OBS 已连接 · 	OBS connected ·\u0020
+无法复制到剪贴板，请稍后重试	Could not copy to the clipboard. Try again
+显示内容	What to show
+晚上好呀，今天也来听你读弹幕	Good evening, here to hear you read chat again
+这一波要是没闪现就寄了，主播反应好快	That dodge saved the round, what a quick reaction
+未启用 · 打开右上角的开关后，OBS 才能显示叠加层	Off · Turn on the switch at the top right so OBS can show the overlay
+样式	Style
+正在启动…	Starting…
+测试弹幕	Test message
+测试醒目留言	Test Super Chat
+添加到 OBS	Add to OBS
+看直播和录播的观众只需要看到内容，默认只在礼物和醒目留言旁显示名字。	Live and replay viewers only need the content, so names appear only beside gifts and Super Chats by default.
+等待 OBS 连接 · 在 OBS 中添加浏览器来源并粘贴地址	Waiting for OBS · Add a Browser source in OBS and paste the address
+预览背景	Preview background
+深色背景	Dark backdrop
+亮色背景	Light backdrop
+透明背景	Transparent backdrop
+来自 OBS	from OBS
+连上 OBS 后按实际画布显示	shown at the real canvas size once OBS connects
+请填写叠加层标题	Enter an overlay title
+停留时间需在 3 到 120 秒之间	Display time must be between 3 and 120 seconds
+地址已复制，粘贴到 OBS 的浏览器来源	Address copied. Paste it into an OBS Browser source
+重新生成叠加层地址？	Regenerate the overlay address?
+旧地址会立即失效，OBS 里的浏览器来源需要换成新地址。	The old address stops working right away. Update the Browser source in OBS with the new one.
+已生成新地址，记得更新 OBS 里的地址	New address created. Remember to update it in OBS
 弹幕照常显示，打开右上角开关继续朗读。	Messages still appear. Turn on the switch above to keep reading.
+开播	Go live
+下播	End stream
+下播？	End the stream?
+已下播	Stream ended
+直播中	Live
+继续开播	Continue
+人脸验证	Face verification
+开播前需要人脸验证	Face verification is required before going live
+用哔哩哔哩 App 扫码完成验证，然后点「继续开播」。	Scan with the Bilibili app to verify, then select Continue.
+已开播，请在 OBS 中开始推流	You're live. Start streaming in OBS.
+请先在 OBS 中停止推流。下播只关闭 B站直播间，弹幕接收和播报会继续。	Stop streaming in OBS first. This only closes the Bilibili room; chat and speech keep running.
+在弹幕姬里开播、下播，随时改标题和分区。画面和声音仍由 OBS 推流。	Go live, end the stream and change the title or category from here. OBS still sends the video and audio.
+一键开播、下播	Go live in one click
+主界面右上角出现开播台，直播时显示已开播时长。	A broadcast console appears at the top right of the main screen and shows how long you've been live.
+随时改标题和分区	Change title and category anytime
+点标题即可修改，保存后立刻在 B站生效。	Select the title to edit it. Saved changes apply on Bilibili right away.
+推流码一键复制	Copy stream details in one click
+开播后直接复制到 OBS，不用再打开直播姬。	Copy them straight into OBS once you're live, without opening Bilibili's streaming app.
+主播的直播间	Your live room
+今晚一起听歌	Songs tonight
+娱乐 · 视频唱见	Entertainment · Singing
+先登录自己的 B站账号	Sign in to your own Bilibili account first
+开播管理只作用于扫码登录账号自己的直播间。	The console only manages the room of the account you signed in with.
+去扫码登录	Scan to sign in
+离线测试窗口不能管理直播间。	The offline test window can't manage a live room.
+正在读取开播状态…	Reading broadcast status…
+读取开播状态失败	Couldn't read broadcast status
+登录 B站账号后即可开播	Sign in to Bilibili to go live
+修改直播标题和分区	Change the title and category
+直播信息	Stream details
+保存后立刻在 B站生效	Saved changes apply on Bilibili right away
+保存到 B站	Save to Bilibili
+开播时如有未保存的修改，会先保存再开播。	Unsaved changes are saved before going live.
+分区	Category
+子分区	Subcategory
+推流到 OBS	Stream to OBS
+直播间已打开，等待 OBS 推流	The room is open and waiting for OBS
+服务器	Server
+复制	Copy
+复制服务器	Copy server
+显示	Show
+隐藏	Hide
+清除	Clear
+仅保存在本次运行的内存中	Kept in memory for this session only
+打开 OBS「设置 → 直播」	In OBS, open Settings → Stream
+服务选「自定义」	Set Service to Custom
+粘贴服务器和推流码，再点「开始直播」	Paste the server and stream key, then select Start Streaming
+推流码只保存在本次运行的内存里。需要时可以重新获取。	The stream key is kept in memory for this session only. You can fetch it again when needed.
+开播后，这里会给出 OBS 需要的服务器和推流码。	Once you're live, the server and stream key for OBS appear here.
+重新获取推流码	Get stream key again
+服务器已复制，请粘贴到 OBS	Server copied. Paste it into OBS.
+推流码已复制，请粘贴到 OBS	Stream key copied. Paste it into OBS.
+放弃未保存的直播信息？	Discard unsaved stream details?
+刷新会读取 B站上的标题和分区，本页尚未保存的修改会丢失。	Refreshing reloads the title and category from Bilibili. Unsaved changes here will be lost.
+关闭后，尚未保存的标题和分区修改会丢失。	Unsaved title and category changes will be lost.
+已启用开播台，主界面右上角可以开播和下播	Broadcast console is on. Go live from the top right of the main screen.
+已关闭开播台	Broadcast console is off
+开播只打开 B站直播间；画面和声音由 OBS 推送。退出弹幕姬不会自动下播。启用期间，弹幕姬约每分钟读取一次自己房间的开播状态。	Going live only opens the Bilibili room; OBS sends the video and audio. Exiting this app doesn't end the stream. While the console is on, the app reads your room's status about once a minute.
 `.trim().split('\n').map(line => {
   const tab = line.indexOf('\t');
   return [line.slice(0, tab), line.slice(tab + 1)];
