@@ -1,12 +1,33 @@
 param(
-    [Parameter(Mandatory = $true)][int]$RootProcessId,
+    [int]$RootProcessId,
     [ValidateRange(2, 3600)][int]$Seconds = 30,
     [ValidateRange(1, 60)][int]$IntervalSeconds = 1,
     [string]$Scenario = 'foreground-idle',
-    [string]$OutputCsv
+    [string]$OutputCsv,
+    [switch]$FunctionsOnly
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Difference each stable process identity separately. Subtracting aggregate
+# lifetime CPU loses work whenever FFmpeg or a WebView2 child exits; PID alone
+# also confuses a replacement process with the prior occupant of that PID.
+function Get-CpuSampleDelta([hashtable]$Previous, [object[]]$Current, [long]$PreviousUtcTicks) {
+    $next = @{}
+    $delta = 0.0
+    foreach ($sample in $Current) {
+        $next[$sample.Identity] = [double]$sample.CpuSeconds
+        if ($Previous.ContainsKey($sample.Identity)) {
+            $delta += [math]::Max(0.0, $sample.CpuSeconds - $Previous[$sample.Identity])
+        } elseif ($sample.StartedUtcTicks -gt $PreviousUtcTicks) {
+            # A child born since the prior sample contributes all its CPU.
+            $delta += [double]$sample.CpuSeconds
+        }
+    }
+    return [pscustomobject]@{ DeltaCpuSeconds = $delta; Current = $next }
+}
+if ($FunctionsOnly) { return }
+if ($RootProcessId -le 0) { throw 'RootProcessId must identify a running application process' }
 if (-not $OutputCsv) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $OutputCsv = Join-Path $PSScriptRoot "..\dist\measure-$Scenario-$stamp.csv"
@@ -40,8 +61,10 @@ function Get-ProcessTreeIds([int]$rootId) {
 }
 
 $rows = [Collections.Generic.List[object]]::new()
-$previousCpu = $null
+$previousCpu = @{}
 $previousTime = $null
+$timer = [Diagnostics.Stopwatch]::StartNew()
+$previousElapsed = 0.0
 $finish = (Get-Date).AddSeconds($Seconds)
 do {
     $now = Get-Date
@@ -51,16 +74,27 @@ do {
         break
     }
     $processes = @(Get-Process -Id $ids -ErrorAction SilentlyContinue)
-    $cpuSeconds = ($processes | Measure-Object -Property CPU -Sum).Sum
+    $elapsed = $timer.Elapsed.TotalSeconds
+    $cpuSamples = @($processes | ForEach-Object {
+        try {
+            $started = $_.StartTime.ToUniversalTime().Ticks
+            [pscustomobject]@{
+                Identity = "$($_.Id):$started"
+                StartedUtcTicks = $started
+                CpuSeconds = [double]$_.CPU
+            }
+        } catch { } # A child can exit between enumeration and opening its handle.
+    })
     $workingBytes = ($processes | Measure-Object -Property WorkingSet64 -Sum).Sum
     $privateBytes = ($processes | Measure-Object -Property PrivateMemorySize64 -Sum).Sum
     $handles = ($processes | Measure-Object -Property Handles -Sum).Sum
     $cpuPercent = $null
-    if ($null -ne $previousCpu) {
-        $wallSeconds = ($now - $previousTime).TotalSeconds
+    $cpuDelta = Get-CpuSampleDelta $previousCpu $cpuSamples $(if ($previousTime) { $previousTime.ToUniversalTime().Ticks } else { $now.ToUniversalTime().Ticks })
+    if ($null -ne $previousTime) {
+        $wallSeconds = $elapsed - $previousElapsed
         if ($wallSeconds -gt 0) {
             $cpuPercent = [math]::Round(
-                [math]::Max(0.0, ($cpuSeconds - $previousCpu) / $wallSeconds * 100), 2)
+                $cpuDelta.DeltaCpuSeconds / $wallSeconds * 100, 2)
         }
     }
     $rows.Add([pscustomobject]@{
@@ -73,8 +107,9 @@ do {
         Handles = [int]$handles
         CpuOneCorePercent = $cpuPercent
     })
-    $previousCpu = $cpuSeconds
+    $previousCpu = $cpuDelta.Current
     $previousTime = $now
+    $previousElapsed = $elapsed
     if ((Get-Date) -ge $finish) { break }
     Start-Sleep -Seconds $IntervalSeconds
 } while ((Get-Date) -lt $finish)
@@ -95,4 +130,5 @@ $cpu = $rows | Where-Object { $null -ne $_.CpuOneCorePercent } |
     AverageCpuOneCorePercent = [math]::Round($cpu.Average, 2)
     MaximumCpuOneCorePercent = [math]::Round($cpu.Maximum, 2)
     Csv = $OutputCsv
+    CpuSamplingLimit = 'Child processes born and exited entirely between samples are not observable; one-core CPU percent is not normalized by logical processor count.'
 }

@@ -1,3 +1,4 @@
+import { t, ui } from './i18n.mjs';
 // Keep native form values/validation, but render one themed menu only while open.
 let sequence = 0;
 let opened = null;
@@ -36,14 +37,14 @@ export function mountSelects(root) {
     trigger.setAttribute('role', 'combobox');
     trigger.setAttribute('aria-haspopup', 'listbox');
     trigger.setAttribute('aria-expanded', 'false');
-    trigger.setAttribute('aria-label', select.getAttribute('aria-label') || [...select.labels].map(label => label.textContent.trim()).join(' ') || '选择');
+    trigger.setAttribute('aria-label', select.getAttribute('aria-label') || [...select.labels].map(label => label.textContent.trim()).join(' ') || t('选择'));
     select.before(wrapper);
     wrapper.append(select, trigger);
     select.classList.add('select-native');
     select.tabIndex = -1;
     select.setAttribute('aria-hidden', 'true');
     const sync = () => {
-      trigger.textContent = select.selectedOptions[0]?.label || '请选择';
+      trigger.textContent = select.selectedOptions[0]?.label || t('请选择');
       trigger.disabled = select.disabled;
       trigger.setAttribute('aria-required', String(select.required));
     };

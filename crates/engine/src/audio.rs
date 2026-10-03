@@ -3,8 +3,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::time::Instant;
@@ -70,6 +70,9 @@ struct TaggedSample {
 }
 
 struct Shared {
+    /// Serialize only job activation/invalidation. The CPAL callback and
+    /// per-sample producers never take this control lock.
+    control: Mutex<()>,
     samples: ArrayQueue<TaggedSample>,
     active_job: AtomicU64,
     /// Last job that put PCM into the device queue. A failed synthesis may be
@@ -90,7 +93,33 @@ pub struct AudioWriter {
 }
 
 impl AudioWriter {
+    pub(crate) fn activate_for(
+        &self,
+        job_id: u64,
+        cancel: &CancellationToken,
+    ) -> Result<(), AudioError> {
+        let _control = self
+            .shared
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if cancel.is_cancelled() {
+            return Err(AudioError::Cancelled);
+        }
+        self.activate_unlocked(job_id);
+        Ok(())
+    }
+
     pub fn activate(&self, job_id: u64) {
+        let _control = self
+            .shared
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.activate_unlocked(job_id);
+    }
+
+    fn activate_unlocked(&self, job_id: u64) {
         self.shared.active_job.store(0, Ordering::Release);
         while self.shared.samples.pop().is_some() {}
         self.shared.queued_audio_job.store(0, Ordering::Release);
@@ -102,6 +131,11 @@ impl AudioWriter {
     }
 
     pub fn cancel_active(&self) {
+        let _control = self
+            .shared
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.shared.active_job.store(0, Ordering::Release);
         while self.shared.samples.pop().is_some() {}
     }
@@ -110,6 +144,11 @@ impl AudioWriter {
     /// callback, while a newer job can safely keep playing after an old
     /// task's cancellation guard drops.
     pub fn deactivate_if(&self, job_id: u64) {
+        let _control = self
+            .shared
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let _ =
             self.shared
                 .active_job
@@ -194,7 +233,7 @@ impl AudioWriter {
                     0.0
                 },
             };
-            let stalled_since = Instant::now();
+            let mut stalled_since = None;
             loop {
                 if cancel.is_cancelled() || self.shared.active_job.load(Ordering::Acquire) != job_id
                 {
@@ -215,7 +254,9 @@ impl AudioWriter {
                     }
                     break;
                 }
-                if stalled_since.elapsed() >= stall_timeout {
+                // Normal PCM enqueue does not need a clock read per sample.
+                // Start the stall timer only when the bounded ring is full.
+                if stalled_since.get_or_insert_with(Instant::now).elapsed() >= stall_timeout {
                     self.shared.disconnected.store(true, Ordering::Release);
                     return Err(AudioError::Stalled);
                 }
@@ -365,6 +406,7 @@ impl AudioOutput {
         let channels = supported.channels();
         let capacity = (sample_rate as usize * channels as usize * 2).clamp(4096, 768_000);
         let shared = Arc::new(Shared {
+            control: Mutex::new(()),
             samples: ArrayQueue::new(capacity),
             active_job: AtomicU64::new(0),
             queued_audio_job: AtomicU64::new(0),
@@ -475,6 +517,7 @@ fn fill<T: Copy>(data: &mut [T], shared: &Shared, convert: impl Fn(f32) -> T) {
 pub(crate) fn test_writer(sample_rate: u32, channels: u16, capacity: usize) -> AudioWriter {
     AudioWriter {
         shared: Arc::new(Shared {
+            control: Mutex::new(()),
             samples: ArrayQueue::new(capacity),
             active_job: AtomicU64::new(0),
             queued_audio_job: AtomicU64::new(0),
@@ -512,6 +555,31 @@ impl AudioWriter {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cancelled_job_cannot_reactivate_or_erase_next_jobs_pcm() {
+        let writer = test_writer(48_000, 1, 8);
+        let old_cancel = CancellationToken::new();
+        writer.activate_for(7, &old_cancel).unwrap();
+        // The old task is already past readiness and is descheduled before
+        // activation. Skip invalidates it; the next job queues valid audio.
+        old_cancel.cancel();
+        writer.deactivate_if(7);
+        let next_cancel = CancellationToken::new();
+        writer.activate_for(8, &next_cancel).unwrap();
+        writer
+            .push_interleaved(8, &[0.25], &next_cancel)
+            .await
+            .unwrap();
+        let late = writer.activate_for(7, &old_cancel);
+        assert_eq!(
+            writer.render_test_frames(1),
+            [0.25],
+            "late old activation erased current PCM"
+        );
+        assert!(matches!(late, Err(AudioError::Cancelled)));
+        assert_eq!(writer.shared.active_job.load(Ordering::Acquire), 8);
+    }
+
     #[test]
     fn default_device_change_prefers_identity_and_degrades_to_name() {
         let host = cpal::default_host().id();
@@ -538,6 +606,7 @@ mod tests {
     #[tokio::test]
     async fn fixed_buffer_cancellation_and_volume() {
         let shared = Arc::new(Shared {
+            control: Mutex::new(()),
             samples: ArrayQueue::new(2),
             active_job: AtomicU64::new(0),
             queued_audio_job: AtomicU64::new(0),

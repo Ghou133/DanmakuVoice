@@ -17,7 +17,7 @@
 1. Windows 工作流完成 fmt、clippy、Rust／UI／Python 测试、真实 FFmpeg 解码以及锁定源码核验。
 2. 原 `package-portable.ps1` 仅用于内部编译、PE 依赖检查和许可证收集；中间 EXE／审计 ZIP 不作为新的公开下载。
 3. `package-msix.ps1` 生成清单，包含主程序、FFmpeg、图标和第三方许可；使用 Windows SDK MakeAppx 完整语义验证并逐文件核验包内容。
-4. 将同提交 `DanmakuVoice-source.zip` 发布到 `store-v<MSIX 版本>` 标签的 GitHub 源码版本（当前为 `store-v1.2.2.0`），保证许可证要求的源码可获取，不覆盖旧便携版的标签／源码。不要发布未签名 MSIX 给普通用户。
+4. 正式分发前将同提交 `DanmakuVoice-source.zip` 提供在 `store-v<MSIX 版本>` 对应的公开源码位置，例如应用 `0.2.2` 对应 `store-v1.2.2.0`；先核对链接与实际完整源码，再进行提交，不覆盖旧便携版的标签／源码。源码公开同样需要用户发布指令。不要发布未签名 MSIX 给普通用户。
 5. 上传 `DanmakuVoice-store-submission.msix` 到 Partner Center 的 Packages。只有通过微软审核并签名的商店分发包才供用户安装。无需自签证书或关闭 SAC。
 
 本地可在已核验的 EXE／审计 ZIP／完整源码基础上执行：
@@ -26,7 +26,7 @@
 ./scripts/package-msix.ps1 -AuditZip <audit.zip> -ApplicationExe <DanmakuVoice.exe> -FfmpegBinary <ffmpeg.exe> -SourceZip <source.zip> -Commit <完整提交> -Version 0.2.2
 ```
 
-`-DevelopmentSnapshot` 只用于本地未提交工作验证，输出显式标记为 development，不能上传为正式版本。
+`-DevelopmentSnapshot` 只用于本地未提交工作验证，输出显式标记为 development，不能上传为正式版本。输入审计包／源码需先用同名开发快照开关生成并配对，不能把基础提交当作工作树的精确源码。完整材料及命令边界见 [RELEASE-LICENSE-AUDIT.md](RELEASE-LICENSE-AUDIT.md)。
 
 ## 安装后的行为
 
@@ -45,3 +45,9 @@
 - 必须验证实际商店签名包在 SAC 开启的 Windows 上安装、启动、FFmpeg 播放、更新和开机启动。MakeAppx 成功、自签测试或离线单元测试不代表这些验收已完成。
 
 参考：Microsoft 的 MSIX 手动打包、MakeAppx、StartupTask 和商店发布文档。
+
+## 截图维护
+
+截图应反映待提交构建的当前六分类设置、刊头／聚光主界面及深浅主题；旧引导或旧主页图片不能代表新版本。来源、构建及脱敏范围记在唯一的 [PROGRESS.md](../PROGRESS.md)，不把生成目录下的旧素材当成持续有效的证据。
+
+`node scripts/test-ui-emotes-alias.cjs --capture-store --output <临时目录>` 可在装有 Playwright 与 Microsoft Edge 的开发环境生成离线页面对照；需要时设置 `NODE_PATH` 指向开发模块目录。该模式使用虚构用户名、房间及聊天，不登录、不合成、不上传，连接状态为未连接；它不能证明原生 WebView2、真实直播或商店签名包。实际商店截图与动画验收仍需对应构建运行时留存，不能由静态页面图替代。

@@ -35,6 +35,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{
     COOKIE as WS_COOKIE, HeaderValue as WsHeaderValue, ORIGIN, USER_AGENT,
 };
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -892,6 +893,14 @@ enum ConnectionEnd {
     ReceiverClosed,
 }
 
+fn room_websocket_config() -> WebSocketConfig {
+    // Enforce the wire limit before Tungstenite buffers a whole message,
+    // including a message assembled from multiple fragmented frames.
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_WIRE_BYTES))
+        .max_frame_size(Some(MAX_WIRE_BYTES))
+}
+
 async fn connect_once(
     http: &Client,
     display_room_id: u64,
@@ -932,7 +941,8 @@ async fn connect_once(
         }
         let connection = tokio::select! {
             _ = cancel.cancelled() => return ConnectionEnd::Cancelled,
-            result = timeout(Duration::from_secs(12), tokio_tungstenite::connect_async(request)) => result,
+            result = timeout(Duration::from_secs(12), tokio_tungstenite::connect_async_with_config(
+                request, Some(room_websocket_config()), false)) => result,
         };
         let Ok(Ok((mut socket, _))) = connection else {
             continue;
@@ -1417,11 +1427,18 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
             let user = info.get(2)?.as_array()?;
             let mut event = LiveEvent::danmaku(
                 room_id,
-                user.first().and_then(Value::as_u64),
+                user.first().and_then(Value::as_u64).filter(|uid| *uid > 0),
                 user.get(1)?.as_str()?,
                 message,
             );
             let metadata = info.first().and_then(Value::as_array).map(Vec::as_slice);
+            // blivedm/models/web.py maps info[0][12] to dm_type:
+            // 0=text, 1=standalone emoticon, 2=voice. Do not infer it from
+            // message text, inline emots, image URLs, or command suffixes.
+            event.is_bilibili_emoticon = metadata
+                .and_then(|meta| meta.get(12))
+                .and_then(Value::as_u64)
+                == Some(1);
             let mode_info = metadata.and_then(|meta| meta.get(15));
             let extra = danmaku_extra(mode_info);
             event.avatar_url =
@@ -1444,17 +1461,25 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 .get("price")
                 .and_then(Value::as_f64)
                 .filter(|v| v.is_finite() && *v >= 0.0)?;
+            let price_yuan = milli_yuan / 1000.0 * f64::from(quantity);
+            if !price_yuan.is_finite() {
+                return None;
+            }
             LiveEvent {
                 room_id,
-                user_id: data.get("uid").and_then(Value::as_u64),
+                user_id: data
+                    .get("uid")
+                    .and_then(Value::as_u64)
+                    .filter(|uid| *uid > 0),
                 user_name: data.get("uname")?.as_str()?.to_owned(),
                 avatar_url: bili_image_url(data.get("face")),
                 kind: EventKind::Gift,
                 message: String::new(),
                 emotes: Vec::new(),
+                is_bilibili_emoticon: false,
                 gift_name: data.get("giftName")?.as_str()?.to_owned(),
                 quantity,
-                price_yuan: milli_yuan / 1000.0 * f64::from(quantity),
+                price_yuan,
                 coin_type: data
                     .get("coin_type")
                     .and_then(Value::as_str)
@@ -1472,7 +1497,10 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 .filter(|v| v.is_finite() && *v >= 0.0)?;
             LiveEvent {
                 room_id,
-                user_id: data.get("uid").and_then(Value::as_u64),
+                user_id: data
+                    .get("uid")
+                    .and_then(Value::as_u64)
+                    .filter(|uid| *uid > 0),
                 user_name: data
                     .pointer("/user_info/uname")
                     .or_else(|| data.get("uname"))?
@@ -1482,6 +1510,7 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 kind: EventKind::SuperChat,
                 message: data.get("message")?.as_str()?.to_owned(),
                 emotes: Vec::new(),
+                is_bilibili_emoticon: false,
                 gift_name: String::new(),
                 quantity: 0,
                 price_yuan: price,
@@ -1502,7 +1531,10 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
             };
             LiveEvent {
                 room_id,
-                user_id: data.get("uid").and_then(Value::as_u64),
+                user_id: data
+                    .get("uid")
+                    .and_then(Value::as_u64)
+                    .filter(|uid| *uid > 0),
                 user_name: data
                     .get("username")
                     .or_else(|| data.get("uname"))?
@@ -1512,6 +1544,7 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 kind: EventKind::Guard,
                 message: String::new(),
                 emotes: Vec::new(),
+                is_bilibili_emoticon: false,
                 gift_name: String::new(),
                 quantity: data
                     .get("num")
@@ -1664,6 +1697,80 @@ mod tests {
     use futures_util::stream;
     use reqwest::header::HeaderValue;
     use std::io::Write;
+
+    #[test]
+    fn anonymous_gifts_do_not_merge_distinct_names_under_uid_zero() {
+        let start = Instant::now();
+        let mut pipeline = EventPipeline::new(GiftMergeSettings {
+            enabled: true,
+            initial_seconds: 0.1,
+            increment_seconds: 0.0,
+            maximum_seconds: 0.1,
+        })
+        .unwrap();
+        for name in ["甲", "乙"] {
+            let event = parse_live_event(
+                42,
+                0,
+                &json!({"cmd":"SEND_GIFT","data":{
+                    "uid":0,"uname":name,"giftName":"礼物","num":1,"price":1000
+                }}),
+            )
+            .unwrap();
+            assert_eq!(event.user_id, None);
+            assert!(pipeline.ingest(event, start).is_empty());
+        }
+        let ready = pipeline.drain_due(start + Duration::from_millis(200));
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].user_name, "甲");
+        assert_eq!(ready[1].user_name, "乙");
+        assert!(ready.iter().all(|event| event.quantity == 1));
+    }
+
+    #[test]
+    fn gift_total_overflow_is_rejected_before_rule_evaluation() {
+        assert!(
+            parse_live_event(
+                42,
+                0,
+                &json!({"cmd":"SEND_GIFT","data":{
+                    "uid":7,"uname":"甲","giftName":"礼物",
+                    "num":u32::MAX,"price":f64::MAX
+                }}),
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_oversized_frame_before_packet_decode() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // A server can announce a frame much larger than the room limit;
+            // the client must reject it at the transport boundary.
+            let _ = socket
+                .send(Message::Binary(vec![0; MAX_WIRE_BYTES + 1].into()))
+                .await;
+        });
+        let url = format!("ws://{address}");
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async_with_config(url, Some(room_websocket_config()), false)
+                .await
+                .unwrap();
+        let error = timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            tokio_tungstenite::tungstenite::Error::Capacity(_)
+        ));
+        server.await.unwrap();
+    }
 
     #[test]
     fn connection_failure_stages_are_distinct_numeric_diagnostics() {
@@ -2379,5 +2486,96 @@ mod tests {
         .await
         .unwrap();
         room.stop().await;
+    }
+    #[test]
+    fn standalone_emote_filter_uses_protocol_type_without_guessing_text() {
+        use crate::rules::{RuleSet, SoundRule};
+        // Protocol-shaped fixtures derived from blivedm/models/web.py:
+        // info[0][12]=dm_type, info[0][13]=emoticon_options; these are not
+        // claimed to be a recording of the user's live room.
+        let mut rules = RuleSet::default();
+        rules.sounds.push(SoundRule {
+            trigger: "[表情]".into(),
+            asset_id: "should-not-play".into(),
+        });
+        for (kind, marked) in [
+            (json!(1), true),
+            (json!(0), false),
+            (json!(2), false),
+            (json!(99), false),
+            (Value::Null, false),
+            (json!("1"), false),
+            (json!(true), false),
+            (json!(-1), false),
+        ] {
+            for text in ["[表情]", "你好😀", "😀", "你好[表情]", "普通文字"] {
+                let mut metadata = vec![Value::Null; 16];
+                metadata[12] = kind.clone();
+                // Presence of the whole-image display URL alone must not
+                // classify ordinary text as a standalone emote.
+                metadata[13] = json!({"emoticon_unique":"official_13",
+                    "url":"https://i0.hdslb.com/bfs/live/emote.png"});
+                metadata[15] = json!({"extra":json!({"emots":{
+                    "[表情]":{"url":"https://i0.hdslb.com/bfs/emote/inline.png"}
+                }}).to_string()});
+                let raw = json!({"cmd":"DANMU_MSG:4:0:2:2:2:0",
+                    "info":[metadata,text,[7,"Alice"]]});
+                let event = parse_live_event(42, 123, &raw).unwrap();
+                assert_eq!(event.is_bilibili_emoticon, marked, "{kind}: {text}");
+                for enabled in [false, true, false] {
+                    rules.events.filter_bilibili_emoticons = enabled;
+                    let preview = rules.preview(&event, &[], &[]).unwrap();
+                    assert_eq!(preview.filtered_reason.is_some(), enabled && marked);
+                    assert_eq!(preview.event.message, text);
+                    assert_eq!(preview.event.emotes, event.emotes);
+                    if enabled && marked {
+                        assert!(preview.parts.is_empty());
+                        assert!(preview.final_text.is_empty());
+                    }
+                }
+            }
+        }
+        rules.events.filter_bilibili_emoticons = true;
+        for metadata in [json!([]), Value::Null, json!({}), json!([0])] {
+            let raw = json!({"cmd":"DANMU_MSG","info":[metadata,"😀 [表情]",[7,"Alice"]]});
+            let event = parse_live_event(42, 123, &raw).unwrap();
+            assert!(!event.is_bilibili_emoticon);
+            assert!(
+                rules
+                    .preview(&event, &[], &[])
+                    .unwrap()
+                    .filtered_reason
+                    .is_none()
+            );
+        }
+        let mut metadata = vec![Value::Null; 13];
+        metadata[12] = json!(1);
+        let event = parse_live_event(
+            42,
+            123,
+            &json!({"cmd":"DANMU_MSG","info":[metadata,"[表情]",[7,"Alice"]]}),
+        )
+        .unwrap();
+        assert!(
+            event.is_bilibili_emoticon,
+            "type works even without an image URL"
+        );
+        let mut old_json = serde_json::to_value(&event).unwrap();
+        old_json
+            .as_object_mut()
+            .unwrap()
+            .remove("is_bilibili_emoticon");
+        let old_event: LiveEvent = serde_json::from_value(old_json).unwrap();
+        assert!(!old_event.is_bilibili_emoticon);
+        let mut sc = event;
+        sc.kind = EventKind::SuperChat;
+        sc.price_yuan = 100.0;
+        assert!(
+            rules
+                .preview(&sc, &[], &[])
+                .unwrap()
+                .filtered_reason
+                .is_none()
+        );
     }
 }

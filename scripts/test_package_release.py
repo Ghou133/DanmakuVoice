@@ -1,9 +1,12 @@
 """Release packaging gates, using small archives rather than a live build."""
 import importlib.util
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from zipfile import ZipFile
+from source_inventory import snapshot_id
 
 spec = importlib.util.spec_from_file_location("package_release", Path(__file__).with_name("package-release.py"))
 release = importlib.util.module_from_spec(spec)
@@ -37,7 +40,7 @@ class ReleaseTests(unittest.TestCase):
             "Cargo.lock": b"license", "crates/desktop/icons/ARTWORK.md": b"artwork",
         }
 
-    def package(self, version="0.2.1"):
+    def package(self, version="0.2.1", development=False):
         for path, prefix, files in (
             (self.audit, "DanmakuVoice/", self.audit_files),
             (self.source, f"DanmakuVoice-source-{self.commit[:12]}/", self.source_files),
@@ -45,7 +48,21 @@ class ReleaseTests(unittest.TestCase):
             with ZipFile(path, "w") as archive:
                 for name, contents in files.items():
                     archive.writestr(prefix + name, contents)
-        release.package(self.audit, self.exe, self.source, self.out, self.commit, version)
+        release.package(self.audit, self.exe, self.source, self.out, self.commit, version, development)
+
+    def make_development(self):
+        files = [{'path': name, 'sha256': hashlib.sha256(contents).hexdigest()}
+                 for name, contents in sorted(self.source_files.items()) if name != 'SOURCE-COMMIT.txt']
+        identity = snapshot_id(files)
+        manifest = json.dumps({'schemaVersion': 1, 'baseCommit': self.commit, 'development': True,
+                               'snapshotSha256': identity, 'files': files}).encode()
+        self.audit_files['WORKTREE-SOURCE.json'] = manifest
+        self.source_files['WORKTREE-SOURCE.json'] = manifest
+        self.audit_files['BUILD-SOURCE.txt'] = (
+            f'Source Git commit: {self.commit}\nCheckout clean before build: False\n'
+            f'Development snapshot: True\nWorking-tree snapshot SHA-256: {identity}\n').encode()
+        self.source_files['SOURCE-COMMIT.txt'] += (
+            f'\nDevelopment snapshot: True\nWorking-tree snapshot SHA-256: {identity}\n').encode()
 
     def test_compressed_root_exe_licenses_checksums_and_determinism(self):
         self.package()
@@ -97,6 +114,46 @@ class ReleaseTests(unittest.TestCase):
         self.audit_files["third-party/Rust/../../escape"] = b"bad"
         with self.assertRaisesRegex(ValueError, "Unsafe ZIP path"):
             self.package()
+
+    def test_development_package_pairs_actual_bytes_and_labels_uncommitted_sources(self):
+        self.make_development()
+        self.package(development=True)
+        notes = (self.out / 'RELEASE-NOTES.md').read_text(encoding='utf-8')
+        self.assertIn('未提交修改', notes)
+        self.assertNotIn('/releases/download/', notes)
+        with ZipFile(self.out / 'DanmakuVoice-licenses.zip') as archive:
+            notice = archive.read('SOURCE-AVAILABILITY.txt').decode()
+            self.assertIn('NOT A FORMAL RELEASE', notice)
+            self.assertNotIn('/releases/tag/', notice)
+        self.assertIn('Development snapshot: True', (self.out / 'BUILD-SOURCE.txt').read_text())
+
+    def test_development_source_mutation_and_mismatched_manifest_are_rejected(self):
+        self.make_development()
+        original = self.source_files['Cargo.lock']
+        self.source_files['Cargo.lock'] = b'changed after snapshot'
+        with self.assertRaisesRegex(ValueError, 'source bytes differ'):
+            self.package(development=True)
+        self.assertFalse(self.out.exists())
+        self.source_files['Cargo.lock'] = original
+        manifest = json.loads(self.source_files['WORKTREE-SOURCE.json'])
+        manifest['baseCommit'] = '2' * 40
+        self.source_files['WORKTREE-SOURCE.json'] = json.dumps(manifest).encode()
+        with self.assertRaisesRegex(ValueError, 'snapshot mismatch'):
+            self.package(development=True)
+
+    def test_clean_claim_cannot_promote_development_sources_to_release(self):
+        self.make_development()
+        self.audit_files['BUILD-SOURCE.txt'] = f'Source Git commit: {self.commit}\nCheckout clean before build: True\n'.encode()
+        with self.assertRaisesRegex(ValueError, 'formal release'):
+            self.package()
+        self.assertFalse(self.out.exists())
+
+    def test_unlisted_extra_file_cannot_hide_in_development_source_archive(self):
+        self.make_development()
+        self.source_files['private-notes.txt'] = b'not part of the verified working-tree snapshot'
+        with self.assertRaisesRegex(ValueError, 'Unlisted or ambiguous'):
+            self.package(development=True)
+        self.assertFalse(self.out.exists())
 
 
 if __name__ == "__main__":

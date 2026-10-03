@@ -15,6 +15,10 @@ pub struct LiveEvent {
     /// Text tokens and their CDN images for displaying rich danmaku.
     #[serde(default)]
     pub emotes: Vec<LiveEmote>,
+    /// Bilibili DANMU_MSG has dm_type=1 (info[0][12]): a standalone emote.
+    /// Missing or unknown types remain ordinary text, regardless of its contents.
+    #[serde(default)]
+    pub is_bilibili_emoticon: bool,
     pub gift_name: String,
     pub quantity: u32,
     /// Gift/SC price in yuan. Bilibili's gift packet uses thousandths of yuan.
@@ -36,6 +40,7 @@ impl LiveEvent {
             kind: EventKind::Danmaku,
             message: message.into(),
             emotes: Vec::new(),
+            is_bilibili_emoticon: false,
             gift_name: String::new(),
             quantity: 0,
             price_yuan: 0.0,

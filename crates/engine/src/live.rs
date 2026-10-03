@@ -549,6 +549,12 @@ async fn run_events(
                     &mut pipeline, &mut playback_changes, &mut playback_generation) {
                     continue;
                 }
+                // Every arriving event reads current ingress settings. With
+                // no pending gifts, the timer has nothing to flush or re-plan;
+                // avoid opening SQLite every second while the room is quiet.
+                if pipeline.pending_gifts() == 0 {
+                    continue;
+                }
                 let event_generation = playback_generation;
                 if !*tts_enabled.lock().await {
                     continue;
@@ -1057,6 +1063,70 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_speech_session_does_not_initialize_or_poll_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("uninitialized");
+        let (jobs_tx, _jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: false,
+        }));
+        scheduler.start().await.unwrap();
+        let controller = LiveController::new(&data_dir, scheduler, None).unwrap();
+        let events = controller.start_offline(42).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert!(!data_dir.exists(), "idle timer accessed configuration");
+        events
+            .send(LiveEvent::danmaku(42, None, "user", "first message"))
+            .await
+            .unwrap();
+        wait_for_processed(&controller, 1).await;
+        assert!(data_dir.join("danmakuvoice.sqlite3").is_file());
+        assert_eq!(controller.snapshot().errors, 0);
+        controller.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_gift_observes_merge_setting_change_without_another_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = configure_store(dir.path());
+        let mut settings = LiveSettings {
+            room_id: Some(42),
+            gift_merge: GiftMergeSettings {
+                enabled: true,
+                initial_seconds: 5.0,
+                increment_seconds: 0.0,
+                maximum_seconds: 5.0,
+            },
+        };
+        store.save_live_settings(&settings).unwrap();
+        let (jobs_tx, mut jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: false,
+        }));
+        scheduler.start().await.unwrap();
+        let controller = LiveController::new(dir.path(), scheduler, None).unwrap();
+        let events = controller.start_offline(42).await.unwrap();
+        events.send(gift("pending-gift", 6.0)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(controller.snapshot().received, 1);
+        assert_eq!(controller.snapshot().enqueued, 0);
+        settings.gift_merge.enabled = false;
+        store.save_live_settings(&settings).unwrap();
+        let job = timeout(Duration::from_secs(2), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.preview.event.platform_event_id.as_deref(),
+            Some("pending-gift")
+        );
+        assert_eq!(job.preview.event.quantity, 1);
+        controller.stop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1648,6 +1718,67 @@ mod tests {
             snapshot.recent_results[2].outcome,
             LiveEventOutcome::Enqueued { .. }
         ));
+        controller.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn standalone_emote_filter_keeps_chat_and_applies_changes_without_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = configure_store(dir.path());
+        let mut rules = store.load_rules().unwrap();
+        rules.events.filter_bilibili_emoticons = true;
+        store.save_rules(&rules).unwrap();
+        let (jobs_tx, mut jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: false,
+        }));
+        scheduler.start().await.unwrap();
+        let controller = LiveController::new(dir.path(), scheduler, None).unwrap();
+        let events = controller.start_offline(42).await.unwrap();
+        let mut metadata = vec![serde_json::Value::Null; 13];
+        metadata[12] = serde_json::json!(1);
+        let emote = crate::bilibili::parse_live_event(
+            42,
+            1,
+            &serde_json::json!({"cmd":"DANMU_MSG","info":[metadata,"[表情]",[7,"Alice"]]}),
+        )
+        .unwrap();
+        events.send(emote.clone()).await.unwrap();
+        wait_for_processed(&controller, 1).await;
+        let state = controller.snapshot();
+        assert_eq!(state.filtered, 1);
+        assert_eq!(state.recent_events, vec![emote.clone()]);
+        assert_eq!(state.recent_results[0].outcome, LiveEventOutcome::Filtered);
+        assert_eq!(state.enqueued, 0);
+        assert!(jobs_rx.try_recv().is_err());
+        events
+            .send(LiveEvent::danmaku(42, Some(7), "Alice", "你好😀[表情]"))
+            .await
+            .unwrap();
+        let job = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.preview.event.message, "你好😀[表情]");
+        wait_for_processed(&controller, 2).await;
+        rules.events.filter_bilibili_emoticons = false;
+        store.save_rules(&rules).unwrap();
+        events.send(emote.clone()).await.unwrap();
+        let job = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.preview.event, emote);
+        wait_for_processed(&controller, 3).await;
+        rules.events.filter_bilibili_emoticons = true;
+        store.save_rules(&rules).unwrap();
+        events.send(emote).await.unwrap();
+        wait_for_processed(&controller, 4).await;
+        assert_eq!(controller.snapshot().filtered, 2);
+        assert_eq!(controller.snapshot().enqueued, 2);
+        assert_eq!(controller.snapshot().recent_events.len(), 4);
+        assert!(controller.snapshot().running);
+        assert!(jobs_rx.try_recv().is_err());
         controller.stop().await.unwrap();
     }
 }

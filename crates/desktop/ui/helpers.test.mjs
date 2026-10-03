@@ -12,6 +12,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { escapeHtml, headerIdentity, initial, eventText, eventKeys, validUid, numericId, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, qrNeedsRoomFallback } from './helpers.mjs';
 
+test('voice settings keep read-only observations active during onboarding', () => {
+  assert.equal(snapshotPollingPolicy({}, { step: 'login', settingsOpen: true }).poll, true);
+  assert.equal(snapshotPollingPolicy({}, { step: 'login', settingsOpen: false }).poll, false);
+  assert.equal(snapshotPollingPolicy({}, { step: 'login', settingsOpen: true, hidden: true }).poll, false);
+  assert.equal(snapshotPollingPolicy({}, { step: 'login', settingsOpen: true, focused: false }).poll, false);
+});
+
 test('header uses only the logged-in account and blocks unsafe or offline avatar requests', () => {
   assert.equal(headerIdentity({account:{name:'stale user'}}).name, '超绝可爱弹幕姬');
   assert.equal(headerIdentity({account:{user_id:42}}).name, '哔哩哔哩用户');
@@ -176,8 +183,21 @@ test('incremental snapshots retain settings, drop transient results and reject s
   assert.equal(merged.rules, config.rules);
   assert.equal(merged.live.received, 2);
   assert.equal(merged.result, undefined);
-  assert.throws(() => mergeSnapshot(config, {config_revision:3, config_unchanged:true}));
+  assert.throws(() => mergeSnapshot(config, {config_revision:5, config_unchanged:true}));
   assert.throws(() => mergeSnapshot(null, {config_revision:4, config_unchanged:true}));
   const replacement = {config_revision:5, config_unchanged:false, presets:[]};
   assert.equal(mergeSnapshot(config, replacement), replacement);
+});
+
+
+test('late poll replies cannot roll back a newer saved configuration or its runtime', () => {
+  const current = { config_revision: 7, preferences: { language: 'en' }, rules: { user_words: [{ from: '观众', to: '新读音' }] }, live: { state: 'connected' }, result: 'old operation' };
+  for (const late of [
+    { config_revision: 6, preferences: { language: 'zh-CN' }, rules: { user_words: [] }, live: { state: 'stopped' } },
+    { config_revision: 6, config_unchanged: true, live: { state: 'stopped' } },
+  ]) {
+    assert.deepEqual(mergeSnapshot(current, late), { ...current, result: undefined });
+  }
+  const next = { config_revision: 8, preferences: { language: 'zh-CN' }, live: { state: 'stopped' } };
+  assert.equal(mergeSnapshot(current, next), next);
 });

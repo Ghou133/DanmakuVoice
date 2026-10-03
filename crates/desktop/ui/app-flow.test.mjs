@@ -3,13 +3,18 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createAutosaveQueue } from './autosave.mjs';
-import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, headerIdentity, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, uiIsActive, validUid } from './helpers.mjs';
+import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
+import { localizeDiagnostic } from './i18n-diagnostics.mjs';
+import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, uiIsActive, validUid } from './helpers.mjs';
 
 function appContext() {
+  setLanguage('zh-CN');
   const surface = { listeners: {}, addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }, querySelector() { return null; }, querySelectorAll() { return []; } };
   const document = { querySelector(selector) { return selector?.startsWith('[data-brand') ? null : surface; }, addEventListener() {}, hasFocus() { return true; }, documentElement: { dataset: {} } };
   const context = vm.createContext({
     document,
+    t, ui, getLanguage, setLanguage,
+    localizeDiagnostic,
     window: { addEventListener() {} },
     matchMedia: () => ({ addEventListener() {} }),
     createAutosaveQueue: () => ({ schedule() {}, flush: async () => {} }),
@@ -22,6 +27,8 @@ function appContext() {
     providerLabel: provider => provider,
     structuredClone,
     headerIdentity,
+    identityColor,
+    eventText,
     initial,
     messageParts,
     numericId,
@@ -44,6 +51,67 @@ function appContext() {
   }; editor = { type: 'preset', id: '', connectionId: 'dots-connection', makePreferred: true }; referenceProfiles = [];`, context);
   return context;
 }
+
+test('opening voice settings refreshes the exact remembered local connections', async () => {
+  const context = appContext();
+  context.calls = [];
+  const dialog = context.document.querySelector('#settings');
+  dialog.showModal = () => { dialog.open = true; };
+  vm.runInContext(`snapshot.connections = [
+    { id: 'gpt-old', settings: { provider: 'gpt_sovits', endpoint: 'http://127.0.0.1:9880' } },
+    { id: 'gpt-used', settings: { provider: 'gpt_sovits', endpoint: 'http://127.0.0.1:9990' } }
+  ]; snapshot.presets = [{ id: 'used', provider: 'gpt_sovits', connection_id: 'gpt-used' }];
+  snapshot.rules.preferred_presets = { gpt_sovits: 'used' };
+  renderSettings = () => {}; command = async (action, payload) => calls.push({ action, payload });`, context);
+  await vm.runInContext("openSettings('voices')", context);
+  assert.equal(context.calls.length, 1);
+  assert.equal(context.calls[0].action, 'local_services.check');
+  assert.equal(context.calls[0].payload.connection_id, 'gpt-used');
+  assert.equal(context.calls[0].payload.provider, 'gpt_sovits');
+});
+
+test('automatic local observations are throttled, retry changed addresses, and skip offline or closed settings', async () => {
+  const context = appContext();
+  context.calls = [];
+  vm.runInContext(`settingsDialog.open = true; settingsTab = 'voices';
+    command = async (action, payload) => calls.push(payload);`, context);
+  await vm.runInContext('refreshLocalServices()', context);
+  await vm.runInContext('refreshLocalServices()', context);
+  assert.equal(context.calls.length, 1);
+  vm.runInContext("snapshot.connections[0].settings.endpoint = 'http://127.0.0.1:9991'", context);
+  await vm.runInContext('refreshLocalServices()', context);
+  assert.equal(context.calls.length, 2);
+  vm.runInContext('snapshot.network_disabled = true', context);
+  await vm.runInContext('refreshLocalServices(true)', context);
+  vm.runInContext('snapshot.network_disabled = false; settingsDialog.open = false', context);
+  await vm.runInContext('refreshLocalServices(true)', context);
+  assert.equal(context.calls.length, 2);
+});
+
+test('overlapping settings refreshes never duplicate local probes', async () => {
+  const context = appContext();
+  let release;
+  context.probeGate = new Promise(resolve => { release = resolve; });
+  context.calls = [];
+  vm.runInContext(`settingsDialog.open = true; settingsTab = 'voices';
+    command = async action => { calls.push(action); await probeGate; };`, context);
+  const first = vm.runInContext('refreshLocalServices(true)', context);
+  await vm.runInContext('refreshLocalServices(true)', context);
+  assert.equal(context.calls.length, 1);
+  release();
+  await first;
+  assert.equal(vm.runInContext('localRefreshBusy', context), false);
+});
+
+test('a local status cached for another address cannot light up the selected connection', () => {
+  const context = appContext();
+  vm.runInContext(`snapshot.local_services = { gpt_sovits: {
+    state: 'ready', endpoint: 'http://127.0.0.1:9880', message: 'old observation'
+  } };`, context);
+  const status = vm.runInContext('providerStatus', context);
+  assert.equal(status('gpt_sovits', { settings: { endpoint: 'http://127.0.0.1:9990' } }).label, '待检查');
+  assert.equal(status('gpt_sovits', { settings: { endpoint: 'http://127.0.0.1:9880' } }).tone, 'ready');
+});
 
 test('audition page receives asynchronous playback diagnostics without closing settings', () => {
   const context = appContext();
@@ -69,22 +137,14 @@ test('audio settings offer a local sound test and show asynchronous output error
   assert.deepEqual(Array.from(context.calls), ['audio.test']);
 });
 
-test('header identity updates after login and logout without repeated image loads', () => {
+test('current masthead follows account-room selection, anonymous mode and logout', () => {
   const context = appContext();
-  let writes = 0;
-  const portrait = { dataset: {}, value: '', set innerHTML(value) { writes++; this.value = value; } };
-  const name = { textContent: '', title: '' };
-  context.document.querySelector = selector => selector === '[data-brand-portrait]' ? portrait : name;
-  vm.runInContext(`snapshot.account = {user_id:42,name:'桃子<测试>',avatar_url:'https://i0.hdslb.com/bfs/face/avatar.jpg'}; updateHeaderIdentity();`, context);
-  assert.equal(name.textContent, '桃子<测试>');
-  assert.match(portrait.value, /account-photo/);
-  assert.equal(writes, 1);
-  vm.runInContext('updateHeaderIdentity();', context);
-  assert.equal(writes, 1, 'unchanged snapshots must not reload the avatar');
-  vm.runInContext(`snapshot.account = {}; updateHeaderIdentity();`, context);
-  assert.equal(name.textContent, '超绝可爱弹幕姬');
-  assert.match(portrait.value, /logo.png/);
-  assert.doesNotMatch(portrait.value, /avatar.jpg/);
+  vm.runInContext("snapshot = { setup: { mode: 'account', room_id: 123 }, account: { user_id: 42, name: '桃子<测试>' } }", context);
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('mastheadView(snapshot)', context))), {name:'桃子<测试>',suffix:'的直播间'});
+  vm.runInContext("snapshot.setup.mode = 'anonymous'", context);
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('mastheadView(snapshot)', context))), {name:'直播间',suffix:'123'});
+  vm.runInContext("snapshot.account = {}; snapshot.setup = {}", context);
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('mastheadView(snapshot)', context))), {name:'直播间',suffix:''});
 });
 
 test('offline onboarding does not attempt a QR request', async () => {
@@ -240,15 +300,17 @@ test('sound settings put service choice and audition voice first with compact se
   vm.runInContext("snapshot.presets = [{ id: 'dots-voice', name: '木兰', connection_id: 'dots-connection', provider: 'dots', voice_id: 'role', speed: 1, volume: 1 }]; snapshot.rules.default_preset_id = 'dots-voice'; snapshot.bindings = []; snapshot.preferences = { tts_enabled: true }; editor = null;", context);
   const html = vm.runInContext('renderVoicesSettings()', context);
   assert.ok(html.indexOf('data-form="tts-toggle"') < html.indexOf('data-form="voice-audition"'));
-  assert.ok(html.indexOf('<section class="voice-audition"') < html.indexOf('class="service-grid"'));
-  assert.ok(html.indexOf('class="service-grid"') < html.indexOf('data-form="voice-audition"'));
+  assert.ok(html.indexOf('<section class="s-hero voice-audition"') < html.indexOf('service-grid"'));
+  assert.ok(html.indexOf('service-grid"') < html.indexOf('data-form="voice-audition"'));
   assert.ok(html.indexOf('name="preset_id"') < html.indexOf('name="text" aria-label="试听文字"'));
-  assert.ok(html.indexOf('data-form="voice-audition"') < html.indexOf('<h3>音色管理</h3>'));
-  assert.match(html, /class="voice-heading"/);
-  assert.match(html, /class="service-card preferred"/);
-  assert.match(html, /class="service-card-select" data-action="service\.prefer"[^>]+aria-pressed="true"/);
+  assert.ok(html.indexOf('data-form="voice-audition"') < html.indexOf('>音色管理<'));
+  assert.ok(html.indexOf('>音色管理<') < html.indexOf('>观众专属声音<'));
+  assert.ok(html.indexOf('>观众专属声音<') < html.indexOf('>服务连接<'));
+  assert.match(html, /class="s-tile-wrap preferred"/);
+  assert.match(html, /class="service-card-select s-tile" data-action="service\.prefer"[^>]+aria-pressed="true"/);
   assert.match(html, /data-form="voice-audition" data-provider="dots"/);
-  assert.match(html, /name="preset_id" aria-label="直播首选音色"/);
+  assert.match(html, /role="radiogroup" aria-label="直播首选音色"/);
+  assert.match(html, /name="preset_id" value="dots-voice" checked>/);
   assert.doesNotMatch(html, /<select name="provider"/);
   assert.match(html, /data-action="service\.configure"/);
   assert.match(html, /data-action="binding\.new"/);
@@ -257,6 +319,39 @@ test('sound settings put service choice and audition voice first with compact se
   const rules = vm.runInContext("snapshot.rules.events = { danmaku_on: true, gift_on: true, free_gift_on: false, super_chat_on: true, guard_on: true, gift_threshold_yuan: 0, super_chat_threshold_yuan: 0 }; snapshot.rules.templates = { danmaku: '{message}', gift: '礼物', super_chat: '醒目留言', guard: '大航海' }; snapshot.rules.user_words = []; snapshot.rules.message_words = []; renderRulesSettings()", context);
   assert.match(rules, /<summary>预览规则<\/summary>/);
   assert.doesNotMatch(rules, /value="audition"|<button[^>]*>实际试听<\/button>/);
+});
+
+test('GPT-SoVITS names omit the prefix in both save paths and existing voice displays', async () => {
+  const context = appContext();
+  context.calls = [];
+  vm.runInContext(`snapshot.connections = [{id:'gpt',settings:{provider:'gpt_sovits'}}];
+    command = async (action, payload) => calls.push({action,payload}); renderSettings = () => {};`, context);
+  context.testForm = { checkValidity:()=>true, dataset:{form:'preset'}, fields:{connection_id:'gpt',voice_id:'流萤',name:'',speed:'1',volume:'1',model_selection:'global_resident',reference_language:'auto',text_language:'auto',split:'cut0',top_k:'5',top_p:'1',temperature:'1',sample_steps:'8',fragment_interval_secs:'.3'} };
+  assert.equal(vm.runInContext('collectAutosave(testForm).payload.preset.name', context), '流萤');
+  await vm.runInContext('handleForm(testForm)', context);
+  assert.equal(context.calls[0].payload.preset.name, '流萤');
+  vm.runInContext(`snapshot.presets = [{id:'old',name:'GPT-SoVITS · 流萤',provider:'gpt_sovits',connection_id:'gpt',voice_id:'流萤',speed:1,volume:1}];
+    snapshot.rules.default_preset_id = 'old'; editor = null; voiceBrowse = 'gpt_sovits';`, context);
+  context.testForm.dataset.id = 'old';
+  assert.equal(vm.runInContext('collectAutosave(testForm).payload.preset.name', context), '流萤');
+  assert.match(vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[0])', context), /value="old" checked><span>流萤<\/span>/);
+  assert.doesNotMatch(vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[0])', context), /GPT-SoVITS · 流萤/);
+  const panel = context.document.querySelector('#tts-menu');
+  vm.runInContext('renderVoicePanel()', context);
+  assert.match(panel.innerHTML, />流萤<\/span>/);
+  assert.doesNotMatch(panel.innerHTML, /GPT-SoVITS · 流萤/);
+  context.testForm.fields.name = '自定义流萤';
+  assert.equal(vm.runInContext('collectAutosave(testForm).payload.preset.name', context), '自定义流萤');
+});
+
+test('stopping a local service sends no live disconnect while the room remains connected', async () => {
+  const context = appContext();
+  context.calls = [];
+  vm.runInContext(`snapshot.live = {running:true,state:'connected'}; snapshot.local_services = {dots:{owned:true}};
+    command = async (action, payload) => calls.push({action,payload}); updateServiceIndicators = () => {};`, context);
+  await vm.runInContext("handleAction('service.stop', 'dots', null)", context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls)), [{action:'local_services.stop',payload:{provider:'dots',connection_id:'dots-connection'}}]);
+  assert.equal(vm.runInContext('snapshot.live.running', context), true);
 });
 
 test('service card choice saves its first voice as the live default and keeps audition text', async () => {
@@ -275,11 +370,11 @@ test('service card choice saves its first voice as the live default and keeps au
   await vm.runInContext('handleAction', context)('service.prefer', 'fish_audio', null);
   assert.equal(calls[0].action, 'presets.default');
   assert.equal(calls[0].payload.id, 'fish-voice');
-  assert.equal(calls[1].action, 'render');
+  assert.equal(calls.length, 1, 'a service choice must not replace the settings page');
   assert.equal(vm.runInContext('voiceAuditionDraft.text', context), '比较音色');
   const html = vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[1])', context);
   assert.match(html, /data-provider="fish_audio"/);
-  assert.match(html, /<option value="fish-voice" selected>/);
+  assert.match(html, /name="preset_id" value="fish-voice" checked>/);
   assert.match(html, />比较音色<\/textarea>/);
 });
 
@@ -320,7 +415,8 @@ test('unconnected Doubao selection opens QR instead of replacing the live voice'
   const menu = { hidden: true, innerHTML: '', style: {} };
   context.document.querySelector = selector => selector === '#tts-menu' ? menu : { setAttribute() {} };
   await vm.runInContext('handleAction', context)('tts.open', '', { getBoundingClientRect: () => ({ left: 10, bottom: 10 }), setAttribute() {} });
-  assert.match(menu.innerHTML, /data-action="tts\.select" data-id="doubao"(?! disabled)/);
+  assert.match(menu.innerHTML, /data-action="voice\.browse" data-id="doubao"/);
+  assert.match(menu.innerHTML, /data-action="voice\.pick" data-id="dots-voice"/);
 });
 
 test('an expired Bilibili session opens QR instead of repeating the failed live connection', async () => {
@@ -647,13 +743,14 @@ test('muted volume control has a different icon and accessible toggle state', ()
   vm.runInContext('snapshot.preferences = {master_volume: 0.65, muted: false}; updateVolumeControls();', context);
   const unmutedIcon = control.innerHTML;
   assert.equal(control.attrs['aria-label'], '静音');
-  assert.equal(output.textContent, '65%');
+  assert.equal(output.textContent, '65');
   vm.runInContext('snapshot.preferences.muted = true; updateVolumeControls();', context);
   assert.notEqual(control.innerHTML, unmutedIcon);
   assert.equal(control.attrs['aria-pressed'], 'true');
   assert.equal(control.title, '取消静音');
-  assert.equal(output.textContent, '静音');
-  assert.equal(slider.value, '65');
+  // Muting shows zero while the saved level is kept for unmuting.
+  assert.equal(output.textContent, '0');
+  assert.equal(slider.value, '0');
   vm.runInContext('snapshot.preferences.master_volume = 0; snapshot.preferences.muted = false; updateVolumeControls();', context);
   assert.equal(control.attrs['aria-pressed'], 'true');
   vm.runInContext('volumeDraft = 80; updateVolumeControls();', context);
@@ -666,7 +763,7 @@ test('failed audition voice switch restores the saved default', async () => {
   vm.runInContext("snapshot.presets = [{ id: 'dots-voice', name: '本地', provider: 'dots' }, { id: 'fish-voice', name: '云端', provider: 'fish_audio' }]; snapshot.rules.default_preset_id = 'dots-voice';", context);
   const errors = [];
   context.mockCommand = async () => { throw new Error('服务暂不可用'); };
-  context.mockRender = () => {};
+  context.mockRender = () => { throw new Error('failed voice save replaced the settings page'); };
   context.mockError = error => errors.push(error.message);
   const voice = { value: 'fish-voice' };
   const form = { dataset: { provider: 'fish_audio' }, elements: { preset_id: voice, text: { value: '保留试听文字' } }, querySelector: () => ({ disabled: false }) };
@@ -1048,6 +1145,17 @@ test('Fish accepts a manually pasted key without a clipboard watcher', async () 
   assert.equal(form.elements.credential.value, '');
 });
 
+test('settings merge legacy categories into six pages', async () => {
+  const context = appContext();
+  context.document.querySelector().focus = () => {};
+  vm.runInContext(`settingsTab = 'voices'; editor = null; renderSettings = () => {}; allowLeaveSettings = async () => true;`, context);
+  assert.equal(vm.runInContext('tabs.map(([id]) => id).join()', context), 'room,voices,rules,assets,general,data');
+  for (const [legacy, page] of [['audio', 'general'], ['appearance', 'general'], ['about', 'data'], ['missing', 'voices']]) {
+    await vm.runInContext('handleAction', context)('settings.tab', legacy);
+    assert.equal(vm.runInContext('settingsTab', context), page);
+  }
+});
+
 test('category navigation returns to its root including when already selected', async () => {
   const context = appContext();
   context.document.querySelector().focus = () => {};
@@ -1139,4 +1247,257 @@ test('Store installation offers Store updates and never portable downloads', () 
   assert.match(html, /Microsoft Store 更新/);
   assert.match(html, /store_updates/);
   assert.doesNotMatch(html, /下载新版|解压 ZIP|update_download|data-id="releases"/);
+});
+
+test('appearance page exposes a persisted language choice in both languages', () => {
+  const context = appContext();
+  vm.runInContext("snapshot.preferences = { language: 'en', appearance: 'dark', scale: 1.2 }; applyLanguage();", context);
+  const html = vm.runInContext('renderAppearanceSettings()', context);
+  assert.match(html, /name="language"/);
+  assert.match(html, /value="en" checked><span>English/);
+  assert.match(html, /value="zh-CN"><span>简体中文/);
+  assert.match(html, /Interface language/);
+  assert.match(html, /name="appearance" value="dark" checked/);
+  assert.doesNotMatch(html.replace('简体中文', ''), /\p{Script=Han}/u);
+  assert.equal(context.document.documentElement.lang, 'en');
+  assert.equal(context.document.title, 'DanmakuVoice');
+  vm.runInContext("snapshot.preferences.language = 'zh-CN'; applyLanguage();", context);
+  assert.match(vm.runInContext('renderAppearanceSettings()', context), /界面语言/);
+});
+
+test('language change flushes existing edits and saves only the language preference', async () => {
+  const context = appContext();
+  const calls = [];
+  context.flushLanguage = async () => { calls.push('flush'); return true; };
+  context.saveLanguage = async (action, payload) => {
+    calls.push({ action, payload: structuredClone(payload) });
+    context.changedLanguage = payload.preferences.language;
+    vm.runInContext('snapshot.preferences.language = changedLanguage; applyLanguage()', context);
+  };
+  context.languageToast = message => calls.push(message);
+  vm.runInContext("snapshot.preferences = {language: 'zh-CN'}; flushAutosaves = flushLanguage; command = saveLanguage; showToast = languageToast;", context);
+  await vm.runInContext('changeLanguage', context)('en');
+  assert.deepEqual(calls, ['flush', { action:'preferences.save', payload:{preferences:{language:'en'}} }, 'Language saved']);
+  await vm.runInContext('changeLanguage', context)('en');
+  assert.equal(calls.length, 3);
+});
+
+test('failed settings flush or language save leaves the current language intact', async () => {
+  const context = appContext();
+  let saves = 0;
+  context.failFlush = async () => false;
+  context.failLanguage = async () => { saves++; throw new Error('cannot save'); };
+  vm.runInContext("snapshot.preferences = {language:'zh-CN'}; flushAutosaves = failFlush; command = failLanguage;", context);
+  await vm.runInContext('changeLanguage', context)('en');
+  assert.equal(saves, 0);
+  vm.runInContext('flushAutosaves = async () => true', context);
+  await assert.rejects(vm.runInContext('changeLanguage', context)('en'), /cannot save/);
+  assert.equal(saves, 1);
+  assert.equal(getLanguage(), 'zh-CN');
+});
+
+test('language rerenders both surfaces without restarting QR login or changing speech drafts', () => {
+  const context = appContext();
+  const calls = [];
+  context.languageRenderApp = () => calls.push('app');
+  context.languageRenderSettings = () => calls.push('settings');
+  context.startingStep = () => 'login';
+  vm.runInContext("step = 'login'; settingsDialog.open = true; renderApp = languageRenderApp; renderSettings = languageRenderSettings; updateQr = () => {}; snapshot.preferences = {language:'zh-CN'};", context);
+  const next = vm.runInContext("({...snapshot, preferences:{language:'en'}})", context);
+  vm.runInContext('acceptSnapshot', context)(next);
+  assert.deepEqual(calls, ['app','settings']);
+  assert.equal(vm.runInContext('voiceAuditionDraft.text', context), '你好，欢迎来到直播间。');
+});
+
+test('standalone emote filter defaults on, preserves disabled settings, and autosaves either value', () => {
+  const context = appContext();
+  vm.runInContext(`snapshot.rules = {events:{danmaku_on:true,gift_on:true,free_gift_on:false,super_chat_on:true,guard_on:true,gift_threshold_yuan:8,super_chat_threshold_yuan:30},templates:{danmaku:'{message}',gift:'{gift_name}',super_chat:'{message}',guard:'{guard_name}'},user_words:[],message_words:[],sounds:[]}`, context);
+  const html = vm.runInContext('renderRulesSettings()', context);
+  assert.match(html, /过滤 B站官方表情/);
+  assert.match(html, /仍显示在聊天中/);
+  assert.match(html, /role="switch" name="filter_bilibili_emoticons" checked><\/div>/);
+  vm.runInContext('snapshot.rules.events.filter_bilibili_emoticons = false', context);
+  assert.match(vm.runInContext('renderRulesSettings()', context), /role="switch" name="filter_bilibili_emoticons"><\/div>/);
+  context.testForm = { dataset:{form:'rules'}, fields:{danmaku_on:'on',gift_on:'on',super_chat_on:'on',guard_on:'on',filter_bilibili_emoticons:'on',gift_threshold_yuan:'8',super_chat_threshold_yuan:'30',template_danmaku:'{message}',template_gift:'{gift_name}',template_super_chat:'{message}',template_guard:'{guard_name}'},querySelectorAll:()=>[],checkValidity:()=>true };
+  const saved = vm.runInContext('collectAutosave(testForm)', context);
+  assert.equal(saved.action, 'rules.save');
+  assert.equal(saved.payload.rules.events.filter_bilibili_emoticons, true);
+  assert.equal(saved.payload.rules.events.gift_threshold_yuan, 8);
+  delete context.testForm.fields.filter_bilibili_emoticons;
+  assert.equal(vm.runInContext('collectAutosave(testForm).payload.rules.events.filter_bilibili_emoticons', context), false);
+  setLanguage('en');
+  assert.match(vm.runInContext('renderRulesSettings()', context), /Filter Bilibili standalone emotes/);
+  setLanguage('zh-CN');
+});
+
+function aliasContext() {
+  const context = appContext();
+  const dialog = context.document.querySelector('#settings');
+  dialog.open = false;
+  dialog.showModal = () => {dialog.open = true;};
+  dialog.close = () => {dialog.open = false;};
+  const renders = [];
+  const updates = [];
+  context.mockRender = () => renders.push('settings');
+  context.mockUpdate = () => updates.push('chat');
+  context.mockCalls = [];
+  context.mockCommand = async (action, payload) => {
+    context.mockCalls.push({action,payload});
+    vm.runInContext('snapshot.rules = savedRules', Object.assign(context,{savedRules:payload.rules}));
+  };
+  vm.runInContext(`step = 'main'; settingsTab = 'voices'; editor = {type:'service',provider:'dots'};
+    snapshot.rules = {user_words:[],events:{filter_bilibili_emoticons:true},message_words:[],templates:{danmaku:'{message}'},sounds:[]};
+    snapshot.bindings = []; viewerContext = {user_name:'Alice',user_id:7};
+    renderSettings = mockRender; updateLive = mockUpdate; command = mockCommand;
+    allowLeaveSettings = async () => true; settleVoiceAuditionChoice = async () => true;
+    flushAutosaves = async () => true;`, context);
+  const form = { dataset:{form:'alias',dirty:'true'},fields:{from:'Alice',to:'小花'} };
+  return {context,dialog,form,renders,updates};
+}
+
+test('viewer alias save returns to chat and restores previous settings navigation', async () => {
+  const {context,dialog,form,updates} = aliasContext();
+  await vm.runInContext('handleAction', context)('viewer.alias','',null);
+  assert.equal(dialog.open, true);
+  assert.equal(vm.runInContext('settingsTab', context), 'rules');
+  await vm.runInContext('handleForm', context)(form);
+  assert.equal(dialog.open, false);
+  assert.equal(updates.length, 1);
+  assert.equal(vm.runInContext('settingsTab', context), 'voices');
+  assert.equal(vm.runInContext('editor.type', context), 'service');
+  assert.equal(vm.runInContext('aliasReturnContext', context), null);
+  assert.equal(vm.runInContext('tabEditors.get("rules")', context), undefined);
+  assert.equal(context.mockCalls.length, 1);
+  assert.equal(context.mockCalls[0].payload.rules.user_words[0].to, '小花');
+  assert.equal(context.mockCalls[0].payload.rules.events.filter_bilibili_emoticons, true);
+  await vm.runInContext('openSettings', context)('voices');
+  assert.equal(vm.runInContext('editor.type', context), 'service');
+});
+
+test('viewer alias cancel and close return to chat without stale editor on repeated opens', async () => {
+  for (const action of ['editor.cancel','settings.close']) {
+    const {context,dialog} = aliasContext();
+    for (let i=0;i<2;i++) {
+      await vm.runInContext('handleAction', context)('viewer.alias','',null);
+      const current = vm.runInContext('editor', context);
+      await vm.runInContext('handleAction', context)('viewer.alias','',null);
+      assert.equal(vm.runInContext('editor', context), current, 'repeat click keeps origin');
+      await vm.runInContext('handleAction', context)(action,'',null);
+      assert.equal(dialog.open, false);
+      assert.equal(vm.runInContext('editor.type', context), 'service');
+      assert.equal(vm.runInContext('tabEditors.get("rules")', context), undefined);
+    }
+    assert.equal(context.mockCalls.length, 0);
+  }
+});
+
+test('alias validation and failed save keep the form and return context', async () => {
+  const {context,dialog,form} = aliasContext();
+  await vm.runInContext('handleAction', context)('viewer.alias','',null);
+  form.fields.to = '';
+  await assert.rejects(vm.runInContext('handleForm', context)(form), /请填写播报别名/);
+  assert.equal(context.mockCalls.length, 0);
+  form.fields.to = '小花';
+  context.rejectCommand = async () => {throw new Error('save failed');};
+  vm.runInContext('command = rejectCommand', context);
+  await assert.rejects(vm.runInContext('handleForm', context)(form), /save failed/);
+  assert.equal(dialog.open, true);
+  assert.equal(vm.runInContext('editor.type', context), 'alias');
+  assert.equal(vm.runInContext('aliasReturnContext.tab', context), 'voices');
+  vm.runInContext('allowLeaveSettings = async () => false', context);
+  await vm.runInContext('handleAction', context)('editor.cancel','',null);
+  assert.equal(dialog.open, true, 'declining discard keeps form');
+});
+
+test('alias managed inside settings saves and cancels within settings', async () => {
+  for (const save of [true,false]) {
+    const {context,dialog,form} = aliasContext();
+    dialog.open = true;
+    await vm.runInContext('openViewerSettings', context)('rules',{type:'alias',userName:'Alice'});
+    assert.equal(vm.runInContext('aliasReturnContext', context), null);
+    if(save) await vm.runInContext('handleForm', context)(form);
+    else await vm.runInContext('handleAction', context)('editor.cancel','',null);
+    assert.equal(dialog.open, true);
+    assert.equal(vm.runInContext('settingsTab', context), 'rules');
+    assert.equal(vm.runInContext('editor', context), null);
+  }
+});
+
+test('late alias save cannot close or replace a newly opened form', async () => {
+  const {context,dialog,form} = aliasContext();
+  await vm.runInContext('handleAction', context)('viewer.alias','',null);
+  let complete;
+  context.pendingSave = () => new Promise(resolve => {complete=resolve;});
+  vm.runInContext('command = pendingSave', context);
+  const pending = vm.runInContext('handleForm', context)(form);
+  await vm.runInContext('closeSettings()', context);
+  await vm.runInContext('handleAction', context)('viewer.alias','',null);
+  const fresh = vm.runInContext('editor', context);
+  complete(); await pending;
+  assert.equal(dialog.open, true);
+  assert.equal(vm.runInContext('editor', context), fresh);
+  assert.equal(vm.runInContext('editor.type', context), 'alias');
+});
+
+test('leaving viewer alias for another settings tab discards the temporary return context', async () => {
+  const {context,dialog} = aliasContext();
+  const target = context.document.querySelector('#settings-content');
+  target.focus = () => {};
+  await vm.runInContext('handleAction', context)('viewer.alias','',null);
+  await vm.runInContext('handleAction', context)('settings.tab','general',null);
+  assert.equal(dialog.open, true);
+  assert.equal(vm.runInContext('aliasReturnContext', context), null);
+  assert.equal(vm.runInContext('editor', context), null);
+  assert.equal(vm.runInContext('tabEditors.get("rules")', context), undefined);
+});
+
+test('main screen speech switch, queue jump and spotlight use real queue data', async () => {
+  const context = appContext();
+  const calls = [];
+  context.mockCommand = async (action, payload) => { calls.push([action, payload]); };
+  vm.runInContext("command = mockCommand; snapshot.setup = { tts_enabled: true }; snapshot.preferences = { tts_enabled: true };", context);
+  await vm.runInContext('handleAction', context)('speech.toggle', '', null);
+  await vm.runInContext('handleAction', context)('queue.jump', '42', null);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [['preferences.save', { preferences: { tts_enabled: false } }], ['queue.jump', { id: 42 }]]);
+  const spotlight = vm.runInContext('spotlightKey', context);
+  const events = [
+    { kind: 'danmaku', user_name: '甲', message: '早上好' },
+    { kind: 'danmaku', user_name: '乙', message: '你好' },
+    { kind: 'danmaku', user_name: '甲', message: '晚上好' },
+  ];
+  const keys = ['a', 'b', 'c'];
+  assert.equal(spotlight(events, keys, { origin: 'live', user_name: '甲', text: '甲说早上好' }), 'a');
+  assert.equal(spotlight(events, keys, { origin: 'live', user_name: '甲', text: '改写后的文字' }), 'c');
+  assert.equal(spotlight(events, keys, { origin: 'audition', user_name: '甲', text: '早上好' }), '');
+  assert.equal(spotlight(events, keys, null), '');
+  // A job keeps its line while a later message with the same words arrives.
+  const repeated = [
+    { kind: 'danmaku', user_name: '甲', message: '钓鱼' },
+    { kind: 'danmaku', user_name: '乙', message: '你好' },
+  ];
+  assert.equal(spotlight(repeated, ['x', 'y'], { id: 7, origin: 'live', user_name: '甲', text: '甲说钓鱼' }), 'x');
+  repeated.push({ kind: 'danmaku', user_name: '甲', message: '钓鱼' });
+  assert.equal(spotlight(repeated, ['x', 'y', 'z'], { id: 7, origin: 'live', user_name: '甲', text: '甲说钓鱼' }), 'x');
+  // The next job with the same words takes the next matching line.
+  assert.equal(spotlight(repeated, ['x', 'y', 'z'], { id: 8, origin: 'live', user_name: '甲', text: '甲说钓鱼' }), 'z');
+});
+
+test('feed groups one viewer, adds time breaks and keeps the read line as its own card', () => {
+  const context = appContext();
+  const feedItems = vm.runInContext('feedItems', context);
+  const at = minutes => 1_700_000_000_000 + minutes * 60_000;
+  const events = [
+    { kind: 'danmaku', user_id: 5, user_name: '甲', message: '一', observed_at_ms: at(0) },
+    { kind: 'danmaku', user_id: 5, user_name: '甲', message: '二', observed_at_ms: at(1) },
+    { kind: 'danmaku', user_id: 5, user_name: '甲', message: '三', observed_at_ms: at(9) },
+    { kind: 'gift', user_id: 6, user_name: '乙', gift_name: '花', quantity: 2, observed_at_ms: at(9) },
+    { kind: 'danmaku', user_id: 5, user_name: '甲', message: '四', observed_at_ms: at(10) },
+  ];
+  const keys = ['k1', 'k2', 'k3', 'k4', 'k5'];
+  const shape = items => JSON.parse(JSON.stringify(items.map(item => item.type + (item.events ? item.events.length : ''))));
+  assert.deepEqual(shape(feedItems(events, keys, '')), ['run2', 'time', 'run1', 'gift', 'run1']);
+  assert.deepEqual(shape(feedItems(events, keys, 'k2')), ['run1', 'spot', 'time', 'run1', 'gift', 'run1']);
+  const jobText = vm.runInContext('jobDisplayText', context);
+  assert.equal(jobText({ user_name: '甲', text: '甲说四' }, events), '四');
+  assert.equal(jobText({ user_name: '丙', text: '丙说你好' }, events), '丙说你好');
 });

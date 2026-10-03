@@ -286,6 +286,7 @@ async fn read_pcm<R: AsyncRead + Unpin>(
 ) -> Result<(), DecodeError> {
     let frame_bytes = usize::from(output.channels) * 4;
     let mut carry = Vec::with_capacity(frame_bytes);
+    let mut samples = Vec::with_capacity(16 * 1024 / 4);
     let mut input = [0u8; 16 * 1024];
     loop {
         let count = tokio::select! {
@@ -301,7 +302,7 @@ async fn read_pcm<R: AsyncRead + Unpin>(
         if complete == 0 {
             continue;
         }
-        let mut samples = Vec::with_capacity(complete / 4);
+        samples.clear();
         for bytes in carry[..complete].as_chunks::<4>().0 {
             let sample = f32::from_le_bytes(*bytes);
             samples.push((sample * voice_volume).clamp(-1.0, 1.0));

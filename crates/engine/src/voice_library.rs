@@ -149,7 +149,12 @@ fn collect_weights(
     extension: &str,
     visited: &mut usize,
 ) -> Result<Vec<PathBuf>, ModelScanError> {
-    if !root.is_dir() {
+    let root_metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if !root_metadata.is_dir() || redirected(&root_metadata) {
         return Ok(Vec::new());
     }
     let mut result = Vec::new();
@@ -158,15 +163,24 @@ fn collect_weights(
         if depth > MAX_SCAN_DEPTH {
             return Err(ModelScanError::ScanLimit);
         }
-        let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+        // Cap enumeration before collecting: a very large single directory
+        // must not allocate all entries before the scan limit is enforced.
+        let remaining = MAX_SCAN_FILES.saturating_sub(*visited);
+        let mut entries = fs::read_dir(dir)?
+            .take(remaining + 1)
+            .collect::<Result<Vec<_>, _>>()?;
+        if entries.len() > remaining {
+            return Err(ModelScanError::ScanLimit);
+        }
+        *visited += entries.len();
         entries.sort_by_key(fs::DirEntry::path);
         for entry in entries {
-            *visited += 1;
-            if *visited > MAX_SCAN_FILES {
-                return Err(ModelScanError::ScanLimit);
-            }
             let file_type = entry.file_type()?;
             if file_type.is_symlink() {
+                continue;
+            }
+            #[cfg(windows)]
+            if redirected(&entry.metadata()?) {
                 continue;
             }
             let path = entry.path();
@@ -184,6 +198,23 @@ fn collect_weights(
     }
     result.sort();
     Ok(result)
+}
+
+fn redirected(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Directory junctions are reparse points too, even when reported as
+        // ordinary directories by file_type().
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 fn model_name(stem: &str) -> &str {
@@ -312,6 +343,47 @@ impl ReferenceProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn linked_version_roots_are_not_scanned() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("voice.ckpt"), b"not opened").unwrap();
+        let root = temp.path().join("GPT_weights_v2");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&outside, &root);
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&outside, &root);
+        if let Err(error) = linked {
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                eprintln!("symlink creation is unavailable on this Windows host");
+                return;
+            }
+            panic!("failed to create isolated directory symlink: {error}");
+        }
+        let mut visited = 0;
+        assert!(
+            collect_weights(&root, "ckpt", &mut visited)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(visited, 0);
+        assert_eq!(fs::read(outside.join("voice.ckpt")).unwrap(), b"not opened");
+    }
+
+    #[test]
+    fn scan_limit_is_shared_across_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("one.ckpt"), b"").unwrap();
+        fs::write(temp.path().join("two.ckpt"), b"").unwrap();
+        let mut visited = MAX_SCAN_FILES - 1;
+        assert!(matches!(
+            collect_weights(temp.path(), "ckpt", &mut visited),
+            Err(ModelScanError::ScanLimit)
+        ));
+    }
 
     #[test]
     fn same_version_exact_first_and_ambiguous_pairs_are_visible() {

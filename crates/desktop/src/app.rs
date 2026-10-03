@@ -8,7 +8,7 @@ use danmakuvoice_engine::{
     bilibili::{BiliAccountProfile, BiliSession, QrChallenge, QrLoginClient, QrPoll, RoomState},
     diagnostics,
     legacy::{self, LegacyPreview},
-    live::{LiveController, LiveSnapshot},
+    live::{LIVE_RECENT_EVENT_LIMIT, LiveController, LiveSnapshot},
     migration::{self, LegacyImportOptions},
     model::{LiveEvent, Provider, VoiceBinding, VoicePreset},
     playback::{PlaybackExecutor, PreparedPlayback},
@@ -137,6 +137,8 @@ struct Controller {
     doubao_connection: Option<String>,
     live: Option<Arc<LiveController>>,
     last_live: LiveSnapshot,
+    /// Chat kept on screen while only the speech switch restarts the live session.
+    carried_events: Vec<LiveEvent>,
     connecting: bool,
     live_receive_only: bool,
     generation: u64,
@@ -212,6 +214,7 @@ impl Application {
             doubao_connection: None,
             live: None,
             last_live: LiveSnapshot::default(),
+            carried_events: Vec::new(),
             connecting: false,
             live_receive_only: false,
             generation: 0,
@@ -400,7 +403,10 @@ impl Application {
             }
             state.resume_live_after_default_device_change = false;
         }
-        match self.connect(None).await {
+        match self
+            .connect_with_intent(None, None, Some(resume_epoch))
+            .await
+        {
             Ok(()) => {
                 if let Ok(mut state) = self.lock() {
                     state.status.clear();
@@ -441,6 +447,15 @@ impl Application {
         state.local_services.dots.process_exited();
         state.local_services.gpt_sovits.process_exited();
         if state.config_snapshot.is_none() {
+            for kind in [Kind::Dots, Kind::GptSovits] {
+                if let Ok(endpoint) = state.local_service_endpoint(kind, None) {
+                    state
+                        .local_services
+                        .get_mut(kind)
+                        .observe_endpoint(&endpoint);
+                }
+            }
+
             let connections = state.store.connections().map_err(display)?;
             let fish_audio_settings = connections
                 .iter()
@@ -500,6 +515,13 @@ impl Application {
             .as_ref()
             .map(|live| live.snapshot())
             .unwrap_or_else(|| state.last_live.clone());
+        // Between a speech-mode stop and the restarted session, the stopped
+        // session's events are already part of the carried chat.
+        let events = if state.live.is_none() && !state.carried_events.is_empty() {
+            state.carried_events.clone()
+        } else {
+            carried_chat(&state.carried_events, &live.recent_events)
+        };
         let queue = state
             .scheduler
             .as_ref()
@@ -523,7 +545,7 @@ impl Application {
             "onboarding_done":state.prefs.onboarding_done,
             "setup":{"mode":if state.prefs.authenticated {"account"} else {"anonymous"},"uid":state.prefs.broadcaster_uid,"room_id":room,"tts_enabled":state.prefs.tts_enabled},
             "account":{"user_id":state.bili_user_id,"name":state.bili_profile.as_ref().map(|p| &p.name),"avatar_url":state.bili_profile.as_ref().and_then(|p| p.avatar_url.as_deref())}, "qr":state.qr,
-            "live":{"running":live.running,"connecting":state.connecting,"room_id":live.room_id.or(room),"state":if state.connecting {"connecting"} else {live_state},"message":live_message,"received":live.received,"events":live.recent_events,"errors":live.errors,"no_voice":live.no_voice},
+            "live":{"running":live.running,"connecting":state.connecting,"room_id":live.room_id.or(room),"state":if state.connecting {"connecting"} else {live_state},"message":live_message,"received":live.received,"events":events,"errors":live.errors,"no_voice":live.no_voice},
             "queue":queue_json(&queue), "preferences":state.prefs,
             "status":{"error":state.status_error || device_lost,"message":status_message},
             "data_dir":state.store.data_dir(),
@@ -544,9 +566,25 @@ impl Application {
     }
 
     pub async fn dispatch(&self, action: &str, payload: Value) -> Result<Value, String> {
+        let observation_only =
+            action == "local_services.check" && bool_field(&payload, "automatic", false);
         if matches!(action, "queue.stop" | "live.disconnect") {
             let mut state = self.lock()?;
             state.explicit_stop_epoch = state.explicit_stop_epoch.wrapping_add(1);
+        }
+        if matches!(
+            action,
+            "queue.stop"
+                | "live.disconnect"
+                | "live.connect"
+                | "live.save"
+                | "onboarding.anonymous"
+                | "onboarding.finish"
+                | "onboarding.reset"
+                | "bili.use_account"
+                | "bili.logout"
+        ) {
+            self.lock()?.carried_events.clear();
         }
         let result = self.execute(action, payload).await.map_err(|error| {
             danmakuvoice_engine::error_codes::tag(
@@ -558,15 +596,19 @@ impl Application {
             let mut state = self.lock()?;
             // Failed actions may have written a partial result before an
             // error. Never retain a pre-dispatch configuration in that case.
-            state.config_snapshot = None;
-            match &result {
-                Ok(_) => {
-                    state.status.clear();
-                    state.status_error = false;
+            if !observation_only {
+                if command_changes_configuration(action) {
+                    state.config_snapshot = None;
                 }
-                Err(error) => {
-                    state.status = error.clone();
-                    state.status_error = true;
+                match &result {
+                    Ok(_) => {
+                        state.status.clear();
+                        state.status_error = false;
+                    }
+                    Err(error) => {
+                        state.status = error.clone();
+                        state.status_error = true;
+                    }
                 }
             }
         }
@@ -669,6 +711,24 @@ impl Application {
             }
             "live.disconnect" => self.stop(false).await?,
             "queue.stop" => self.stop(true).await?,
+            "queue.jump" => {
+                let id = payload
+                    .get("id")
+                    .and_then(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+                    })
+                    .ok_or("播报编号无效")?;
+                let scheduler = self.lock()?.scheduler.clone();
+                let jumped = match scheduler {
+                    Some(s) => s.jump_to(id).await.map_err(display)?,
+                    None => false,
+                };
+                if !jumped {
+                    return Err("这条弹幕已经读过或不在待读列表中".into());
+                }
+            }
             "queue.skip" | "queue.clear" => {
                 let scheduler = self.lock()?.scheduler.clone();
                 if let Some(s) = scheduler {
@@ -949,6 +1009,12 @@ impl Application {
             "rules.save" => {
                 let mut rules: RuleSet = parse(&payload["rules"])?;
                 let prior = state.store.load_rules().map_err(display)?;
+                if payload["rules"]["events"]
+                    .get("filter_bilibili_emoticons")
+                    .is_none()
+                {
+                    rules.events.filter_bilibili_emoticons = prior.events.filter_bilibili_emoticons;
+                }
                 if payload["rules"].get("preferred_presets").is_none() {
                     rules.preferred_presets = prior.preferred_presets.clone();
                 }
@@ -1116,6 +1182,55 @@ impl Application {
 }
 
 impl Controller {
+    fn local_service_endpoint(
+        &self,
+        kind: Kind,
+        connection_id: Option<&str>,
+    ) -> Result<String, String> {
+        let state = self;
+        let rules = state.store.load_rules().map_err(display)?;
+        let provider = match kind {
+            Kind::Dots => Provider::Dots,
+            Kind::GptSovits => Provider::GptSovits,
+        };
+        let presets = state.store.presets().map_err(display)?;
+        // Match the voice shown by the service card, including older rules
+        // without a remembered preset and deleted remembered voices.
+        let selected_connection = presets
+            .iter()
+            .find(|preset| {
+                preset.provider == provider
+                    && rules.preferred_presets.get(&provider) == Some(&preset.id)
+            })
+            .or_else(|| {
+                presets.iter().find(|preset| {
+                    preset.provider == provider
+                        && rules.default_preset_id.as_ref() == Some(&preset.id)
+                })
+            })
+            .or_else(|| presets.iter().find(|preset| preset.provider == provider))
+            .map(|preset| preset.connection_id.clone());
+        let selected_connection = connection_id.map(str::to_owned).or(selected_connection);
+        let mut fallback = None;
+        for connection in state.store.connections().map_err(display)? {
+            let endpoint = match (kind, connection.settings) {
+                (Kind::Dots, ConnectionSettings::Dots { endpoint, .. })
+                | (Kind::GptSovits, ConnectionSettings::GptSovits { endpoint, .. }) => endpoint,
+                _ => continue,
+            };
+            if selected_connection.as_ref() == Some(&connection.id) {
+                return Ok(endpoint);
+            }
+            if fallback.is_none() {
+                fallback = Some(endpoint);
+            }
+        }
+        if connection_id.is_some() {
+            return Err("本地服务连接不存在或类型不一致".into());
+        }
+        fallback.ok_or_else(|| "请先保存本地服务连接".into())
+    }
+
     fn save_desktop_paths(&self) -> Result<(), String> {
         let paths = DesktopPaths {
             dots_dir: self.local_services.dots.directory.clone(),
@@ -1336,55 +1451,6 @@ impl Controller {
         self.audio = Some(output);
         self.scheduler = Some(scheduler.clone());
         Ok(scheduler)
-    }
-
-    fn retire_unused_auto_local_services(&mut self) -> Result<(), String> {
-        // An explicit audition can have frozen a voice without reaching the
-        // scheduler yet. Its setup holds the controller lock when toggling
-        // this flag, so a later reconciliation will see the queued job.
-        if self.audition_starting {
-            return Ok(());
-        }
-        let rules = self.store.load_rules().map_err(display)?;
-        let presets = self.store.presets().map_err(display)?;
-        let bindings = self.store.bindings().map_err(display)?;
-        let mut needed = [false; 2];
-        let mark = |voice: &VoicePreset, needed: &mut [bool; 2]| match voice.provider {
-            Provider::Dots => needed[0] = true,
-            Provider::GptSovits => needed[1] = true,
-            Provider::FishAudio | Provider::Doubao => {}
-        };
-        if let Some(default_id) = rules.default_preset_id.as_deref()
-            && let Some(voice) = presets.iter().find(|voice| voice.id == default_id)
-        {
-            mark(voice, &mut needed);
-        }
-        for binding in bindings.iter().filter(|binding| {
-            binding.enabled && (binding.user_id.is_some() || binding.user_name.is_some())
-        }) {
-            if let Some(voice) = presets.iter().find(|voice| voice.id == binding.preset_id) {
-                mark(voice, &mut needed);
-            }
-        }
-        if let Some(scheduler) = &self.scheduler {
-            let state = scheduler.state();
-            let queue = state.borrow();
-            for job in queue.current.iter().chain(queue.pending.iter()) {
-                if let Some(voice) = &job.preview.voice {
-                    mark(voice, &mut needed);
-                }
-                if let Some(voice) = &job.preview.default_voice {
-                    mark(voice, &mut needed);
-                }
-            }
-        }
-        if !needed[0] {
-            self.local_services.dots.retire_auto_if_unused();
-        }
-        if !needed[1] {
-            self.local_services.gpt_sovits.retire_auto_if_unused();
-        }
-        Ok(())
     }
 
     fn preferred_local_service(&self) -> Result<Option<(Kind, String)>, String> {
@@ -1787,7 +1853,9 @@ impl Application {
             }
             state.explicit_stop_epoch
         };
-        if let Err(error) = self.connect_with_startup_epoch(None, Some(epoch)).await
+        if let Err(error) = self
+            .connect_with_intent(None, Some(epoch), Some(epoch))
+            .await
             && let Ok(mut state) = self.lock()
             && state.explicit_stop_epoch == epoch
             && !state.stopping
@@ -1802,19 +1870,25 @@ impl Application {
     }
 
     async fn connect(&self, authenticated: Option<bool>) -> Result<(), String> {
-        self.connect_with_startup_epoch(authenticated, None).await
+        self.connect_with_intent(authenticated, None, None).await
     }
 
-    async fn connect_with_startup_epoch(
+    async fn connect_with_intent(
         &self,
         authenticated: Option<bool>,
         startup_epoch: Option<u64>,
+        expected_stop_epoch: Option<u64>,
     ) -> Result<(), String> {
         self.require_network()?;
         let gate = self.lock()?.activity_gate.clone();
         let _activity = gate.lock().await;
         let (controller, scheduler, session, room, generation, cancel) = {
             let mut state = self.lock()?;
+            // Automatic recovery and settings-driven restarts must not reopen
+            // a listener after a newer explicit Disconnect or Stop All.
+            if expected_stop_epoch.is_some_and(|epoch| state.explicit_stop_epoch != epoch) {
+                return Ok(());
+            }
             if startup_epoch.is_some_and(|epoch| {
                 state.explicit_stop_epoch != epoch
                     || !state.prefs.onboarding_done
@@ -1941,6 +2015,7 @@ impl Application {
         state.audio = None;
         state.resume_live_after_default_device_change = false;
         state.last_live = LiveSnapshot::default();
+        state.carried_events.clear();
         state.live_receive_only = false;
         state.migration = None;
         state.local_services.stop_owned();
@@ -2148,8 +2223,12 @@ impl Application {
     }
 
     async fn preferences(&self, payload: &Value) -> Result<(), String> {
+        // Acquire before reading the patch base or awaiting a live speech
+        // change. A second settings request must not merge against old prefs
+        // and later overwrite a newer save while this operation is suspended.
+        let transition = self.begin_reconfiguration()?;
         let reopen_output = bool_field(payload, "reopen_output", false);
-        let (prefs, device_changed, speech_changed, reconnect) = {
+        let (prefs, device_changed, speech_changed, reconnect, stop_epoch) = {
             let state = self.lock()?;
             let mut merged = serde_json::to_value(&state.prefs).map_err(display)?;
             let patch = payload
@@ -2172,13 +2251,43 @@ impl Application {
                 changed,
                 state.prefs.tts_enabled != prefs.tts_enabled,
                 state.live.as_ref().is_some_and(|l| l.snapshot().running),
+                state.explicit_stop_epoch,
             )
         };
-        let transition = self.begin_reconfiguration()?;
+        // A session started with playback can switch speech on and off in
+        // place: reception continues and only live speech jobs stop. Only a
+        // receive-only session must restart to gain a playback scheduler.
+        let hot_speech = speech_changed && reconnect && !device_changed && {
+            let state = self.lock()?;
+            state.live.is_some() && (!prefs.tts_enabled || !state.live_receive_only)
+        };
+        if hot_speech {
+            if prefs.tts_enabled {
+                self.lock()?.validate_default_voice()?;
+            }
+            let live = self.lock()?.live.clone();
+            if let Some(live) = live {
+                live.set_tts_enabled(prefs.tts_enabled)
+                    .await
+                    .map_err(display)?;
+            }
+        }
+        if speech_changed && reconnect && !device_changed && !hot_speech {
+            // Turning speech on for a receive-only session restarts it with
+            // playback; keep the messages already on screen instead of clearing them.
+            let mut state = self.lock()?;
+            let current = state
+                .live
+                .as_ref()
+                .map(|live| live.snapshot().recent_events)
+                .unwrap_or_default();
+            let carried = carried_chat(&state.carried_events, &current);
+            state.carried_events = carried;
+        }
         if device_changed {
             confirmed(payload)?;
             self.stop(true).await?;
-        } else if speech_changed {
+        } else if speech_changed && !hot_speech {
             self.stop(false).await?;
         }
         {
@@ -2206,8 +2315,9 @@ impl Application {
             }
         }
         drop(transition);
-        if reconnect && (device_changed || speech_changed) {
-            self.connect(None).await?;
+        if reconnect && (device_changed || (speech_changed && !hot_speech)) {
+            self.connect_with_intent(None, None, Some(stop_epoch))
+                .await?;
         }
         Ok(())
     }
@@ -2217,35 +2327,8 @@ impl Application {
     }
 
     pub async fn auto_start_preferred_service(&self) {
-        self.retire_unused_auto_local_services().await;
         if let Ok(Some((kind, endpoint))) = self.preferred_local_service() {
-            self.ensure_local_service(kind, &endpoint, true).await;
-        }
-    }
-
-    pub async fn retire_unused_auto_local_services(&self) {
-        // Never hold the desktop controller lock while waiting for live event
-        // preparation. The engine gate covers the interval between an event's
-        // config snapshot and its entry in the scheduler queue.
-        let live = self.lock().ok().and_then(|state| state.live.clone());
-        if let Some(live) = live {
-            live.with_speech_submissions_paused(|| {
-                if let Ok(mut state) = self.lock()
-                    && state
-                        .live
-                        .as_ref()
-                        .is_some_and(|current| Arc::ptr_eq(current, &live))
-                {
-                    // Keep services used by bound voices, frozen jobs and
-                    // explicit manual starts, even after changing the primary.
-                    let _ = state.retire_unused_auto_local_services();
-                }
-            })
-            .await;
-        } else if let Ok(mut state) = self.lock()
-            && state.live.is_none()
-        {
-            let _ = state.retire_unused_auto_local_services();
+            self.ensure_local_service(kind, &endpoint, true, None).await;
         }
     }
 
@@ -2306,59 +2389,37 @@ impl Application {
         Ok(())
     }
 
-    fn local_service_endpoint(&self, kind: Kind) -> Result<String, String> {
-        let state = self.lock()?;
-        let selected_id = state.store.load_rules().map_err(display)?.default_preset_id;
-        let selected_connection = state
-            .store
-            .presets()
-            .map_err(display)?
-            .into_iter()
-            .find(|preset| selected_id.as_ref() == Some(&preset.id))
-            .and_then(|preset| match (kind, preset.provider) {
-                (Kind::Dots, Provider::Dots) | (Kind::GptSovits, Provider::GptSovits) => {
-                    Some(preset.connection_id)
-                }
-                _ => None,
-            });
-        let mut fallback = None;
-        for connection in state.store.connections().map_err(display)? {
-            let endpoint = match (kind, connection.settings) {
-                (Kind::Dots, ConnectionSettings::Dots { endpoint, .. })
-                | (Kind::GptSovits, ConnectionSettings::GptSovits { endpoint, .. }) => endpoint,
-                _ => continue,
-            };
-            if selected_connection.as_ref() == Some(&connection.id) {
-                return Ok(endpoint);
-            }
-            if fallback.is_none() {
-                fallback = Some(endpoint);
-            }
-        }
-        fallback.ok_or_else(|| "请先保存本地服务连接".into())
+    fn local_service_endpoint(
+        &self,
+        kind: Kind,
+        connection_id: Option<&str>,
+    ) -> Result<String, String> {
+        self.lock()?.local_service_endpoint(kind, connection_id)
     }
 
     async fn start_local_service(&self, payload: &Value) -> Result<(), String> {
         self.require_network()?;
         let kind = Kind::parse(required_str(payload, "provider")?)?;
-        let endpoint = self.local_service_endpoint(kind)?;
-        self.lock()?.local_services.get_mut(kind).start_manual();
+        let endpoint = self
+            .local_service_endpoint(kind, payload.get("connection_id").and_then(Value::as_str))?;
+        let generation = {
+            let mut state = self.lock()?;
+            let slot = state.local_services.get_mut(kind);
+            slot.observe_endpoint(&endpoint);
+            slot.start_manual();
+            slot.generation
+        };
         let app = self.clone();
-        tokio::spawn(async move { app.ensure_local_service(kind, &endpoint, false).await });
+        tokio::spawn(async move {
+            app.ensure_local_service(kind, &endpoint, false, Some(generation))
+                .await
+        });
         Ok(())
     }
 
     fn stop_local_service(&self, payload: &Value) -> Result<(), String> {
         let kind = Kind::parse(required_str(payload, "provider")?)?;
         let mut state = self.lock()?;
-        if state.connecting
-            || state
-                .live
-                .as_ref()
-                .is_some_and(|live| live.snapshot().running)
-        {
-            return Err("请先断开直播间再停止语音服务".into());
-        }
         if state.scheduler.as_ref().is_some_and(|scheduler| {
             let queue = scheduler.state();
             let queue = queue.borrow();
@@ -2377,16 +2438,40 @@ impl Application {
     async fn check_local_service(&self, payload: &Value) -> Result<(), String> {
         self.require_network()?;
         let kind = Kind::parse(required_str(payload, "provider")?)?;
-        let endpoint = self.local_service_endpoint(kind)?;
-        let endpoint = Endpoint::parse(kind, &endpoint)?;
-        let health = local_service::probe(kind, &endpoint).await;
+        let endpoint = self
+            .local_service_endpoint(kind, payload.get("connection_id").and_then(Value::as_str))?;
+        let parsed_endpoint = Endpoint::parse(kind, &endpoint)?;
+        let (generation, observation) = {
+            let mut state = self.lock()?;
+            let slot = state.local_services.get_mut(kind);
+            slot.observe_endpoint(&endpoint);
+            slot.observation = slot.observation.wrapping_add(1);
+            (slot.generation, slot.observation)
+        };
+        let health = local_service::probe(kind, &parsed_endpoint).await;
         let mut state = self.lock()?;
+        // The saved address, lifecycle, and newest observation must all still
+        // match. A late probe must never resurrect a stopped/reconfigured service.
+        if state
+            .local_service_endpoint(kind, payload.get("connection_id").and_then(Value::as_str))?
+            != endpoint
+        {
+            return Ok(());
+        }
         let slot = state.local_services.get_mut(kind);
+        if slot.generation != generation || slot.observation != observation {
+            return Ok(());
+        }
         slot.process_exited();
         match health {
             Health::Ready => slot.set("ready", "本地服务健康检查已就绪"),
-            Health::Offline if slot.view().owned => slot.set("starting", "服务正在加载模型"),
+            Health::Offline | Health::Unready | Health::Timeout
+                if slot.view().owned && matches!(slot.state, "checking" | "starting") =>
+            {
+                slot.set("starting", "服务正在加载模型")
+            }
             Health::Offline => slot.set("stopped", "本地服务尚未运行"),
+            Health::Timeout => slot.set("unknown", "服务检查超时，请稍后重试"),
             Health::Unready => slot.set("failed", "本地服务已响应但模型尚未就绪"),
             Health::Foreign => slot.set("failed", "端口已占用，但不是对应的 TTS 服务"),
             Health::LegacyDots => slot.set(
@@ -2398,6 +2483,23 @@ impl Application {
     }
 
     async fn connect_fish(&self, payload: &mut Value) -> Result<Value, String> {
+        self.connect_fish_with_verify(payload, |secret| async move {
+            fish::verify_api_key(&secret, &CancellationToken::new())
+                .await
+                .map_err(display)
+        })
+        .await
+    }
+
+    async fn connect_fish_with_verify<F, Fut>(
+        &self,
+        payload: &mut Value,
+        verify: F,
+    ) -> Result<Value, String>
+    where
+        F: FnOnce(Zeroizing<String>) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
         self.require_network()?;
         let secret = match payload.get_mut("credential").map(Value::take) {
             Some(Value::String(value)) if !value.is_empty() => Zeroizing::new(value),
@@ -2406,11 +2508,15 @@ impl Application {
         if secret.trim() != secret.as_str() {
             return Err("API Key 前后不能包含空格".into());
         }
-        fish::verify_api_key(&secret, &CancellationToken::new())
-            .await
-            .map_err(display)?;
+        let generation = self.lock()?.generation;
+        verify(secret.clone()).await?;
         let requested_id = payload.get("connection_id").and_then(Value::as_str);
         let mut state = self.lock()?;
+        // Stop All is also the boundary used by clear-data, credential removal
+        // and migration. Their completed changes must win over a late login.
+        if state.generation != generation || state.reconfiguring || state.stopping {
+            return Err("Fish Audio 登录已取消，请重新连接账号".into());
+        }
         let existing = state
             .store
             .connections()
@@ -2486,16 +2592,15 @@ impl Application {
         Ok(json!({"voice_id":voice_id,"name":name}))
     }
 
-    async fn ensure_local_service(&self, kind: Kind, endpoint: &str, preferred_only: bool) {
+    async fn ensure_local_service(
+        &self,
+        kind: Kind,
+        endpoint: &str,
+        preferred_only: bool,
+        requested_generation: Option<u64>,
+    ) {
         let requested_endpoint = endpoint;
-        let endpoint = match Endpoint::parse(kind, endpoint) {
-            Ok(endpoint) => endpoint,
-            Err(_) => {
-                self.set_local_status(kind, None, "failed", "首选服务地址不是本机 HTTP 地址");
-                return;
-            }
-        };
-        let generation = {
+        let (endpoint, generation) = {
             let Ok(mut state) = self.lock() else { return };
             if state.network_disabled {
                 return;
@@ -2506,17 +2611,39 @@ impl Application {
                 return;
             }
             let slot = state.local_services.get_mut(kind);
-            if !slot.auto_start_allowed() {
+            if requested_generation.is_some_and(|value| value != slot.generation)
+                || !slot.auto_start_allowed()
+            {
                 return;
             }
+            // Validate only after the lifecycle/selection checks. A delayed
+            // task for an invalid old address must not overwrite a newer
+            // service state or undo an explicit Stop.
+            let endpoint = match Endpoint::parse(kind, endpoint) {
+                Ok(endpoint) => endpoint,
+                Err(_) => {
+                    slot.set("failed", "首选服务地址不是本机 HTTP 地址");
+                    return;
+                }
+            };
+            slot.observe_endpoint(requested_endpoint);
             slot.switch_endpoint(endpoint.port);
             slot.generation = slot.generation.wrapping_add(1);
             slot.set("checking", "正在检查本地服务");
-            slot.generation
+            (endpoint, slot.generation)
         };
         match local_service::probe(kind, &endpoint).await {
             Health::Ready => {
                 self.set_local_status(kind, Some(generation), "ready", "本地服务已就绪");
+                return;
+            }
+            Health::Timeout => {
+                self.set_local_status(
+                    kind,
+                    Some(generation),
+                    "unknown",
+                    "服务检查超时，请稍后重试",
+                );
                 return;
             }
             Health::Unready => {
@@ -2604,7 +2731,7 @@ impl Application {
                     );
                     return;
                 }
-                Health::Offline | Health::Unready => {}
+                Health::Offline | Health::Unready | Health::Timeout => {}
             }
         }
         self.set_local_status(
@@ -2971,6 +3098,48 @@ fn managed_backup_name(name: &str) -> bool {
     false
 }
 
+/// Chat carried over a speech-mode restart, followed by the current session,
+/// bounded like a single session's recent events.
+fn carried_chat(carried: &[LiveEvent], current: &[LiveEvent]) -> Vec<LiveEvent> {
+    let total = carried.len() + current.len();
+    let skip = total.saturating_sub(LIVE_RECENT_EVENT_LIMIT);
+    carried
+        .iter()
+        .chain(current.iter())
+        .skip(skip)
+        .cloned()
+        .collect()
+}
+
+fn command_changes_configuration(action: &str) -> bool {
+    !matches!(
+        action,
+        "bili.qr.begin"
+            | "bili.qr.cancel"
+            | "doubao.qr.begin"
+            | "doubao.qr.cancel"
+            | "live.connect"
+            | "live.disconnect"
+            | "queue.stop"
+            | "queue.skip"
+            | "queue.clear"
+            | "queue.jump"
+            | "audition"
+            | "audio.test"
+            | "rules.preview"
+            | "models.scan"
+            | "references.list"
+            | "fish.settings.get"
+            | "fish.voice.lookup"
+            | "connections.probe"
+            | "configuration.export"
+            | "migration.preview"
+            | "migration.cancel"
+            | "local_services.check"
+            | "local_services.start"
+            | "local_services.stop"
+    )
+}
 fn display(error: impl std::fmt::Display) -> String {
     error.to_string()
 }

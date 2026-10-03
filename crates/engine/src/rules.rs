@@ -27,6 +27,9 @@ pub struct SoundRule {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventRules {
     pub danmaku_on: bool,
+    /// Skip the speech plan for Bilibili's standalone emote packets only.
+    #[serde(default = "default_filter_bilibili_emoticons")]
+    pub filter_bilibili_emoticons: bool,
     pub gift_on: bool,
     pub free_gift_on: bool,
     pub super_chat_on: bool,
@@ -39,6 +42,7 @@ impl Default for EventRules {
     fn default() -> Self {
         Self {
             danmaku_on: true,
+            filter_bilibili_emoticons: true,
             gift_on: true,
             free_gift_on: false,
             super_chat_on: true,
@@ -47,6 +51,10 @@ impl Default for EventRules {
             super_chat_threshold_yuan: 30.0,
         }
     }
+}
+
+fn default_filter_bilibili_emoticons() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -473,6 +481,11 @@ impl RuleSet {
     pub fn filter_reason(&self, event: &LiveEvent) -> Option<&'static str> {
         match event.kind {
             EventKind::Danmaku if !self.events.danmaku_on => Some("弹幕播报已关闭"),
+            EventKind::Danmaku
+                if self.events.filter_bilibili_emoticons && event.is_bilibili_emoticon =>
+            {
+                Some("B站官方表情已过滤")
+            }
             EventKind::Gift if !self.events.gift_on => Some("礼物播报已关闭"),
             EventKind::Gift
                 if event.coin_type.as_deref() == Some("silver") && !self.events.free_gift_on =>

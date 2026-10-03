@@ -110,6 +110,7 @@ pub struct AudioStream {
     receiver: mpsc::Receiver<Result<Vec<u8>, TtsError>>,
     cancellation: CancellationToken,
     task: JoinHandle<()>,
+    task_checked: bool,
 }
 
 impl AudioStream {
@@ -121,11 +122,29 @@ impl AudioStream {
         if self.cancellation.is_cancelled() {
             return None;
         }
-        tokio::select! {
+        let value = tokio::select! {
             biased;
-            _ = self.cancellation.cancelled() => None,
+            _ = self.cancellation.cancelled() => return None,
             value = self.receiver.recv() => value,
+        };
+        if value.is_none() && !self.task_checked {
+            self.task_checked = true;
+            // Closing the producer's channel is not necessarily a successful
+            // EOF: a panic after partial audio must reach the playback worker.
+            // The panic payload may contain secrets, so never expose it.
+            let finished = tokio::select! {
+                biased;
+                _ = self.cancellation.cancelled() => return None,
+                result = &mut self.task => result,
+            };
+            if finished.is_err() && !self.cancellation.is_cancelled() {
+                return Some(Err(TtsError::Protocol {
+                    service: "语音",
+                    reason: "合成任务异常结束",
+                }));
+            }
         }
+        value
     }
 
     pub fn cancel(&self) {
@@ -162,6 +181,7 @@ where
         receiver,
         cancellation,
         task,
+        task_checked: false,
     }
 }
 
@@ -342,6 +362,43 @@ pub(crate) async fn forward_wav_response(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn producer_panic_after_audio_is_reported_instead_of_successful_eof() {
+        let parent = CancellationToken::new();
+        let mut stream = spawn_stream(
+            AudioEncoding::PcmS16Le {
+                sample_rate: 24_000,
+                channels: 1,
+            },
+            &parent,
+            |sender, cancellation| async move {
+                assert!(send_bytes(&sender, &cancellation, &[1, 0]).await);
+                panic!("private response or credential");
+            },
+        );
+        assert_eq!(stream.recv().await.unwrap().unwrap(), [1, 0]);
+        let error = stream.recv().await.unwrap().unwrap_err();
+        assert!(matches!(error, TtsError::Protocol { .. }));
+        assert!(!error.to_string().contains("private"));
+        assert!(stream.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_stream_does_not_report_producer_abort_as_failure() {
+        let parent = CancellationToken::new();
+        let mut stream = spawn_stream(AudioEncoding::Wav, &parent, |_, token| async move {
+            token.cancelled().await;
+            Ok(())
+        });
+        parent.cancel();
+        assert!(stream.recv().await.is_none());
+    }
 }
 
 #[cfg(test)]

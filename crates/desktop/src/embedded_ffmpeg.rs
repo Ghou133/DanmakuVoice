@@ -4,8 +4,9 @@
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 use uuid::Uuid;
 
@@ -28,14 +29,29 @@ fn valid_file(path: &Path) -> io::Result<bool> {
         Ok(metadata) if !plain_file(&metadata) => {
             return Err(io::Error::other("音频组件缓存文件是重定向或特殊文件"));
         }
+        Ok(metadata) if metadata.len() != FFMPEG.len() as u64 => return Ok(false),
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     }
-    match fs::read(path) {
-        Ok(bytes) => Ok(digest(&bytes) == SHA256),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut length = 0;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(length == FFMPEG.len() && format!("{:x}", hash.finalize()) == SHA256);
+        }
+        length += count;
+        if length > FFMPEG.len() {
+            return Ok(false);
+        }
+        hash.update(&buffer[..count]);
     }
 }
 
@@ -102,7 +118,10 @@ fn replace_atomically(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 fn materialize(data_dir: &Path) -> io::Result<PathBuf> {
-    if digest(FFMPEG) != SHA256 {
+    // Embedded bytes are immutable for this process. Cache verification stays
+    // fresh on every ensure, including damage after a successful startup.
+    static EMBEDDED_VALID: OnceLock<bool> = OnceLock::new();
+    if !*EMBEDDED_VALID.get_or_init(|| digest(FFMPEG) == SHA256) {
         return Err(io::Error::other("内置 FFmpeg 与已核验版本不符"));
     }
     let target = path(data_dir);
@@ -188,6 +207,24 @@ mod tests {
         fs::write(&binary, b"corrupted").unwrap();
         assert_eq!(ensure(data.path()).unwrap(), binary);
         assert_eq!(digest(&fs::read(&binary).unwrap()), SHA256);
+    }
+
+    #[test]
+    fn verification_rejects_wrong_size_and_same_size_corruption() {
+        let data = tempfile::tempdir().unwrap();
+        let binary = ensure(data.path()).unwrap();
+        let file = OpenOptions::new().write(true).open(&binary).unwrap();
+        file.set_len(FFMPEG.len() as u64 + 1).unwrap();
+        drop(file);
+        assert!(!valid_file(&binary).unwrap());
+        ensure(data.path()).unwrap();
+        let mut file = OpenOptions::new().write(true).open(&binary).unwrap();
+        file.write_all(b"damage").unwrap();
+        drop(file);
+        assert_eq!(fs::metadata(&binary).unwrap().len(), FFMPEG.len() as u64);
+        assert!(!valid_file(&binary).unwrap());
+        ensure(data.path()).unwrap();
+        assert!(valid_file(&binary).unwrap());
     }
 
     #[test]

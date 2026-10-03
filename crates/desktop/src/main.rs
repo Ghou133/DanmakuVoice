@@ -24,6 +24,22 @@ use zeroize::Zeroizing;
 #[derive(Debug)]
 struct MissingWebView2Runtime;
 
+struct TrayLabels {
+    show: tauri::menu::MenuItem<tauri::Wry>,
+    exit: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+fn native_labels(snapshot: &Value) -> (&'static str, &'static str, &'static str) {
+    let english = snapshot["preferences"]["language"].as_str() == Some("en");
+    let offline = snapshot["network_disabled"].as_bool() == Some(true);
+    match (english, offline) {
+        (true, false) => ("DanmakuVoice", "Show window", "Exit"),
+        (true, true) => ("DanmakuVoice · Offline test", "Show window", "Exit"),
+        (false, false) => ("超绝可爱弹幕姬", "显示窗口", "退出"),
+        (false, true) => ("超绝可爱弹幕姬 · 离线测试", "显示窗口", "退出"),
+    }
+}
+
 #[derive(Default)]
 struct StartupWindowState {
     page_loaded: bool,
@@ -270,6 +286,15 @@ async fn dispatch(
     if matches!(action.as_str(), "preferences.save" | "data.clear")
         && let Some(window) = app.get_webview_window("main")
     {
+        let (title, show, exit) = native_labels(&result);
+        window.set_title(title).map_err(|e| e.to_string())?;
+        if let Some(labels) = app.try_state::<TrayLabels>() {
+            labels.show.set_text(show).map_err(|e| e.to_string())?;
+            labels.exit.set_text(exit).map_err(|e| e.to_string())?;
+        }
+        if let Some(tray) = app.tray_by_id("main") {
+            tray.set_tooltip(Some(title)).map_err(|e| e.to_string())?;
+        }
         window
             .set_theme(native_theme(&result))
             .map_err(|e| e.to_string())?;
@@ -345,11 +370,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return configure_fish_from_stdin(app::LaunchOptions::parse(args)?);
     }
     let options = app::LaunchOptions::parse(args)?;
-    let window_title = if options.disable_network {
-        "超绝可爱弹幕姬 · 离线测试"
-    } else {
-        "超绝可爱弹幕姬"
-    };
     #[cfg(windows)]
     if !webview2_runtime_available() {
         return Err(Box::new(MissingWebView2Runtime));
@@ -357,6 +377,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let state = Application::new(options.data_dir, options.disable_network)?;
     let webview_data = state.data_dir()?.join("webview");
     let initial_snapshot = state.snapshot()?;
+    let window_title = native_labels(&initial_snapshot).0;
     let theme = native_theme(&initial_snapshot);
     let zoom = ui_zoom(&initial_snapshot);
     let appearance = initial_snapshot["preferences"]["appearance"]
@@ -366,6 +387,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "window.__DANMAKUVOICE_STARTUP_THEME__ = {};",
         serde_json::json!({
             "appearance": appearance,
+            "language": initial_snapshot["preferences"]["language"].as_str().unwrap_or("zh-CN"),
             "session": uuid::Uuid::new_v4().to_string(),
         })
     );
@@ -393,6 +415,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .title(window_title)
             .inner_size(1040.0, 740.0)
             .min_inner_size(780.0, 580.0)
+            // The frontend draws its own title bar and window controls.
+            .decorations(false)
+            .shadow(true)
             .theme(theme)
             .background_color(background_color(theme.unwrap_or(tauri::Theme::Dark)))
             .visible(false)
@@ -465,7 +490,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
             resources::apply(&window, None);
-            install_tray(app, startup, window_title)?;
+            install_tray(app, startup, &initial_snapshot)?;
             let state = app.state::<Application>().inner().clone();
             tauri::async_runtime::spawn(async move {
                 state.refresh_bili_profile().await;
@@ -485,7 +510,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     interval.tick().await;
                     state.reconcile_default_output().await;
-                    state.retire_unused_auto_local_services().await;
                 }
             });
             Ok(())
@@ -528,14 +552,15 @@ fn configure_fish_from_stdin(
 fn install_tray(
     app: &tauri::App,
     startup: Arc<Mutex<StartupWindowState>>,
-    title: &str,
+    snapshot: &Value,
 ) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-    let exit = MenuItem::with_id(app, "exit", "退出", true, None::<&str>)?;
+    let (title, show_label, exit_label) = native_labels(snapshot);
+    let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
+    let exit = MenuItem::with_id(app, "exit", exit_label, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &exit])?;
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id("main")
         .icon(tauri::image::Image::new(
             include_bytes!("../icons/tray.rgba"),
             32,
@@ -567,6 +592,7 @@ fn install_tray(
             _ => {}
         })
         .build(app)?;
+    app.manage(TrayLabels { show, exit });
     Ok(())
 }
 
@@ -720,7 +746,7 @@ fn show_startup_error(message: &str) {
 
 #[cfg(test)]
 mod ui_zoom_tests {
-    use super::ui_zoom;
+    use super::{native_labels, ui_zoom};
     use serde_json::json;
 
     #[test]
@@ -729,6 +755,19 @@ mod ui_zoom_tests {
         assert_eq!(ui_zoom(&json!({"preferences":{"scale":0.5}})), 0.8);
         assert_eq!(ui_zoom(&json!({"preferences":{"scale":2.0}})), 1.4);
         assert_eq!(ui_zoom(&json!({"preferences":{}})), 1.0);
+    }
+
+    #[test]
+    fn native_labels_follow_saved_language_and_isolated_session() {
+        assert_eq!(native_labels(&json!({})).0, "超绝可爱弹幕姬");
+        assert_eq!(
+            native_labels(&json!({"preferences":{"language":"en"}})),
+            ("DanmakuVoice", "Show window", "Exit")
+        );
+        assert_eq!(
+            native_labels(&json!({"preferences":{"language":"en"},"network_disabled":true})).0,
+            "DanmakuVoice · Offline test"
+        );
     }
 }
 

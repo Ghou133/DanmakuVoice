@@ -108,11 +108,21 @@ pub enum AppearancePreference {
     System,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LanguagePreference {
+    #[default]
+    #[serde(rename = "zh-CN")]
+    Chinese,
+    #[serde(rename = "en")]
+    English,
+}
+
 /// Local UI choices. This deliberately excludes credentials and message history.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopPreferences {
     pub appearance: AppearancePreference,
+    pub language: LanguagePreference,
     pub scale: f32,
     pub output: OutputSelection,
     pub master_volume: f32,
@@ -127,6 +137,7 @@ impl Default for DesktopPreferences {
     fn default() -> Self {
         Self {
             appearance: AppearancePreference::System,
+            language: LanguagePreference::Chinese,
             scale: 1.0,
             output: OutputSelection::Default,
             master_volume: 1.0,
@@ -2804,6 +2815,7 @@ mod tests {
         );
         let preferences = DesktopPreferences {
             appearance: AppearancePreference::System,
+            language: LanguagePreference::English,
             scale: 1.25,
             output: OutputSelection::Named("Speakers (USB DAC)".into()),
             master_volume: 0.65,
@@ -2848,6 +2860,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.appearance, AppearancePreference::Dark);
+        assert_eq!(old.language, LanguagePreference::Chinese);
         assert!(old.onboarding_done);
         assert!(old.tts_enabled);
         assert!(!old.muted);
@@ -2855,6 +2868,8 @@ mod tests {
         assert_eq!(old.broadcaster_uid, None);
         let new: DesktopPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(new.appearance, AppearancePreference::System);
+        assert_eq!(new.language, LanguagePreference::Chinese);
+        assert!(serde_json::from_str::<DesktopPreferences>(r#"{"language":"fr"}"#).is_err());
         assert!(!new.onboarding_done);
     }
 
@@ -2878,5 +2893,34 @@ mod tests {
             })
             .unwrap();
         assert_eq!(reader.load_rules().unwrap(), second);
+    }
+    #[test]
+    fn standalone_emote_filter_persists_and_old_rules_default_on() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        assert!(store.load_rules().unwrap().events.filter_bilibili_emoticons);
+        let mut rules = RuleSet::default();
+        rules.templates.danmaku = "保留{message}".into();
+        rules.events.gift_threshold_yuan = 8.0;
+        let mut old = serde_json::to_value(&rules).unwrap();
+        old["events"]
+            .as_object_mut()
+            .unwrap()
+            .remove("filter_bilibili_emoticons");
+        store
+            .conn
+            .execute(
+                "INSERT INTO settings(key,json) VALUES('rules',?1)",
+                params![old.to_string()],
+            )
+            .unwrap();
+        assert_eq!(store.load_rules().unwrap(), rules);
+        for enabled in [true, false] {
+            rules.events.filter_bilibili_emoticons = enabled;
+            store.save_rules(&rules).unwrap();
+            drop(store);
+            store = DataStore::open(temp.path()).unwrap();
+            assert_eq!(store.load_rules().unwrap(), rules);
+        }
     }
 }

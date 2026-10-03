@@ -3,7 +3,7 @@
   "productName": "超绝可爱弹幕姬",
   "version": "0.2.2",
   "identifier": "app.danmakuvoice.desktop",
-  "build": { "frontendDist": ["ui/index.html", "ui/app.js", "ui/helpers.mjs", "ui/autosave.mjs", "ui/select.mjs", "ui/startup-theme.js", "ui/styles.css", "ui/logo.png"] },
+  "build": { "frontendDist": ["ui/index.html", "ui/app.js", "ui/helpers.mjs", "ui/autosave.mjs", "ui/select.mjs", "ui/i18n.mjs", "ui/i18n-en.mjs", "ui/i18n-diagnostics.mjs", "ui/startup-theme.js", "ui/titlebar.js", "ui/styles.css", "ui/logo.png"] },
   "app": {
     "withGlobalTauri": true,
     "windows": [],

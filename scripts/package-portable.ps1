@@ -18,8 +18,20 @@ if ($LASTEXITCODE -ne 0 -or $buildCommit -notmatch '^[0-9a-f]{40}$') {
 }
 $checkoutChanges = @(& git -C $repoRoot status --porcelain --untracked-files=normal)
 $checkoutClean = $checkoutChanges.Count -eq 0
+if ($DevelopmentSnapshot -and $RequireCleanCheckout) {
+    throw 'DevelopmentSnapshot and RequireCleanCheckout are mutually exclusive'
+}
 if ($RequireCleanCheckout -and -not $checkoutClean) {
     throw 'The checkout must be clean before building a release-matched portable ZIP'
+}
+$snapshotJson = $null
+$snapshotId = $null
+if ($DevelopmentSnapshot) {
+    $snapshotJson = (& python (Join-Path $PSScriptRoot 'source_inventory.py') inventory --root $repoRoot) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not identify development working-tree sources' }
+    $snapshot = $snapshotJson | ConvertFrom-Json
+    if ($snapshot.baseCommit -ne $buildCommit) { throw 'Working-tree base commit changed' }
+    $snapshotId = $snapshot.snapshotSha256
 }
 $expectedHashes = @{
     Binary = '8FB7ECC11F4F7A441AE7075A81C984289250B166E78DEDF51900BBEB1A96EF4D'
@@ -398,6 +410,12 @@ if ($RequireCleanCheckout) {
         throw 'The checkout changed during portable build; source correspondence is not proven'
     }
 }
+if ($DevelopmentSnapshot) {
+    $finishedJson = (& python (Join-Path $PSScriptRoot 'source_inventory.py') inventory --root $repoRoot) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or ($finishedJson | ConvertFrom-Json).snapshotSha256 -ne $snapshotId) {
+        throw 'Working-tree sources changed during development build; source correspondence is not proven'
+    }
+}
 
 $scratch = Join-Path $distRoot ("portable-stage-{0}" -f [guid]::NewGuid().ToString('N'))
 $stage = Join-Path $scratch 'DanmakuVoice'
@@ -443,6 +461,9 @@ try {
     Copy-IntoStage (Join-Path $repoRoot 'docs\ERROR-CODES.md') 'docs\ERROR-CODES.md'
     Copy-IntoStage (Join-Path $repoRoot 'docs\RELEASE-LICENSE-AUDIT.md') 'docs\RELEASE-LICENSE-AUDIT.md'
     Copy-IntoStage (Join-Path $repoRoot 'docs\UI-IPC.md') 'docs\UI-IPC.md'
+    Copy-IntoStage (Join-Path $repoRoot 'docs\UI-DESIGN.md') 'docs\UI-DESIGN.md'
+    Copy-IntoStage (Join-Path $repoRoot 'crates\desktop\icons\ARTWORK.md') 'crates\desktop\icons\ARTWORK.md'
+    Copy-IntoStage (Join-Path $repoRoot 'crates\desktop\icons\README.md') 'crates\desktop\icons\README.md'
     Copy-IntoStage (Join-Path $repoRoot 'scripts\build-minimal-ffmpeg-wsl.sh') 'scripts\build-minimal-ffmpeg-wsl.sh'
     Copy-IntoStage (Join-Path $repoRoot 'scripts\verify-minimal-ffmpeg.py') 'scripts\verify-minimal-ffmpeg.py'
     Copy-IntoStage (Join-Path $repoRoot 'scripts\package-portable.ps1') 'scripts\package-portable.ps1'
@@ -454,18 +475,24 @@ try {
     @(
         "Source Git commit: $buildCommit"
         "Checkout clean before build: $checkoutClean"
+        "Development snapshot: $DevelopmentSnapshot"
+        "Working-tree snapshot SHA-256: $snapshotId"
         "Cargo.lock SHA-256: $((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repoRoot 'Cargo.lock')).Hash)"
         "FFmpeg binary SHA-256: $($expectedHashes.Binary)"
         "FFmpeg source SHA-256: $($expectedHashes.Source)"
     ) | Set-Content -LiteralPath (Join-Path $stage 'BUILD-SOURCE.txt') -Encoding UTF8
+    if ($DevelopmentSnapshot) {
+        Set-Content -LiteralPath (Join-Path $stage 'WORKTREE-SOURCE.json') -Value $snapshotJson -Encoding utf8NoBOM
+    }
     @(
-        'Matching source for this Windows x64 single-file application'
+        $(if ($DevelopmentSnapshot) { 'Matching source for this Windows x64 working-tree development snapshot' } else { 'Matching source for this Windows x64 single-file application' })
         "Git commit: $buildCommit"
-        'A separate DanmakuVoice source ZIP for this exact commit must be offered alongside the direct EXE.'
-        'It contains application source, build scripts, Cargo.lock, and the verified Windows x64 normal/build Rust .crate archives.'
+        $(if ($DevelopmentSnapshot) { "The commit is only the base. Matching working-tree SHA-256: $snapshotId" } else { 'A separate DanmakuVoice source ZIP for this exact commit must be offered alongside the direct EXE.' })
+        'It contains application source, build scripts, Cargo.lock, and all verified locked Rust .crate archives.'
         'The direct EXE, audit ZIP and matching source ZIP must pass scripts/verify-bundle-pair.ps1 before distribution.'
         'The FFmpeg 9.0.2 source archive and LGPL materials are included under third-party/FFmpeg/ in this audit ZIP.'
         'If the matching source ZIP is unavailable at the distribution location, request it from the distributor.'
+        $(if ($DevelopmentSnapshot) { 'DEVELOPMENT SNAPSHOT: the commit above is only the base; WORKTREE-SOURCE.json identifies uncommitted sources. Not a formal release.' })
     ) | Set-Content -LiteralPath (Join-Path $stage 'SOURCE-AVAILABILITY.txt') -Encoding UTF8
     $rustPackages = @(Write-RustSpdx (Join-Path $stage 'third-party\Rust\DEPENDENCIES.spdx.json') $cargoPath)
     $licenseBlockers = @(Copy-RustNotices $rustPackages $stage)
@@ -500,6 +527,10 @@ try {
     $extractedBytes = ($unpackedFiles | Measure-Object Length -Sum).Sum
     if ($zipBytes -ge 50000000 -or $extractedBytes -ge 50000000) {
         throw "Audit package reached the 50 MB cap: zip=$zipBytes extracted=$extractedBytes"
+    }
+    if ($DevelopmentSnapshot) {
+        & python (Join-Path $PSScriptRoot 'source_inventory.py') verify --root $repoRoot --manifest (Join-Path $stage 'WORKTREE-SOURCE.json')
+        if ($LASTEXITCODE -ne 0) { throw 'Working-tree source changed during audit packaging' }
     }
     [IO.File]::Copy($exe, $OutputExe, $false)
     $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash

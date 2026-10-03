@@ -4,7 +4,8 @@ param(
     [string]$FfmpegSourceArchive,
     [string]$FfmpegCopying,
     [string]$FfmpegLicenseDescription,
-    [switch]$RequireCleanCheckout
+    [switch]$RequireCleanCheckout,
+    [switch]$DevelopmentSnapshot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,9 @@ if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($repoTop) -ne $repoRoot) {
 $fullCommit = (& git -C $repoRoot rev-parse --verify "$Commit^{commit}").Trim()
 if ($LASTEXITCODE -ne 0 -or $fullCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Not a Git commit: $Commit"
+}
+if ($DevelopmentSnapshot -and $RequireCleanCheckout) {
+    throw 'DevelopmentSnapshot and RequireCleanCheckout are mutually exclusive'
 }
 if ($RequireCleanCheckout) {
     $head = (& git -C $repoRoot rev-parse HEAD).Trim()
@@ -55,12 +59,25 @@ if (Test-Path -LiteralPath $OutputZip) { throw "Output already exists: $OutputZi
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $OutputZip) -Force | Out-Null
 
-$tracked = @(& git -C $repoRoot ls-tree -r --name-only $fullCommit)
-if ($LASTEXITCODE -ne 0 -or $tracked.Count -eq 0) { throw 'Could not list committed source files' }
+$snapshotJson = $null
+if ($DevelopmentSnapshot) {
+    $snapshotJson = (& python (Join-Path $PSScriptRoot 'source_inventory.py') inventory --root $repoRoot) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not identify development working-tree sources' }
+    $snapshot = $snapshotJson | ConvertFrom-Json
+    if ($snapshot.baseCommit -ne $fullCommit) { throw 'DevelopmentSnapshot Commit must be the current HEAD base commit' }
+    $tracked = @($snapshot.files | ForEach-Object { $_.path })
+} else {
+    $tracked = @(& git -C $repoRoot ls-tree -r --name-only $fullCommit)
+    if ($LASTEXITCODE -ne 0 -or $tracked.Count -eq 0) { throw 'Could not list committed source files' }
+}
 $manifestPath = 'third-party/license-supplements/manifest.json'
 if ($manifestPath -notin $tracked) { throw 'The committed Rust license supplement manifest is required' }
-$manifestJson = (& git -C $repoRoot show "${fullCommit}:$manifestPath") -join "`n"
-if ($LASTEXITCODE -ne 0) { throw 'Could not read committed Rust license supplement manifest' }
+if ($DevelopmentSnapshot) {
+    $manifestJson = Get-Content -LiteralPath (Join-Path $repoRoot $manifestPath) -Raw
+} else {
+    $manifestJson = (& git -C $repoRoot show "${fullCommit}:$manifestPath") -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read committed Rust license supplement manifest' }
+}
 $manifest = $manifestJson | ConvertFrom-Json
 if ($manifest.schemaVersion -ne 1) { throw 'Unsupported Rust license supplement manifest version' }
 $supplementPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -241,7 +258,7 @@ function Write-DeterministicSourceZip([string]$sourceRoot, [string]$outputZip) {
             $timestamp = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
             foreach ($relative in $relativePaths) {
                 $entry = $zip.CreateEntry(
-                    "$rootName/$relative", [IO.Compression.CompressionLevel]::NoCompression
+                    "$rootName/$relative", [IO.Compression.CompressionLevel]::Optimal
                 )
                 $entry.LastWriteTime = $timestamp
                 $input = [IO.File]::OpenRead((Join-Path $sourceRoot $relative.Replace('/', '\')))
@@ -270,11 +287,24 @@ try {
     New-Item -ItemType Directory -Path $scratch -Force | Out-Null
     # Git for Windows may apply core.autocrlf to git archive output. Export
     # committed blob bytes unchanged so SHA-pinned license texts stay exact.
-    $gitArgs = @('-c', 'core.autocrlf=false', '-C', $repoRoot, 'archive', '--format=zip', "--output=$archive",
-        "--prefix=DanmakuVoice-source-$shortCommit/", $fullCommit) + $tracked
-    & git @gitArgs
-    if ($LASTEXITCODE -ne 0) { throw "Git archive failed: $LASTEXITCODE" }
-    Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
+    if ($DevelopmentSnapshot) {
+        New-Item -ItemType Directory -Path $sourceRoot -Force | Out-Null
+        foreach ($relative in $tracked) {
+            $destination = Join-Path $sourceRoot $relative.Replace('/', '\')
+            New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $repoRoot $relative.Replace('/', '\')) -Destination $destination
+        }
+        $snapshotPath = Join-Path $sourceRoot 'WORKTREE-SOURCE.json'
+        Set-Content -LiteralPath $snapshotPath -Value $snapshotJson -Encoding utf8NoBOM
+        & python (Join-Path $PSScriptRoot 'source_inventory.py') verify --root $sourceRoot --manifest $snapshotPath
+        if ($LASTEXITCODE -ne 0) { throw 'Development source changed while copying the working tree' }
+    } else {
+        $gitArgs = @('-c', 'core.autocrlf=false', '-C', $repoRoot, 'archive', '--format=zip', "--output=$archive",
+            "--prefix=DanmakuVoice-source-$shortCommit/", $fullCommit) + $tracked
+        & git @gitArgs
+        if ($LASTEXITCODE -ne 0) { throw "Git archive failed: $LASTEXITCODE" }
+        Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
+    }
     $embeddedFfmpeg = Join-Path $sourceRoot 'crates\desktop\embedded\ffmpeg.exe'
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $embeddedFfmpeg).Hash -ne
         '8FB7ECC11F4F7A441AE7075A81C984289250B166E78DEDF51900BBEB1A96EF4D') {
@@ -295,7 +325,12 @@ try {
 
     $provenance = @(
         "DanmakuVoice source commit: $fullCommit"
-        'Files are an explicit allowlist from this Git commit, not the working tree.'
+        $(if ($DevelopmentSnapshot) {
+            'Development snapshot: True'
+            'The Git commit above is only the base. WORKTREE-SOURCE.json identifies the included uncommitted working-tree files.'
+            "Working-tree snapshot SHA-256: $($snapshot.snapshotSha256)"
+            'DEVELOPMENT VALIDATION ONLY - NOT A FORMAL RELEASE'
+        } else { 'Files are an explicit allowlist from this Git commit, not the working tree.' })
         'The FFmpeg source, when present below third-party/FFmpeg, is the verified official 9.0.2 archive.'
         'Rust dependencies are pinned by Cargo.lock; the embedded FFmpeg binary is hash-pinned and corresponds to the included official source.'
     ) -join "`n"

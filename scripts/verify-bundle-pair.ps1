@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory = $true)][string]$PortableZip,
     [Parameter(Mandatory = $true)][string]$ApplicationExe,
     [Parameter(Mandatory = $true)][string]$SourceZip,
-    [Parameter(Mandatory = $true)][string]$ExpectedCommit
+    [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+    [switch]$DevelopmentSnapshot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,8 +65,17 @@ try {
     $cleanClaims = [regex]::Matches(
         $provenance, '(?m)^Checkout clean before build: ([^\r\n]*)\r?$'
     )
-    if ($cleanClaims.Count -ne 1 -or $cleanClaims[0].Groups[1].Value -cne 'True') {
+    if ($cleanClaims.Count -ne 1 -or
+        (-not $DevelopmentSnapshot -and $cleanClaims[0].Groups[1].Value -cne 'True')) {
         throw 'Audit ZIP must contain exactly one clean-checkout provenance claim set to True'
+    }
+    if ($DevelopmentSnapshot) {
+        & python (Join-Path $PSScriptRoot 'source_inventory.py') pair --audit $PortableZip --source $SourceZip --commit $ExpectedCommit
+        if ($LASTEXITCODE -ne 0) { throw 'Development binary/source correspondence failed' }
+    } elseif ($portable.GetEntry("${portablePrefix}WORKTREE-SOURCE.json") -or
+        $source.GetEntry("${sourcePrefix}WORKTREE-SOURCE.json") -or
+        $provenance -match '(?m)^Development snapshot: True\r*$') {
+        throw 'Development snapshots cannot pass formal release pairing'
     }
     $sourceCommit = [Text.Encoding]::UTF8.GetString(
         (Read-ZipBytes $source "${sourcePrefix}SOURCE-COMMIT.txt")
@@ -200,6 +210,7 @@ try {
     }
     [PSCustomObject]@{
         Commit = $ExpectedCommit
+        DevelopmentSnapshot = [bool]$DevelopmentSnapshot
         ApplicationSHA256 = $applicationHash
         CargoLockSHA256 = $lockHash
         RustCrates = $declared.Count

@@ -1,6 +1,59 @@
 use super::*;
 
 #[tokio::test]
+async fn language_change_persists_and_preserves_playback_and_existing_configuration() {
+    let (directory, app) = isolated(true);
+    app.dispatch(
+        "preferences.save",
+        json!({"preferences":{"master_volume":0.65,"muted":true,"appearance":"dark"}}),
+    )
+    .await
+    .unwrap();
+    let scheduler = scheduler::spawn(Arc::new(WaitingExecutor));
+    scheduler.start().await.unwrap();
+    app.lock().unwrap().scheduler = Some(scheduler.clone());
+    let before = app.snapshot().unwrap();
+    assert_eq!(before["preferences"]["language"], "zh-CN");
+    let changed = app
+        .dispatch("preferences.save", json!({"preferences":{"language":"en"}}))
+        .await
+        .unwrap();
+    assert_eq!(changed["preferences"]["language"], "en");
+    for key in ["rules", "presets", "bindings", "queue", "live"] {
+        assert_eq!(before[key], changed[key], "{key}");
+    }
+    assert_eq!(
+        changed["preferences"]["master_volume"],
+        before["preferences"]["master_volume"]
+    );
+    assert_eq!(changed["preferences"]["muted"], true);
+    assert_eq!(changed["preferences"]["appearance"], "dark");
+    assert!(scheduler.state().borrow().accepting);
+    assert!(
+        app.dispatch("preferences.save", json!({"preferences":{"language":"fr"}}))
+            .await
+            .is_err()
+    );
+    assert_eq!(app.snapshot().unwrap()["preferences"]["language"], "en");
+    assert!(scheduler.state().borrow().accepting);
+    app.stop(true).await.unwrap();
+    drop(app);
+    let reopened = Application::new(directory.path().to_path_buf(), true).unwrap();
+    assert_eq!(
+        reopened.snapshot().unwrap()["preferences"]["language"],
+        "en"
+    );
+    let chinese = reopened
+        .dispatch(
+            "preferences.save",
+            json!({"preferences":{"language":"zh-CN"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chinese["preferences"]["language"], "zh-CN");
+}
+
+#[tokio::test]
 async fn command_failure_codes_survive_snapshot_without_overriding_typed_causes() {
     let (_directory, app) = isolated(true);
     let error = app.dispatch("connections.save", json!({"connection":{
@@ -113,6 +166,145 @@ async fn polling_omits_unchanged_configuration_and_refreshes_after_edits() {
         app.snapshot_since(Some(u64::MAX)).unwrap()["config_unchanged"],
         false
     );
+}
+
+#[tokio::test]
+async fn runtime_commands_keep_the_configuration_revision_and_error_status_fresh() {
+    let (_directory, app) = isolated(true);
+    let revision = app.snapshot().unwrap()["config_revision"].as_u64().unwrap();
+    for action in [
+        "queue.skip",
+        "queue.clear",
+        "queue.stop",
+        "live.disconnect",
+        "bili.qr.cancel",
+        "doubao.qr.cancel",
+        "migration.cancel",
+    ] {
+        let result = app.dispatch(action, json!({})).await.unwrap();
+        assert_eq!(result["config_revision"], revision, "{action}");
+        assert_eq!(
+            app.snapshot_since(Some(revision)).unwrap()["config_unchanged"],
+            true,
+            "{action}"
+        );
+    }
+    assert!(app.dispatch("queue.jump", json!({"id":999})).await.is_err());
+    let error = app.snapshot_since(Some(revision)).unwrap();
+    assert_eq!(error["config_unchanged"], true);
+    assert_eq!(error["status"]["error"], true);
+    let saved = app
+        .dispatch(
+            "preferences.save",
+            json!({"preferences":{"master_volume":0.45}}),
+        )
+        .await
+        .unwrap();
+    assert_ne!(saved["config_revision"], revision);
+    assert_eq!(saved["status"]["error"], false);
+}
+
+#[tokio::test]
+async fn runtime_dispatch_cache_comparison_uses_identical_configuration_and_load() {
+    let (_directory, app) = isolated(true);
+    app.snapshot().unwrap();
+    let repeats = 200;
+    // This reproduces the previous unconditional invalidation path while using
+    // exactly the same command, configuration, process and build as the cache.
+    let previous_start = Instant::now();
+    for _ in 0..repeats {
+        app.lock().unwrap().config_snapshot = None;
+        app.dispatch("queue.skip", json!({})).await.unwrap();
+    }
+    let previous = previous_start.elapsed();
+    let revision = app.snapshot().unwrap()["config_revision"].as_u64().unwrap();
+    let cached_start = Instant::now();
+    for _ in 0..repeats {
+        app.dispatch("queue.skip", json!({})).await.unwrap();
+    }
+    let cached = cached_start.elapsed();
+    assert_eq!(app.snapshot().unwrap()["config_revision"], revision);
+    println!(
+        "runtime dispatch {repeats} calls: previous invalidation={}us, cache={}us",
+        previous.as_micros(),
+        cached.as_micros()
+    );
+}
+
+#[tokio::test]
+async fn pending_fish_verification_cannot_restore_credentials_after_a_clear_or_stop() {
+    for action in ["connections.clear_credential", "data.clear", "queue.stop"] {
+        let (_directory, app) = isolated(false);
+        let connection = ServiceConnection {
+            id: "review-fish".into(),
+            name: "Fish Audio".into(),
+            settings: ConnectionSettings::FishAudio { timeout_secs: 30 },
+            has_credential: false,
+        };
+        app.lock()
+            .unwrap()
+            .store
+            .save_connection(&connection)
+            .unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let pending = app.clone();
+        let login = tokio::spawn(async move {
+            pending
+                .connect_fish_with_verify(
+                    &mut json!({"connection_id":"review-fish","credential":"sk-test-only-placeholder"}),
+                    |_| async move {
+                        entered_tx.send(()).unwrap();
+                        release_rx.await.unwrap();
+                        Ok(())
+                    },
+                )
+                .await
+        });
+        entered_rx.await.unwrap();
+        app.dispatch(action, json!({"id":"review-fish","confirmed":true}))
+            .await
+            .unwrap();
+        release_tx.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), login)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("登录已取消"), "{action}: {error}");
+        let state = app.lock().unwrap();
+        if action == "data.clear" {
+            assert!(state.store.connections().unwrap().is_empty());
+        } else {
+            assert!(
+                state
+                    .store
+                    .connection_credential("review-fish")
+                    .unwrap()
+                    .is_none(),
+                "{action}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejected_preferences_release_the_reconfiguration_guard() {
+    let (_directory, app) = isolated(true);
+    assert!(
+        app.dispatch("preferences.save", json!({"preferences":{"scale":9}}))
+            .await
+            .is_err()
+    );
+    assert!(!app.lock().unwrap().reconfiguring);
+    let saved = app
+        .dispatch(
+            "preferences.save",
+            json!({"preferences":{"master_volume":0.35}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved["preferences"]["master_volume"], 0.35_f32 as f64);
 }
 
 #[tokio::test]
@@ -454,6 +646,325 @@ fn isolated(disable_network: bool) -> (TempDir, Application) {
     (directory, app)
 }
 
+const GPT_STANDARD_SCHEMA: &str = r#"{"paths":{"/tts":{"post":{}},"/set_gpt_weights":{"get":{}},"/set_sovits_weights":{"get":{}}}}"#;
+const GPT_ATOMIC_STATUS: &str =
+    r#"{"protocol":1,"atomic_model_selection":true,"resident_model_reuse":true}"#;
+
+// Test-only HTTP listeners: random ports, GET metadata only, no model process.
+async fn gpt_status_server(
+    atomic: bool,
+    gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    seen: Option<tokio::sync::oneshot::Sender<()>>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut gate = gate;
+        let mut seen = seen;
+        let mut responses = 0;
+        while responses < if atomic { 1 } else { 2 } {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let size = socket.read(&mut request).await.unwrap();
+            if size == 0 {
+                continue; // TCP occupation check.
+            }
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(
+                request.starts_with("GET "),
+                "metadata probe mutated the service"
+            );
+            if let Some(seen) = seen.take() {
+                seen.send(()).unwrap();
+            }
+            if let Some(gate) = gate.take() {
+                gate.await.unwrap();
+            }
+            let (status, body) = if request.starts_with("GET /kinoko/status ") {
+                if atomic {
+                    ("200 OK", GPT_ATOMIC_STATUS)
+                } else {
+                    ("404 Not Found", "{}")
+                }
+            } else {
+                assert!(!atomic, "atomic identity must not require OpenAPI");
+                assert!(request.starts_with("GET /openapi.json "));
+                ("200 OK", GPT_STANDARD_SCHEMA)
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            responses += 1;
+        }
+    });
+    (endpoint, task)
+}
+
+async fn save_gpt_connection(app: &Application, endpoint: &str) {
+    app.dispatch(
+        "connections.save",
+        json!({"connection": {
+            "id":"gpt-status", "name":"GPT test", "settings": {
+                "provider":"gpt_sovits", "endpoint":endpoint, "timeout_secs":30
+            }, "has_credential":false
+        }}),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn local_service_stop_checks_queue_and_ownership_while_room_connects() {
+    let (_directory, app) = isolated(true);
+    app.lock().unwrap().connecting = true;
+    for provider in ["dots", "gpt_sovits"] {
+        let error = app
+            .dispatch("local_services.stop", json!({"provider":provider}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("此服务不是本应用启动"), "{error}");
+        assert!(app.lock().unwrap().connecting);
+    }
+
+    let scheduler = scheduler::spawn(Arc::new(WaitingExecutor));
+    scheduler.start().await.unwrap();
+    let preview = danmakuvoice_engine::rules::RulePreview::voice_audition(
+        VoicePreset {
+            id: "stop-service-test".into(),
+            name: "Test".into(),
+            connection_id: "dots".into(),
+            provider: Provider::Dots,
+            voice_id: "test".into(),
+            speed: 1.0,
+            volume: 1.0,
+            sovits: None,
+        },
+        "test",
+    )
+    .unwrap();
+    scheduler
+        .submit(preview, scheduler::JobOrigin::Audition)
+        .await
+        .unwrap();
+    app.lock().unwrap().scheduler = Some(scheduler.clone());
+    let error = app
+        .dispatch("local_services.stop", json!({"provider":"dots"}))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("请先等待播报队列结束或停止全部播报"),
+        "{error}"
+    );
+    scheduler.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn gpt_external_start_refresh_and_stop_are_observed_without_ownership() {
+    let (_directory, app) = isolated(false);
+    for atomic in [false, true] {
+        let (endpoint, server) = gpt_status_server(atomic, None, None).await;
+        save_gpt_connection(&app, &endpoint).await;
+        let before = app.snapshot().unwrap();
+        assert_eq!(before["local_services"]["gpt_sovits"]["state"], "unknown");
+        let ready = app
+            .dispatch("local_services.check", json!({"provider":"gpt_sovits"}))
+            .await
+            .unwrap();
+        assert_eq!(ready["local_services"]["gpt_sovits"]["state"], "ready");
+        assert_eq!(ready["local_services"]["gpt_sovits"]["endpoint"], endpoint);
+        assert_eq!(ready["local_services"]["gpt_sovits"]["owned"], false);
+        server.await.unwrap();
+        let stopped = app
+            .dispatch("local_services.check", json!({"provider":"gpt_sovits"}))
+            .await
+            .unwrap();
+        assert_eq!(stopped["local_services"]["gpt_sovits"]["state"], "stopped");
+        assert!(
+            app.dispatch("local_services.stop", json!({"provider":"gpt_sovits"}))
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn gpt_late_probe_cannot_overwrite_changed_endpoint_or_manual_stop() {
+    for change_address in [true, false] {
+        let (_directory, app) = isolated(false);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let (endpoint, server) = gpt_status_server(true, Some(release_rx), Some(seen_tx)).await;
+        save_gpt_connection(&app, &endpoint).await;
+        let checking_app = app.clone();
+        let check = tokio::spawn(async move {
+            checking_app
+                .dispatch("local_services.check", json!({"provider":"gpt_sovits"}))
+                .await
+                .unwrap()
+        });
+        seen_rx.await.unwrap();
+        if change_address {
+            save_gpt_connection(&app, "http://127.0.0.1:9").await;
+        } else {
+            // Emulate a lifecycle transition without starting/stopping a process.
+            app.lock().unwrap().local_services.gpt_sovits.stop_manual();
+        }
+        release_tx.send(()).unwrap();
+        let result = check.await.unwrap();
+        assert_eq!(
+            result["local_services"]["gpt_sovits"]["state"],
+            if change_address { "unknown" } else { "stopped" }
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn gpt_explicit_start_rechecks_external_service_and_stale_start_never_runs() {
+    let (_directory, app) = isolated(false);
+    let (endpoint, server) = gpt_status_server(true, None, None).await;
+    save_gpt_connection(&app, &endpoint).await;
+    app.dispatch("local_services.start", json!({"provider":"gpt_sovits"}))
+        .await
+        .unwrap();
+    server.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while app.snapshot().unwrap()["local_services"]["gpt_sovits"]["state"] != "ready" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.snapshot().unwrap()["local_services"]["gpt_sovits"]["owned"],
+        false
+    );
+    let old_generation = app.lock().unwrap().local_services.gpt_sovits.generation;
+    app.lock().unwrap().local_services.gpt_sovits.stop_manual();
+    app.ensure_local_service(Kind::GptSovits, &endpoint, false, Some(old_generation))
+        .await;
+    assert_eq!(
+        app.snapshot().unwrap()["local_services"]["gpt_sovits"]["state"],
+        "stopped"
+    );
+}
+
+#[tokio::test]
+async fn gpt_probe_timeout_is_unknown_and_never_launches_or_adopts_listener() {
+    let (_directory, app) = isolated(false);
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (endpoint, server) = gpt_status_server(true, Some(release_rx), None).await;
+    save_gpt_connection(&app, &endpoint).await;
+    let result = app
+        .dispatch("local_services.check", json!({"provider":"gpt_sovits"}))
+        .await
+        .unwrap();
+    assert_eq!(result["local_services"]["gpt_sovits"]["state"], "unknown");
+    assert!(
+        result["local_services"]["gpt_sovits"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("超时")
+    );
+    assert_eq!(result["local_services"]["gpt_sovits"]["owned"], false);
+    server.abort();
+}
+
+#[tokio::test]
+async fn gpt_older_observation_cannot_replace_newer_ready_result() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_directory, app) = isolated(false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut requests = 0;
+        let mut first = None;
+        let mut seen_tx = Some(seen_tx);
+        let mut release_rx = Some(release_rx);
+        while requests < 2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let size = socket.read(&mut request).await.unwrap();
+            if size == 0 {
+                continue;
+            }
+            assert!(request[..size].starts_with(b"GET /kinoko/status "));
+            if requests == 0 {
+                let release = release_rx.take().unwrap();
+                first = Some(tokio::spawn(async move {
+                    release.await.unwrap();
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\n\r\n{}",
+                        )
+                        .await
+                        .unwrap();
+                }));
+                seen_tx.take().unwrap().send(()).unwrap();
+            } else {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{GPT_ATOMIC_STATUS}",
+                    GPT_ATOMIC_STATUS.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests += 1;
+        }
+        first.unwrap().await.unwrap();
+    });
+    save_gpt_connection(&app, &endpoint).await;
+    let old_app = app.clone();
+    let old_check = tokio::spawn(async move {
+        old_app
+            .dispatch("local_services.check", json!({"provider":"gpt_sovits"}))
+            .await
+            .unwrap()
+    });
+    seen_rx.await.unwrap();
+    let newest = app
+        .dispatch("local_services.check", json!({"provider":"gpt_sovits"}))
+        .await
+        .unwrap();
+    assert_eq!(newest["local_services"]["gpt_sovits"]["state"], "ready");
+    release_tx.send(()).unwrap();
+    let old_result = old_check.await.unwrap();
+    assert_eq!(old_result["local_services"]["gpt_sovits"]["state"], "ready");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn automatic_local_observations_preserve_unrelated_diagnostics() {
+    let (_directory, app) = isolated(false);
+    let (endpoint, server) = gpt_status_server(true, None, None).await;
+    save_gpt_connection(&app, &endpoint).await;
+    app.dispatch("unknown.operation", json!({}))
+        .await
+        .unwrap_err();
+    let previous = app.snapshot().unwrap()["status"].clone();
+    app.dispatch(
+        "local_services.check",
+        json!({"provider":"gpt_sovits", "connection_id":"missing", "automatic":true}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(app.snapshot().unwrap()["status"], previous);
+    let ready = app
+        .dispatch(
+            "local_services.check",
+            json!({"provider":"gpt_sovits", "automatic":true}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready["local_services"]["gpt_sovits"]["state"], "ready");
+    assert_eq!(ready["status"], previous);
+    server.await.unwrap();
+}
+
 async fn save_test_voice(app: &Application) {
     app.dispatch("connections.save", json!({"connection":{"id":"local","name":"Local","settings":{"provider":"dots","endpoint":"http://127.0.0.1:9881","timeout_secs":180},"has_credential":false}})).await.unwrap();
     app.dispatch("presets.save", json!({"preset":{"id":"voice","name":"Voice","connection_id":"local","provider":"dots","voice_id":"reference.wav","speed":1.0,"volume":1.0,"sovits":null}})).await.unwrap();
@@ -763,7 +1274,15 @@ async fn snapshot_reuses_configuration_but_reads_fresh_runtime_state() {
     assert_eq!(polled["queue"]["accepting"], true);
     assert_eq!(polled["status"]["message"], "测试状态");
 
-    let updated = app.dispatch("bili.qr.cancel", json!({})).await.unwrap();
+    let cancelled = app.dispatch("bili.qr.cancel", json!({})).await.unwrap();
+    assert_eq!(cancelled["qr"]["status"], "idle");
+    assert_eq!(cancelled["live_settings"], initial["live_settings"]);
+    // A runtime-only QR cancellation does not invalidate persisted settings.
+    // The settings command is the configuration boundary being simulated.
+    let updated = app
+        .dispatch("live.save", json!({"room_id":991}))
+        .await
+        .unwrap();
     assert_eq!(updated["live_settings"]["room_id"], 991);
     assert_eq!(updated["setup"]["room_id"], 991);
     assert_eq!(updated["qr"]["status"], "idle");
@@ -1152,6 +1671,41 @@ async fn explicit_stop_cancels_pending_default_device_reconnect() {
 }
 
 #[tokio::test]
+async fn settings_reconnect_yields_to_a_newer_explicit_stop_before_opening_the_queue() {
+    let (_directory, app) = isolated(false);
+    app.dispatch("live.save", json!({"room_id":123,"authenticated":true}))
+        .await
+        .unwrap();
+    let gate = app.lock().unwrap().activity_gate.clone();
+    let held = gate.lock().await;
+    let previous_epoch = app.lock().unwrap().explicit_stop_epoch;
+    let restarting = app.clone();
+    let reconnect = tokio::spawn(async move {
+        restarting
+            .connect_with_intent(None, None, Some(previous_epoch))
+            .await
+    });
+    tokio::task::yield_now().await;
+    let stopping = app.clone();
+    let stop = tokio::spawn(async move { stopping.dispatch("queue.stop", json!({})).await });
+    while !app.lock().unwrap().stopping {
+        tokio::task::yield_now().await;
+    }
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        reconnect.await.unwrap().unwrap();
+        stop.await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
+    let state = app.lock().unwrap();
+    assert_eq!(state.explicit_stop_epoch, previous_epoch + 1);
+    assert!(!state.connecting);
+    assert!(state.live.is_none());
+    assert!(state.scheduler.is_none());
+}
+
+#[tokio::test]
 async fn stop_all_stays_closed_after_an_inflight_starter_reopens_queue() {
     let (_directory, app) = isolated(false);
     let scheduler = scheduler::spawn(Arc::new(WaitingExecutor));
@@ -1512,7 +2066,7 @@ async fn local_service_actions_target_the_selected_voice_connection() {
         "id":"selected-voice","name":"目标音色","connection_id":"selected","provider":"dots","voice_id":"reference.wav","speed":1.0,"volume":1.0,"sovits":null
     }})).await.unwrap();
     assert_eq!(
-        app.local_service_endpoint(Kind::Dots).unwrap(),
+        app.local_service_endpoint(Kind::Dots, None).unwrap(),
         "http://127.0.0.1:19881"
     );
 }
@@ -1532,7 +2086,7 @@ fn expired_bilibili_session_has_an_actionable_desktop_state() {
 async fn stale_auto_start_does_not_restart_an_unselected_local_service() {
     let (_directory, app) = isolated(false);
     let before = app.lock().unwrap().local_services.dots.generation;
-    app.ensure_local_service(Kind::Dots, "http://127.0.0.1:9881", true)
+    app.ensure_local_service(Kind::Dots, "http://127.0.0.1:9881", true, None)
         .await;
     let state = app.lock().unwrap();
     assert_eq!(state.local_services.dots.generation, before);
@@ -1540,68 +2094,144 @@ async fn stale_auto_start_does_not_restart_an_unselected_local_service() {
 }
 
 #[tokio::test]
-async fn obsolete_auto_local_service_waits_for_frozen_jobs_and_bound_voices() {
-    let (directory, app) = isolated(true);
-    save_test_voice(&app).await;
-    {
-        let mut state = app.lock().unwrap();
-        state
-            .local_services
-            .dots
-            .set("checking", "正在检查本地服务");
-        state.local_services.gpt_sovits.start_manual();
-    }
-    app.retire_unused_auto_local_services().await;
-    {
-        let state = app.lock().unwrap();
-        assert_eq!(state.local_services.dots.state, "checking");
-        assert_eq!(state.local_services.gpt_sovits.state, "checking");
-    }
+async fn invalid_stale_service_task_does_not_overwrite_manual_stop_or_new_selection() {
+    let (_directory, app) = isolated(false);
+    let generation = app.lock().unwrap().local_services.dots.generation;
+    app.lock().unwrap().local_services.dots.stop_manual();
+    app.ensure_local_service(Kind::Dots, "invalid old endpoint", false, Some(generation))
+        .await;
+    assert_eq!(app.lock().unwrap().local_services.dots.state, "stopped");
 
-    let scheduler = scheduler::spawn(Arc::new(WaitingExecutor));
-    scheduler.start().await.unwrap();
-    let preview = app
-        .lock()
-        .unwrap()
-        .store
-        .voice_audition_preview("voice", "冻结的旧音色")
-        .unwrap();
-    scheduler
-        .submit(preview, JobOrigin::Audition)
-        .await
-        .unwrap();
-    let live = Arc::new(LiveController::new(directory.path(), scheduler.clone(), None).unwrap());
-    {
-        let mut state = app.lock().unwrap();
-        state.scheduler = Some(scheduler.clone());
-        state.live = Some(live);
-        let mut rules = state.store.load_rules().unwrap();
-        rules.default_preset_id = None;
-        rules.default_preset_explicitly_cleared = true;
-        state.store.save_rules(&rules).unwrap();
-    }
-    app.retire_unused_auto_local_services().await;
-    assert_eq!(app.lock().unwrap().local_services.dots.state, "checking");
-    scheduler.stop_all().await.unwrap();
+    let (_directory, app) = isolated(false);
+    app.ensure_local_service(Kind::Dots, "invalid old endpoint", true, None)
+        .await;
+    assert_eq!(
+        app.lock().unwrap().local_services.dots.state,
+        "unconfigured"
+    );
+}
+
+#[tokio::test]
+async fn switching_or_clearing_the_primary_keeps_started_local_services() {
+    let (_directory, app) = isolated(true);
+    save_test_voice(&app).await;
     app.dispatch(
-        "bindings.save",
-        json!({"id":"viewer","binding":{"platform":"bilibili","user_id":77,"user_name":null,"legacy_user_name":null,"preset_id":"voice","enabled":true}}),
+        "connections.save",
+        json!({"connection":{
+            "id":"gpt","name":"GPT-SoVITS","settings":{"provider":"gpt_sovits",
+            "endpoint":"http://127.0.0.1:19880","timeout_secs":30},"has_credential":false
+        }}),
     )
     .await
     .unwrap();
-    app.retire_unused_auto_local_services().await;
-    assert_eq!(app.lock().unwrap().local_services.dots.state, "checking");
-    app.dispatch("bindings.delete", json!({"id":"viewer","confirmed":true}))
+    app.dispatch(
+        "presets.save",
+        json!({"preset":{
+            "id":"gpt-voice","name":"GPT voice","connection_id":"gpt",
+            "provider":"gpt_sovits","voice_id":"role","speed":1.0,"volume":1.0,"sovits":null
+        }}),
+    )
+    .await
+    .unwrap();
+    for phase in ["checking", "starting", "ready"] {
+        {
+            let mut state = app.lock().unwrap();
+            state
+                .local_services
+                .dots
+                .set(phase, "Existing dots service");
+            state
+                .local_services
+                .gpt_sovits
+                .set(phase, "Existing GPT service");
+        }
+        let before = app.snapshot().unwrap()["local_services"].clone();
+        for primary in [Some("gpt-voice"), Some("voice"), None] {
+            app.dispatch("presets.default", json!({"id":primary}))
+                .await
+                .unwrap();
+            // Exercise the same automatic-start path as dispatch/startup,
+            // even after queues and bindings no longer reference either service.
+            app.auto_start_preferred_service().await;
+            assert_eq!(app.snapshot().unwrap()["local_services"], before);
+        }
+    }
+    // Exit still performs the owned-service shutdown path.
+    app.stop_owned_local_services();
+    let snapshot = app.snapshot().unwrap();
+    assert_eq!(snapshot["local_services"]["dots"]["state"], "stopped");
+    assert_eq!(snapshot["local_services"]["gpt_sovits"]["state"], "stopped");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn primary_switch_keeps_owned_processes_until_explicit_stop_or_exit() {
+    let (_directory, app) = isolated(true);
+    save_test_voice(&app).await;
+    app.dispatch(
+        "connections.save",
+        json!({"connection":{
+            "id":"gpt","name":"GPT-SoVITS","settings":{"provider":"gpt_sovits",
+            "endpoint":"http://127.0.0.1:19880","timeout_secs":30},"has_credential":false
+        }}),
+    )
+    .await
+    .unwrap();
+    app.dispatch(
+        "presets.save",
+        json!({"preset":{
+            "id":"gpt-voice","name":"GPT voice","connection_id":"gpt",
+            "provider":"gpt_sovits","voice_id":"role","speed":1.0,"volume":1.0,"sovits":null
+        }}),
+    )
+    .await
+    .unwrap();
+    let dots_directory = tempfile::tempdir().unwrap();
+    let gpt_directory = tempfile::tempdir().unwrap();
+    {
+        let mut state = app.lock().unwrap();
+        state.local_services.dots = local_service::tests::running_owned_service_fixture(
+            dots_directory.path(),
+            Kind::Dots,
+            "http://127.0.0.1:9881",
+        );
+        state.local_services.gpt_sovits = local_service::tests::running_owned_service_fixture(
+            gpt_directory.path(),
+            Kind::GptSovits,
+            "http://127.0.0.1:19880",
+        );
+    }
+    for primary in [Some("gpt-voice"), Some("voice"), None] {
+        app.dispatch("presets.default", json!({"id":primary}))
+            .await
+            .unwrap();
+        app.auto_start_preferred_service().await;
+        let snapshot = app.snapshot().unwrap();
+        for provider in ["dots", "gpt_sovits"] {
+            assert_eq!(snapshot["local_services"][provider]["owned"], true);
+            assert_eq!(snapshot["local_services"][provider]["state"], "ready");
+        }
+    }
+    app.dispatch("local_services.stop", json!({"provider":"gpt_sovits"}))
         .await
         .unwrap();
-    app.lock().unwrap().audition_starting = true;
-    app.retire_unused_auto_local_services().await;
-    assert_eq!(app.lock().unwrap().local_services.dots.state, "checking");
-    app.lock().unwrap().audition_starting = false;
-    app.retire_unused_auto_local_services().await;
-    let state = app.lock().unwrap();
-    assert_eq!(state.local_services.dots.state, "stopped");
-    assert_eq!(state.local_services.gpt_sovits.state, "checking");
+    let snapshot = app.snapshot().unwrap();
+    assert_eq!(snapshot["local_services"]["gpt_sovits"]["owned"], false);
+    assert_eq!(
+        snapshot["local_services"]["gpt_sovits"]["manual_stopped"],
+        true
+    );
+    assert_eq!(snapshot["local_services"]["dots"]["owned"], true);
+    app.auto_start_preferred_service().await;
+    assert_eq!(
+        app.snapshot().unwrap()["local_services"]["gpt_sovits"]["owned"],
+        false
+    );
+    app.stop_owned_local_services();
+    assert_eq!(
+        app.snapshot().unwrap()["local_services"]["dots"]["owned"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -1879,4 +2509,84 @@ async fn local_tts_directory_persists_and_reset_keeps_original_references() {
     );
     assert!(!owned_cache.exists());
     assert_eq!(std::fs::read(unrelated_cache).unwrap(), b"unrelated cache");
+}
+
+#[tokio::test]
+async fn standalone_emote_filter_roundtrips_rules_ipc_and_preserves_old_client_updates() {
+    let (directory, app) = isolated(true);
+    let before = app.snapshot().unwrap();
+    assert_eq!(before["rules"]["events"]["filter_bilibili_emoticons"], true);
+    let mut rules = before["rules"].clone();
+    rules["events"]["filter_bilibili_emoticons"] = json!(true);
+    let changed = app
+        .dispatch("rules.save", json!({"rules":rules}))
+        .await
+        .unwrap();
+    assert_eq!(
+        changed["rules"]["events"]["filter_bilibili_emoticons"],
+        true
+    );
+    for key in ["queue", "live", "preferences", "presets", "bindings"] {
+        assert_eq!(changed[key], before[key], "{key}");
+    }
+    drop(app);
+    let reopened = Application::new(directory.path().to_owned(), true).unwrap();
+    let mut old = reopened.snapshot().unwrap()["rules"].clone();
+    assert_eq!(old["events"]["filter_bilibili_emoticons"], true);
+    old["events"]
+        .as_object_mut()
+        .unwrap()
+        .remove("filter_bilibili_emoticons");
+    let retained = reopened
+        .dispatch("rules.save", json!({"rules":old}))
+        .await
+        .unwrap();
+    assert_eq!(
+        retained["rules"]["events"]["filter_bilibili_emoticons"],
+        true
+    );
+    let mut rules = retained["rules"].clone();
+    rules["events"]["filter_bilibili_emoticons"] = json!(false);
+    let disabled = reopened
+        .dispatch("rules.save", json!({"rules":rules}))
+        .await
+        .unwrap();
+    assert_eq!(
+        disabled["rules"]["events"]["filter_bilibili_emoticons"],
+        false
+    );
+    drop(reopened);
+    let reopened = Application::new(directory.path().to_owned(), true).unwrap();
+    let mut old = reopened.snapshot().unwrap()["rules"].clone();
+    assert_eq!(old["events"]["filter_bilibili_emoticons"], false);
+    old["events"]
+        .as_object_mut()
+        .unwrap()
+        .remove("filter_bilibili_emoticons");
+    let retained = reopened
+        .dispatch("rules.save", json!({"rules":old}))
+        .await
+        .unwrap();
+    assert_eq!(
+        retained["rules"]["events"]["filter_bilibili_emoticons"],
+        false
+    );
+}
+
+#[test]
+fn speech_restart_keeps_chat_in_order_and_bounded() {
+    let event = |n: usize| LiveEvent::danmaku(1, Some(n as u64), "观众", &n.to_string());
+    let carried: Vec<_> = (0..3).map(event).collect();
+    let current: Vec<_> = (3..5).map(event).collect();
+    let messages =
+        |events: &[LiveEvent]| events.iter().map(|e| e.message.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        messages(&carried_chat(&carried, &current)),
+        ["0", "1", "2", "3", "4"]
+    );
+    let many: Vec<_> = (0..LIVE_RECENT_EVENT_LIMIT + 5).map(event).collect();
+    let bounded = carried_chat(&many, &current);
+    assert_eq!(bounded.len(), LIVE_RECENT_EVENT_LIMIT);
+    assert_eq!(bounded.last().unwrap().message, "4");
+    assert!(carried_chat(&[], &[]).is_empty());
 }

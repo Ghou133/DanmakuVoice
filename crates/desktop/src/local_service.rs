@@ -18,6 +18,7 @@ use url::Url;
 const DOTS_VOICE_SHIM: &str = include_str!("../python/dots_voice_shim.py");
 const DOTS_CAPABILITY_VERSION: &str = "danmakuvoice-dots-paths-v1";
 const LOCAL_SERVICE_LOG_LIMIT: usize = 128 * 1024;
+const LOCAL_SERVICE_LOG_FILES: usize = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
@@ -45,6 +46,7 @@ impl Kind {
 #[derive(Serialize)]
 pub struct ServiceView<'a> {
     pub directory: Option<&'a Path>,
+    pub endpoint: Option<&'a str>,
     pub state: &'static str,
     pub message: String,
     pub owned: bool,
@@ -58,8 +60,9 @@ pub struct ServiceState {
     process: Option<OwnedProcess>,
     owned_port: Option<u16>,
     pub generation: u64,
+    pub observation: u64,
+    pub endpoint: Option<String>,
     manual_stopped: bool,
-    manually_started: bool,
 }
 
 impl ServiceState {
@@ -80,14 +83,16 @@ impl ServiceState {
             process: None,
             owned_port: None,
             generation: 0,
+            observation: 0,
+            endpoint: None,
             manual_stopped: false,
-            manually_started: false,
         }
     }
 
     pub fn view(&self) -> ServiceView<'_> {
         ServiceView {
             directory: self.directory.as_deref(),
+            endpoint: self.endpoint.as_deref(),
             state: self.state,
             message: if self.state == "failed" {
                 danmakuvoice_engine::error_codes::tag(&self.message, "DV-L01")
@@ -104,11 +109,19 @@ impl ServiceState {
         self.message = message.into();
     }
 
+    /// Invalidate observations without adopting or stopping an external server.
+    pub fn observe_endpoint(&mut self, endpoint: &str) {
+        if self.endpoint.as_deref() != Some(endpoint) {
+            self.endpoint = Some(endpoint.to_owned());
+            self.generation = self.generation.wrapping_add(1);
+            self.set("unknown", "服务地址已更新，尚未检查服务");
+        }
+    }
+
     pub fn stop_owned(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.process = None;
         self.owned_port = None;
-        self.manually_started = false;
         self.set("stopped", "本应用启动的服务已停止");
     }
 
@@ -120,24 +133,14 @@ impl ServiceState {
 
     pub fn start_manual(&mut self) {
         self.manual_stopped = false;
-        self.manually_started = true;
         self.generation = self.generation.wrapping_add(1);
         self.set("checking", "正在检查本地服务");
     }
 
     pub fn resume_auto_start(&mut self) {
         self.manual_stopped = false;
-        self.manually_started = false;
         self.generation = self.generation.wrapping_add(1);
         self.set("checking", "正在检查本地服务");
-    }
-
-    pub fn retire_auto_if_unused(&mut self) {
-        if !self.manually_started
-            && (self.process.is_some() || matches!(self.state, "checking" | "starting"))
-        {
-            self.stop_owned();
-        }
     }
 
     pub fn auto_start_allowed(&self) -> bool {
@@ -148,7 +151,6 @@ impl ServiceState {
         if self.process.as_mut().is_some_and(OwnedProcess::exited) {
             self.process = None;
             self.owned_port = None;
-            self.manually_started = false;
             self.set("failed", "本地服务进程已退出，请检查安装目录");
             true
         } else {
@@ -271,6 +273,7 @@ pub enum Health {
     Unready,
     LegacyDots,
     Foreign,
+    Timeout,
 }
 
 /// A short, read-only check that never sends text or credentials. A listener
@@ -305,6 +308,25 @@ pub async fn probe(kind: Kind, endpoint: &Endpoint) -> Health {
     else {
         return Health::Foreign;
     };
+    if kind == Kind::GptSovits {
+        return match tokio::time::timeout(
+            Duration::from_millis(1_500),
+            danmakuvoice_engine::tts::sovits::service_status(
+                &client,
+                endpoint.base.as_str(),
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Health::Ready,
+            Ok(Err(danmakuvoice_engine::tts::TtsError::HttpStatus { status: 503, .. })) => {
+                Health::Unready
+            }
+            Err(_) => Health::Timeout,
+            _ => Health::Foreign,
+        };
+    }
     let Ok(response) = client.get(endpoint.health_url(kind)).send().await else {
         return Health::Foreign;
     };
@@ -361,18 +383,7 @@ pub async fn probe(kind: Kind, endpoint: &Endpoint) -> Health {
                 Health::Unready
             }
         }
-        Kind::GptSovits => {
-            let paths = value.get("paths").and_then(serde_json::Value::as_object);
-            if paths.is_some_and(|p| {
-                p.contains_key("/tts")
-                    && p.contains_key("/set_gpt_weights")
-                    && p.contains_key("/set_sovits_weights")
-            }) {
-                Health::Ready
-            } else {
-                Health::Foreign
-            }
-        }
+        Kind::GptSovits => unreachable!("GPT-SoVITS uses the shared engine inspection"),
     }
 }
 
@@ -679,16 +690,72 @@ impl OwnedProcess {
 fn create_service_log(app_data_dir: &Path, kind: Kind) -> Result<File, String> {
     let log_dir = app_data_dir.join("logs");
     std::fs::create_dir_all(&log_dir).map_err(|_| "无法创建本地服务诊断目录")?;
+    let metadata = std::fs::symlink_metadata(&log_dir).map_err(|_| "无法读取本地服务诊断目录")?;
+    if !metadata.is_dir() || redirected(&metadata) {
+        return Err("本地服务诊断目录不能是链接或特殊文件".into());
+    }
     let provider = match kind {
         Kind::Dots => "dots",
         Kind::GptSovits => "gpt-sovits",
     };
     let path = log_dir.join(format!("{provider}-stderr-{}.log", uuid::Uuid::new_v4()));
-    OpenOptions::new()
+    let log = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-        .map_err(|_| "无法创建本地服务诊断日志".into())
+        .open(&path)
+        .map_err(|_| "无法创建本地服务诊断日志".to_owned())?;
+    prune_service_logs(&log_dir, provider, &path);
+    Ok(log)
+}
+
+fn redirected(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn prune_service_logs(directory: &Path, provider: &str, current: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let prefix = format!("{provider}-stderr-");
+    let mut old = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path == current {
+                return None;
+            }
+            let name = entry.file_name();
+            let id = name.to_str()?.strip_prefix(&prefix)?.strip_suffix(".log")?;
+            if !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id) {
+                return None;
+            }
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if !metadata.is_file() || redirected(&metadata) {
+                return None;
+            }
+            Some((metadata.modified().ok()?, path))
+        })
+        .collect::<Vec<_>>();
+    old.sort_unstable_by(|left, right| right.cmp(left));
+    for (_, path) in old.into_iter().skip(LOCAL_SERVICE_LOG_FILES - 1) {
+        // The directory contains only direct entries. Recheck immediately
+        // before deleting a recognized owned log; preserve redirected files.
+        if std::fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.is_file() && !redirected(&metadata))
+        {
+            // A still-open capture on Windows may temporarily refuse deletion.
+            // Retention is retried at the next launch without blocking startup.
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn start_stderr_capture(child: &mut Child, mut log: File) -> Result<(), String> {
@@ -735,7 +802,7 @@ impl Drop for OwnedProcess {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -789,6 +856,24 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         command
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn running_owned_service_fixture(
+        directory: &Path,
+        kind: Kind,
+        endpoint: &str,
+    ) -> ServiceState {
+        let log = File::create(directory.join("owned-fixture.log")).unwrap();
+        let process =
+            OwnedProcess::spawn_owned(fixture_command("idle", &directory.join("unused.pid")), log)
+                .unwrap();
+        let mut state = ServiceState::new(Some(directory.to_owned()));
+        state.process = Some(process);
+        state.owned_port = Some(Endpoint::parse(kind, endpoint).unwrap().port);
+        state.observe_endpoint(endpoint);
+        state.set("ready", "Isolated process fixture is running");
+        state
     }
 
     #[cfg(windows)]
@@ -994,6 +1079,55 @@ mod tests {
     }
 
     #[test]
+    fn repeated_service_launch_logs_are_bounded_and_preserve_unowned_files() {
+        let app_data = tempfile::tempdir().unwrap();
+        let directory = app_data.path().join("logs");
+        std::fs::create_dir_all(&directory).unwrap();
+        let user_log = directory.join("dots-stderr-manual.log");
+        std::fs::write(&user_log, b"user diagnostics").unwrap();
+        let other_provider =
+            directory.join(format!("gpt-sovits-stderr-{}.log", uuid::Uuid::new_v4()));
+        std::fs::write(&other_provider, b"other provider diagnostics").unwrap();
+        for _ in 0..20 {
+            let log = create_service_log(app_data.path(), Kind::Dots).unwrap();
+            capture_bounded_stderr(std::io::Cursor::new(b"diagnostic output"), log);
+        }
+        let files = std::fs::read_dir(&directory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(files.len(), LOCAL_SERVICE_LOG_FILES + 2);
+        assert_eq!(std::fs::read(user_log).unwrap(), b"user diagnostics");
+        assert_eq!(
+            std::fs::read(other_provider).unwrap(),
+            b"other provider diagnostics"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn service_log_redirection_is_rejected_and_rotation_preserves_link_targets() {
+        let app_data = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::windows::fs::symlink_dir(outside.path(), app_data.path().join("logs")).unwrap();
+        assert!(create_service_log(app_data.path(), Kind::Dots).is_err());
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+
+        let app_data = tempfile::tempdir().unwrap();
+        let directory = app_data.path().join("logs");
+        std::fs::create_dir_all(&directory).unwrap();
+        let target = outside.path().join("diagnostic.log");
+        std::fs::write(&target, b"outside diagnostics").unwrap();
+        let link = directory.join(format!("dots-stderr-{}.log", uuid::Uuid::new_v4()));
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        for _ in 0..10 {
+            drop(create_service_log(app_data.path(), Kind::Dots).unwrap());
+        }
+        assert!(link.exists());
+        assert_eq!(std::fs::read(target).unwrap(), b"outside diagnostics");
+    }
+
+    #[test]
     fn gpt_launch_uses_existing_extension_without_writing_old_installation() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1032,6 +1166,44 @@ mod tests {
         ] {
             assert!(Endpoint::parse(Kind::Dots, value).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn gpt_route_names_without_compatible_methods_are_foreign() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Endpoint::parse(
+            Kind::GptSovits,
+            &format!("http://{}", listener.local_addr().unwrap()),
+        )
+        .unwrap();
+        let task = tokio::spawn(async move {
+            let mut responses = 0;
+            while responses < 2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let size = socket.read(&mut request).await.unwrap();
+                if size == 0 {
+                    continue;
+                }
+                let (status, body) = if request[..size].starts_with(b"GET /kinoko/status ") {
+                    ("404 Not Found", "{}")
+                } else {
+                    assert!(request[..size].starts_with(b"GET /openapi.json "));
+                    (
+                        "200 OK",
+                        r#"{"paths":{"/tts":{"get":{}},"/set_gpt_weights":{"post":{}},"/set_sovits_weights":{"get":{}}}}"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                responses += 1;
+            }
+        });
+        assert_eq!(probe(Kind::GptSovits, &endpoint).await, Health::Foreign);
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -1152,7 +1324,7 @@ mod tests {
                     ready = true;
                     break;
                 }
-                Health::Offline | Health::Unready => {
+                Health::Offline | Health::Unready | Health::Timeout => {
                     tokio::time::sleep(Duration::from_secs(3)).await
                 }
                 Health::LegacyDots | Health::Foreign => break,
@@ -1244,7 +1416,7 @@ mod tests {
                     ready = true;
                     break;
                 }
-                Health::Offline | Health::Unready => {
+                Health::Offline | Health::Unready | Health::Timeout => {
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
                 Health::LegacyDots | Health::Foreign => break,

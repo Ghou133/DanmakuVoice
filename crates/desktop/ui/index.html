@@ -6,17 +6,24 @@
     <meta name="color-scheme" content="light dark">
     <title>超绝可爱弹幕姬</title>
     <script src="./startup-theme.js"></script>
+    <script src="./titlebar.js" defer></script>
     <link rel="icon" type="image/png" href="./logo.png">
     <link rel="stylesheet" href="./styles.css">
     <script type="module" src="./app.js"></script>
   </head>
   <body>
+    <header id="titlebar" class="titlebar" data-tauri-drag-region>
+      <span class="titlebar-brand" data-tauri-drag-region><img src="./logo.png" width="22" height="22" alt="" aria-hidden="true" draggable="false" data-tauri-drag-region><span data-tauri-drag-region data-titlebar-name>超绝可爱弹幕姬</span></span>
+      <span class="titlebar-space" data-tauri-drag-region></span>
+      <span id="titlebar-actions" class="titlebar-actions"></span>
+      <span class="titlebar-controls"><button type="button" class="window-control" data-window="minimize" aria-label="最小化" title="最小化"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10"/></svg></button><button type="button" class="window-control" data-window="maximize" aria-label="最大化" title="最大化"><svg viewBox="0 0 10 10" aria-hidden="true"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></button><button type="button" class="window-control close" data-window="close" aria-label="关闭" title="关闭"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0 0 10"/></svg></button></span>
+    </header>
     <div id="app" aria-busy="true">
-      <div class="boot" role="status"><img class="brand-mark" src="./logo.png" width="128" height="128" alt="" aria-hidden="true" draggable="false"><strong>超绝可爱弹幕姬</strong><p>正在准备直播间…</p></div>
+      <div class="boot" role="status"><img class="brand-mark" src="./logo.png" width="128" height="128" alt="" aria-hidden="true" draggable="false"><strong data-boot-title>超绝可爱弹幕姬</strong><p data-boot-message>正在准备直播间…</p></div>
     </div>
     <div id="toast" role="status" aria-live="polite" hidden></div>
     <dialog id="settings" class="settings-dialog" aria-labelledby="settings-title"></dialog>
     <dialog id="confirmation" class="confirmation-dialog" aria-labelledby="confirmation-title"></dialog>
-    <noscript>超绝可爱弹幕姬需要启用 JavaScript 才能显示桌面界面。</noscript>
+    <noscript>超绝可爱弹幕姬需要启用 JavaScript 才能显示桌面界面。 / DanmakuVoice requires JavaScript.</noscript>
   </body>
 </html>

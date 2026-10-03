@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree as ET
 from urllib.parse import unquote
 from zipfile import ZipFile
+from source_inventory import verify_development_pair
 
 ROOT = Path(__file__).resolve().parents[1]
 FFMPEG_SHA256 = '8fb7ecc11f4f7a441ae7075a81c984289250b166e78dedf51900bbeb1a96ef4d'
@@ -77,7 +78,20 @@ def stage(audit, exe, ffmpeg, output, version, commit, source=None, development=
         raise FileExistsError(f'Refusing to overwrite {output}')
     if not re.fullmatch('[0-9a-f]{40}', commit):
         raise ValueError('Expected a complete Git commit')
-    identity = json.loads((ROOT / 'packaging/store-identity.json').read_text(encoding='utf-8'))
+    # Repackaging an immutable source/binary pair must not silently pick up
+    # different artwork, identity or privacy text from the caller's checkout.
+    source_materials = {}
+    if source:
+        with ZipFile(source) as archive:
+            prefix = f'DanmakuVoice-source-{commit[:12]}/'
+            for name in ('packaging/store-identity.json', 'docs/PRIVACY.md',
+                         'packaging/Assets/StoreLogo.png', 'packaging/Assets/Square44x44Logo.png',
+                         'packaging/Assets/Square150x150Logo.png'):
+                source_materials[name] = archive.read(prefix + name)
+    identity_bytes = source_materials.get('packaging/store-identity.json')
+    if identity_bytes is None:
+        identity_bytes = (ROOT / 'packaging/store-identity.json').read_bytes()
+    identity = json.loads(identity_bytes.decode('utf-8-sig'))
     xml = manifest(identity, version)
     binary = Path(exe).read_bytes()
     decoder = Path(ffmpeg).read_bytes()
@@ -85,6 +99,8 @@ def stage(audit, exe, ffmpeg, output, version, commit, source=None, development=
         raise ValueError('FFmpeg differs from the verified build')
     files = {}
     with ZipFile(audit) as archive:
+        if len(archive.namelist()) != len(set(archive.namelist())):
+            raise ValueError('Duplicate audit archive member')
         if archive.read('DanmakuVoice/danmakuvoice.exe') != binary:
             raise ValueError('Application differs from audit package')
         provenance = archive.read('DanmakuVoice/BUILD-SOURCE.txt').decode('utf-8-sig')
@@ -92,11 +108,14 @@ def stage(audit, exe, ffmpeg, output, version, commit, source=None, development=
             raise ValueError('Audit commit mismatch')
         if not development and not re.search(r'(?m)^Checkout clean before build: True\r*$', provenance):
             raise ValueError('Store submissions require clean source provenance')
+        if not development and ('DanmakuVoice/WORKTREE-SOURCE.json' in archive.namelist()
+                                or re.search(r'(?m)^Development snapshot: True\r*$', provenance)):
+            raise ValueError('Development snapshots cannot be submitted as a formal Store build')
         for item in archive.infolist():
             if item.is_dir() or not item.filename.startswith('DanmakuVoice/'):
                 continue
             name = item.filename.removeprefix('DanmakuVoice/')
-            if name in ('LICENSE', 'NOTICE.md', 'BUILD-SOURCE.txt') or name.startswith(('third-party/Rust/', 'third-party/license-supplements/')) or name in ('third-party/FFmpeg/COPYING.LGPLv2.1', 'third-party/FFmpeg/LICENSE.md'):
+            if name in ('LICENSE', 'NOTICE.md', 'BUILD-SOURCE.txt', 'WORKTREE-SOURCE.json') or name.startswith(('third-party/Rust/', 'third-party/license-supplements/')) or name in ('third-party/FFmpeg/COPYING.LGPLv2.1', 'third-party/FFmpeg/LICENSE.md'):
                 safe_member(name)
                 if name in files:
                     raise ValueError('Duplicate license material')
@@ -106,29 +125,44 @@ def stage(audit, exe, ffmpeg, output, version, commit, source=None, development=
         raise ValueError('Incomplete license materials')
     if not development and source is None:
         raise ValueError('Matching complete source archive is required')
+    snapshot = None
     if source:
         with ZipFile(source) as archive:
+            if len(archive.namelist()) != len(set(archive.namelist())):
+                raise ValueError('Duplicate source archive member')
             prefix = f'DanmakuVoice-source-{commit[:12]}/'
             if f'DanmakuVoice source commit: {commit}' not in archive.read(prefix+'SOURCE-COMMIT.txt').decode('utf-8-sig'):
                 raise ValueError('Source commit mismatch')
+            if development:
+                with ZipFile(audit) as audit_archive:
+                    snapshot = verify_development_pair(audit_archive, archive, commit)
+            elif prefix + 'WORKTREE-SOURCE.json' in archive.namelist():
+                raise ValueError('Development sources cannot be submitted as a formal Store build')
             config = tomllib.loads(archive.read(prefix+'Cargo.toml').decode('utf-8-sig'))
             if config['workspace']['package']['version'] != version or archive.read(prefix+'Cargo.lock') != files['third-party/Rust/Cargo.lock']:
                 raise ValueError('Source version or dependency lock mismatch')
     for filename, size in [('StoreLogo.png', 50), ('Square44x44Logo.png', 44), ('Square150x150Logo.png', 150)]:
-        image = (ROOT / 'packaging/Assets' / filename).read_bytes()
+        image = source_materials.get('packaging/Assets/' + filename)
+        if image is None:
+            image = (ROOT / 'packaging/Assets' / filename).read_bytes()
         if image[:8] != b'\x89PNG\r\n\x1a\n' or struct.unpack('>II', image[16:24]) != (size, size):
             raise ValueError(f'Invalid asset dimensions: {filename}')
         files['Assets/'+filename] = image
     files['AppxManifest.xml'] = xml
     files['DanmakuVoice.exe'] = binary
     files['ffmpeg.exe'] = decoder
-    files['PRIVACY.md'] = (ROOT/'docs/PRIVACY.md').read_bytes()
+    files['PRIVACY.md'] = source_materials.get('docs/PRIVACY.md')
+    if files['PRIVACY.md'] is None:
+        files['PRIVACY.md'] = (ROOT/'docs/PRIVACY.md').read_bytes()
     files['SOURCE-AVAILABILITY.txt'] = (
         f'DanmakuVoice {version}\nSource commit: {commit}\n'
         'https://github.com/Ghou133/DanmakuVoice\n'
-        f'Matching complete source: https://github.com/Ghou133/DanmakuVoice/releases/download/store-v{store_version(version)}/DanmakuVoice-source.zip\n'
-        'Source must be published before Store submission.\n'
-        + ('DEVELOPMENT VALIDATION ONLY - NOT FOR SUBMISSION\n' if development else '')
+        + (('Matching development source is provided locally; the commit is only the working-tree base.\n'
+            f'Working-tree snapshot SHA-256: {snapshot}\n' if source else
+            'No matching source archive was supplied for this development validation.\n')
+           + 'DEVELOPMENT VALIDATION ONLY - NOT FOR SUBMISSION\n' if development else
+           f'Matching complete source: https://github.com/Ghou133/DanmakuVoice/releases/download/store-v{store_version(version)}/DanmakuVoice-source.zip\n'
+           'Source must be published before Store submission.\n')
     ).encode()
     output.mkdir(parents=True)
     for name, data in files.items():

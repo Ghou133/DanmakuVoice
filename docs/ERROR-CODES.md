@@ -36,7 +36,7 @@
 | `DV-S10` | `storage.rs / StorageError::ConnectionMissing` | 服务连接不存在：{0} |
 | `DV-S11` | `storage.rs / StorageError::PresetMissing` | 声音预设不存在：{0} |
 | `DV-S12` | `storage.rs / StorageError::BindingMissing` | 用户声音绑定不存在：{0} |
-| `DV-S13` | `storage.rs / StorageError::InvalidBindingName` | 观众名称不能为空、超过 200 字，或包含前后空格与控制字符 |
+| `DV-S13` | `storage.rs / StorageError::InvalidBindingName` | 观众名称不能为空、超过 200 字，或包含控制字符 |
 | `DV-S14` | `storage.rs / StorageError::DuplicateBindingName` | 此观众名称已有声音绑定，请编辑原有绑定 |
 | `DV-S15` | `storage.rs / StorageError::DuplicateBindingUid` | 此观众 UID 已有声音绑定，请编辑原有绑定 |
 | `DV-S17` | `storage.rs / StorageError::PresetIsDefault` | 声音预设是当前默认声音，请先更换默认声音 |

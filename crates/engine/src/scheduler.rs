@@ -101,6 +101,7 @@ enum Command {
     },
     SkipCurrent(oneshot::Sender<()>),
     ClearPending(oneshot::Sender<()>),
+    JumpTo(u64, oneshot::Sender<bool>),
     StopOrigin(JobOrigin, oneshot::Sender<()>),
     StopAll(oneshot::Sender<()>),
 }
@@ -167,6 +168,18 @@ impl SchedulerHandle {
 
     pub async fn clear_pending(&self) -> Result<(), &'static str> {
         self.send_unit(Command::ClearPending).await
+    }
+
+    /// Play the pending job `id` now: the current job and every job queued
+    /// before it are skipped, later jobs keep their FIFO order. Returns false
+    /// when the job is no longer pending (already started, finished or removed).
+    pub async fn jump_to(&self, id: u64) -> Result<bool, &'static str> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::JumpTo(id, tx))
+            .await
+            .map_err(|_| "调度器已关闭")?;
+        rx.await.map_err(|_| "调度器已关闭")
     }
 
     pub async fn stop_all(&self) -> Result<(), &'static str> {
@@ -244,8 +257,10 @@ impl Scheduler {
 
     fn cancel_current(&mut self, state: JobState, detail: &'static str) {
         if let Some(current) = self.current.take() {
-            self.executor.invalidate(current.job.id);
+            // Mark cancellation before silencing the output. A task already
+            // running on another thread must not re-activate after invalidate.
             current.cancel.cancel();
+            self.executor.invalidate(current.job.id);
             current.task.abort();
             self.record(current.job.id, state, detail);
             // Invalidate any late PCM from this job even if a callback already has it.
@@ -318,6 +333,22 @@ impl Scheduler {
                             self.publish();
                             let _ = reply.send(());
                         }
+                        Command::JumpTo(id, reply) => {
+                            let found = self.pending.iter().any(|job| job.id == id);
+                            if found {
+                                while let Some(job) = self.pending.front() {
+                                    if job.id == id {
+                                        break;
+                                    }
+                                    let skipped = self.pending.pop_front().expect("front exists");
+                                    self.record(skipped.id, JobState::Skipped, "已跳到选中的弹幕");
+                                }
+                                self.cancel_current(JobState::Skipped, "已跳到选中的弹幕");
+                                self.start_next();
+                                self.publish();
+                            }
+                            let _ = reply.send(found);
+                        }
                         Command::StopOrigin(origin, reply) => {
                             if self.current.as_ref().is_some_and(|current| current.job.origin == origin) {
                                 self.cancel_current(JobState::Stopped, "来源已停止");
@@ -366,12 +397,39 @@ mod tests {
     use super::*;
     use crate::model::{LiveEvent, Provider, VoicePreset};
     use crate::rules::RuleSet;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::mpsc;
     use tokio::time::{Duration, sleep, timeout};
 
     struct WaitingExecutor {
         started: mpsc::Sender<u64>,
+    }
+
+    struct CancellationOrderExecutor {
+        started: mpsc::Sender<()>,
+        token: std::sync::Mutex<Option<CancellationToken>>,
+        cancelled_at_invalidation: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl JobExecutor for CancellationOrderExecutor {
+        async fn execute(
+            &self,
+            _job: SpeechJob,
+            cancel: CancellationToken,
+        ) -> Result<JobOutcome, String> {
+            *self.token.lock().unwrap() = Some(cancel.clone());
+            self.started.send(()).await.unwrap();
+            cancel.cancelled().await;
+            Ok(JobOutcome::default())
+        }
+
+        fn invalidate(&self, _job_id: u64) {
+            self.cancelled_at_invalidation.store(
+                self.token.lock().unwrap().as_ref().unwrap().is_cancelled(),
+                Ordering::Release,
+            );
+        }
     }
 
     #[async_trait]
@@ -412,6 +470,23 @@ mod tests {
                 &[],
             )
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn skip_marks_cancellation_before_synchronous_output_invalidation() {
+        let (started_tx, mut started_rx) = mpsc::channel(1);
+        let observed = Arc::new(AtomicBool::new(false));
+        let handle = spawn(Arc::new(CancellationOrderExecutor {
+            started: started_tx,
+            token: std::sync::Mutex::new(None),
+            cancelled_at_invalidation: observed.clone(),
+        }));
+        handle.start().await.unwrap();
+        handle.submit(preview(), JobOrigin::Live).await.unwrap();
+        started_rx.recv().await.unwrap();
+        handle.skip_current().await.unwrap();
+        assert!(observed.load(Ordering::Acquire));
+        assert!(handle.state.borrow().current.is_none());
     }
 
     #[tokio::test]
@@ -468,6 +543,43 @@ mod tests {
         handle.start().await.unwrap();
         let resumed = handle.submit(preview(), JobOrigin::Live).await.unwrap();
         assert_eq!(started_rx.recv().await, Some(resumed));
+    }
+
+    #[tokio::test]
+    async fn jump_skips_current_and_earlier_pending_but_keeps_later_order() {
+        let (started_tx, mut started_rx) = mpsc::channel(8);
+        let handle = spawn(Arc::new(WaitingExecutor {
+            started: started_tx,
+        }));
+        handle.start().await.unwrap();
+        let first = handle.submit(preview(), JobOrigin::Live).await.unwrap();
+        assert_eq!(started_rx.recv().await, Some(first));
+        let second = handle.submit(preview(), JobOrigin::Live).await.unwrap();
+        let third = handle.submit(preview(), JobOrigin::Live).await.unwrap();
+        let fourth = handle.submit(preview(), JobOrigin::Live).await.unwrap();
+        assert!(handle.jump_to(third).await.unwrap());
+        assert_eq!(started_rx.recv().await, Some(third));
+        {
+            let state = handle.state.borrow();
+            assert_eq!(state.current.as_ref().unwrap().id, third);
+            assert_eq!(
+                state.pending.iter().map(|job| job.id).collect::<Vec<_>>(),
+                vec![fourth]
+            );
+            for skipped in [first, second] {
+                assert!(
+                    state
+                        .history
+                        .iter()
+                        .any(|entry| entry.id == skipped && entry.state == JobState::Skipped)
+                );
+            }
+        }
+        // The running job and unknown IDs are not pending: nothing changes.
+        assert!(!handle.jump_to(third).await.unwrap());
+        assert!(!handle.jump_to(9_999).await.unwrap());
+        assert_eq!(handle.state.borrow().current.as_ref().unwrap().id, third);
+        assert_eq!(handle.state.borrow().pending.len(), 1);
     }
 
     #[tokio::test]

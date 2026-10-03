@@ -215,47 +215,11 @@ impl SovitsClient {
     }
 
     async fn readiness_inner(&self, cancellation: &CancellationToken) -> Result<(), TtsError> {
-        let mode = self.mode(cancellation).await?;
+        let mode = inspect_service(&self.http, &self.base, cancellation).await?;
         if self.config.model_selection == SovitsModelSelection::PerRequestAtomic
             && mode != SovitsMode::AtomicExtension
         {
             return Err(configuration("服务未提供原子模型选择接口"));
-        }
-        if mode == SovitsMode::AtomicExtension {
-            return Ok(());
-        }
-        let response = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return Err(TtsError::Cancelled),
-            result = self.http.get(route(&self.base, "openapi.json")).send() =>
-                result.map_err(|error| network_error_at(SERVICE, &error, "检查服务时"))?,
-        };
-        if !response.status().is_success() {
-            return Err(http_error(response.status().as_u16()));
-        }
-        let body = read_limited(response, cancellation, SERVICE, "检查服务时", 128 * 1024).await?;
-        let schema: Value = serde_json::from_slice(&body).map_err(|_| TtsError::Protocol {
-            service: SERVICE,
-            reason: "服务接口信息不是有效 JSON",
-        })?;
-        let paths = schema.get("paths").and_then(Value::as_object);
-        let expected = [
-            ("/tts", "post"),
-            ("/set_gpt_weights", "get"),
-            ("/set_sovits_weights", "get"),
-        ];
-        if paths.is_none_or(|paths| {
-            expected.iter().any(|(path, method)| {
-                paths
-                    .get(*path)
-                    .and_then(Value::as_object)
-                    .is_none_or(|methods| !methods.contains_key(*method))
-            })
-        }) {
-            return Err(TtsError::Protocol {
-                service: SERVICE,
-                reason: "该地址不是兼容的 GPT-SoVITS 服务",
-            });
         }
         Ok(())
     }
@@ -277,7 +241,6 @@ impl SovitsClient {
             },
         ))
     }
-
     pub async fn synthesize_wav(
         &self,
         text: &str,
@@ -338,6 +301,62 @@ impl SovitsClient {
         }
         Ok(())
     }
+}
+
+/// Read-only service identity used by both desktop status and queue preflight.
+/// It never synthesizes speech, loads weights, or assumes a generic HTTP listener
+/// is GPT-SoVITS. Atomic extensions can identify themselves without OpenAPI.
+pub async fn service_status(
+    client: &Client,
+    endpoint: &str,
+    cancellation: &CancellationToken,
+) -> Result<SovitsMode, TtsError> {
+    inspect_service(client, &normalize_base(endpoint)?, cancellation).await
+}
+
+async fn inspect_service(
+    client: &Client,
+    base: &Url,
+    cancellation: &CancellationToken,
+) -> Result<SovitsMode, TtsError> {
+    let mode = negotiate(client, base, cancellation).await?;
+    if mode == SovitsMode::AtomicExtension {
+        return Ok(mode);
+    }
+    let response = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(TtsError::Cancelled),
+        result = client.get(route(base, "openapi.json")).send() =>
+            result.map_err(|error| network_error_at(SERVICE, &error, "检查服务时"))?,
+    };
+    if !response.status().is_success() {
+        return Err(http_error(response.status().as_u16()));
+    }
+    let body = read_limited(response, cancellation, SERVICE, "检查服务时", 128 * 1024).await?;
+    let schema: Value = serde_json::from_slice(&body).map_err(|_| TtsError::Protocol {
+        service: SERVICE,
+        reason: "服务接口信息不是有效 JSON",
+    })?;
+    let paths = schema.get("paths").and_then(Value::as_object);
+    let expected = [
+        ("/tts", "post"),
+        ("/set_gpt_weights", "get"),
+        ("/set_sovits_weights", "get"),
+    ];
+    if paths.is_none_or(|paths| {
+        expected.iter().any(|(path, method)| {
+            paths
+                .get(*path)
+                .and_then(Value::as_object)
+                .is_none_or(|methods| !methods.contains_key(*method))
+        })
+    }) {
+        return Err(TtsError::Protocol {
+            service: SERVICE,
+            reason: "该地址不是兼容的 GPT-SoVITS 服务",
+        });
+    }
+    Ok(SovitsMode::Standard)
 }
 
 async fn negotiate(
@@ -563,6 +582,32 @@ mod tests {
         wav.extend_from_slice(&2_u32.to_le_bytes());
         wav.extend_from_slice(&[0x34, 0x12]);
         wav
+    }
+
+    #[tokio::test]
+    async fn readiness_rejects_wrong_openapi_methods_without_synthesis() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (path, status, body) in [
+                ("GET /kinoko/status ", "404 Not Found", "{}"),
+                (
+                    "GET /openapi.json ",
+                    "200 OK",
+                    r#"{"paths":{"/tts":{"get":{}},"/set_gpt_weights":{"post":{}},"/set_sovits_weights":{"get":{}}}}"#,
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert!(read_request(&mut socket).await.starts_with(path.as_bytes()));
+                json_response(&mut socket, status, body).await;
+            }
+        });
+        let client = SovitsClient::new(SovitsConfig::new(endpoint, "voice.wav")).unwrap();
+        assert!(matches!(
+            client.readiness(&CancellationToken::new()).await,
+            Err(TtsError::Protocol { .. })
+        ));
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -85,6 +85,11 @@ if ($includedFiles.Count -ne $seen.Count) {
     throw "Unexpected .crate archive count: $($includedFiles.Count) versus $($seen.Count)"
 }
 Write-Host "Verified $($buildPackages.Count) Windows build and $($packages.Count) complete locked .crate archives"
+$snapshotPath = Join-Path $sourceRoot 'WORKTREE-SOURCE.json'
+if (Test-Path -LiteralPath $snapshotPath) {
+    & python (Join-Path $PSScriptRoot 'source_inventory.py') verify --root $sourceRoot --manifest $snapshotPath
+    if ($LASTEXITCODE -ne 0) { throw 'Development source snapshot differs from its recorded bytes' }
+}
 if ($VerifyOnly) { return }
 
 function Expand-VerifiedCrate([object]$package, [string]$vendorRoot) {

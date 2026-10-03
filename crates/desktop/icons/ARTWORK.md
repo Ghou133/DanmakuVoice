@@ -6,6 +6,6 @@
 - 原图：1254 × 1254，RGB PNG，无透明通道；原样保存为 `logo-original.png` 和构建源 `logo-source.png`。
 - SHA-256：`C48509D01E9F4BFC445A2739FCBE60C7CA1A76284B195376BF389D19C29B8921`。
 - 处理：仅缩放及转换为 UI PNG、Windows 多尺寸 ICO 和托盘 RGBA；没有 AI 重绘、裁切或背景修改。
-- 程序文件名仍为 `DanmakuVoice.exe`。界面左上角未登录时显示应用图标与名称，登录后显示 B 站头像与昵称。
+- 程序文件名仍为 `DanmakuVoice.exe`。应用图标用于标题栏、欢迎页、关于页及 Windows 图标；登录资料在直播间设置展示。
 
 作品及角色的权利归原权利人，不声称本项目原创；本项目代码许可证不授予这些第三方权利。

@@ -751,7 +751,9 @@ impl JobExecutor for PlaybackExecutor {
             return Err("播放已取消".into());
         }
         let (selected, fallback_notice) = plan.select_for_execution(&cancel).await?;
-        self.writer.activate(job.id);
+        self.writer
+            .activate_for(job.id, &cancel)
+            .map_err(|_| "播放已取消".to_owned())?;
         let _guard = ActiveJobGuard {
             writer: self.writer.clone(),
             job_id: job.id,
@@ -779,7 +781,9 @@ impl JobExecutor for PlaybackExecutor {
                 // Sound parts before the failed text have already drained;
                 // do not replay them. No speech PCM from the first route
                 // reached the output queue.
-                self.writer.activate(job.id);
+                self.writer
+                    .activate_for(job.id, &cancel)
+                    .map_err(|_| "播放已取消".to_owned())?;
                 self.play_plan(default, job.id, part_index, &cancel)
                     .await
                     .map_err(|failure| with_route_notice(&notice, failure.error.message()))?;
@@ -1084,6 +1088,192 @@ mod tests {
         assert!(preview.voice_from_binding);
         let plan = PreparedPlayback::from_store(store, &preview, None).unwrap();
         (preview, plan)
+    }
+
+    #[tokio::test]
+    async fn gpt_bound_voice_and_direct_voice_send_identical_requests_without_fallback() {
+        for atomic in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let mut bodies = Vec::new();
+                while bodies.len() < 2 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let request = test_http::read_request(&mut socket).await;
+                    if request.starts_with(b"GET /kinoko/status ") {
+                        test_http::json_response(&mut socket, if atomic { "200 OK" } else { "404 Not Found" },
+                            if atomic { r#"{"protocol":1,"atomic_model_selection":true,"resident_model_reuse":true}"# } else { "{}" }).await;
+                    } else if request.starts_with(b"GET /openapi.json ") {
+                        test_http::json_response(&mut socket, "200 OK",
+                            r#"{"paths":{"/tts":{"post":{}},"/set_gpt_weights":{"get":{}},"/set_sovits_weights":{"get":{}}}}"#).await;
+                    } else {
+                        assert!(request.starts_with(if atomic {
+                            b"POST /kinoko/tts "
+                        } else {
+                            b"POST /tts "
+                        }));
+                        let separator = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .unwrap();
+                        bodies.push(
+                            serde_json::from_slice::<serde_json::Value>(&request[separator + 4..])
+                                .unwrap(),
+                        );
+                        // A valid WAV fixture, consumed in memory without audio output.
+                        let wav = one_second_wav();
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\n\r\n",
+                            wav.len()
+                        );
+                        socket.write_all(header.as_bytes()).await.unwrap();
+                        socket.write_all(&wav).await.unwrap();
+                    }
+                }
+                bodies
+            });
+            let default_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let mut store = DataStore::open(temp.path()).unwrap();
+            let (mut preview, _) = bound_dots_plan(
+                &mut store,
+                endpoint.clone(),
+                format!("http://{}", default_listener.local_addr().unwrap()),
+            );
+            // Rebuild from the persisted GPT voice, exactly as the GUI audition
+            // and live binding do. Both retain the same reference and model pair.
+            // Changing provider of a referenced connection is forbidden; use
+            // a separate GPT connection and update the existing voice instead.
+            store
+                .save_connection(&ServiceConnection {
+                    id: "gpt".into(),
+                    name: "GPT".into(),
+                    settings: ConnectionSettings::GptSovits {
+                        endpoint,
+                        timeout_secs: 30,
+                    },
+                    has_credential: false,
+                })
+                .unwrap();
+            let voice = preview.voice.as_mut().unwrap();
+            voice.provider = Provider::GptSovits;
+            voice.connection_id = "gpt".into();
+            voice.sovits = Some(crate::model::SovitsVoiceSettings {
+                model_selection: if atomic {
+                    PresetModelSelection::PerRequestAtomic
+                } else {
+                    PresetModelSelection::GlobalResident
+                },
+                gpt_weights_path: Some("model.ckpt".into()),
+                sovits_weights_path: Some("model.pth".into()),
+                reference_text_free: true,
+                ..Default::default()
+            });
+            store.save_preset(voice).unwrap();
+            let direct = RulePreview::voice_audition(voice.clone(), &preview.final_text).unwrap();
+            let cancel = CancellationToken::new();
+            for preview in [&direct, &preview] {
+                let plan = PreparedPlayback::from_store(&store, preview, None).unwrap();
+                let (selected, notice) = plan.select_for_execution(&cancel).await.unwrap();
+                assert!(std::ptr::eq(selected, plan.as_ref()));
+                assert!(notice.is_none());
+                let mut stream = selected
+                    .provider
+                    .as_ref()
+                    .unwrap()
+                    .stream(&preview.final_text, &cancel)
+                    .unwrap();
+                let mut bytes = 0;
+                while let Some(chunk) = stream.recv().await {
+                    bytes += chunk.unwrap().len();
+                }
+                assert!(bytes > 44);
+            }
+            let bodies = server.await.unwrap();
+            assert_eq!(bodies[0], bodies[1]);
+            assert!(
+                timeout(Duration::from_millis(50), default_listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_bound_gpt_voice_uses_ready_gpt_default_with_visible_notice() {
+        let offline = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_endpoint = format!("http://{}", offline.local_addr().unwrap());
+        drop(offline);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for expected in ["GET /kinoko/status ", "GET /openapi.json ", "POST /tts "] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = test_http::read_request(&mut socket).await;
+                assert!(request.starts_with(expected.as_bytes()));
+                if expected.contains("kinoko/status") {
+                    test_http::json_response(&mut socket, "404 Not Found", "{}").await;
+                } else if expected.contains("openapi") {
+                    test_http::json_response(&mut socket, "200 OK", r#"{"paths":{"/tts":{"post":{}},"/set_gpt_weights":{"get":{}},"/set_sovits_weights":{"get":{}}}}"#).await;
+                } else {
+                    let wav = one_second_wav();
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\n\r\n",
+                        wav.len()
+                    );
+                    socket.write_all(header.as_bytes()).await.unwrap();
+                    socket.write_all(&wav).await.unwrap();
+                }
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let (mut preview, _) =
+            bound_dots_plan(&mut store, target_endpoint.clone(), endpoint.clone());
+        for (id, endpoint, voice) in [
+            (
+                "gpt-target",
+                target_endpoint,
+                preview.voice.as_mut().unwrap(),
+            ),
+            (
+                "gpt-default",
+                endpoint,
+                preview.default_voice.as_mut().unwrap(),
+            ),
+        ] {
+            store
+                .save_connection(&ServiceConnection {
+                    id: id.into(),
+                    name: id.into(),
+                    has_credential: false,
+                    settings: ConnectionSettings::GptSovits {
+                        endpoint,
+                        timeout_secs: 30,
+                    },
+                })
+                .unwrap();
+            voice.connection_id = id.into();
+            voice.provider = Provider::GptSovits;
+            store.save_preset(voice).unwrap();
+        }
+        let plan = PreparedPlayback::from_store(&store, &preview, None).unwrap();
+        let cancel = CancellationToken::new();
+        let (selected, notice) = plan.select_for_execution(&cancel).await.unwrap();
+        assert!(std::ptr::eq(selected, plan.fallback.as_deref().unwrap()));
+        assert!(notice.unwrap().contains("本条临时使用默认 GPT-SoVITS"));
+        let mut stream = selected
+            .provider
+            .as_ref()
+            .unwrap()
+            .stream(&preview.final_text, &cancel)
+            .unwrap();
+        let mut bytes = 0;
+        while let Some(chunk) = stream.recv().await {
+            bytes += chunk.unwrap().len();
+        }
+        assert!(bytes > 44);
+        server.await.unwrap();
     }
 
     #[tokio::test]
