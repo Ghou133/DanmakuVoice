@@ -220,3 +220,14 @@
 - 送审截图保存在公开 checkout 忽略提交的 `dist/store-proof/submitted-1.3.0.0-20261004.jpg`；不含凭据的最终审核文案与现场状态记录在 `target/publish-0.3.0/store-submitted-1.3.0.0.json`。未修改已经冻结的 0.3.0 标签、源码 ZIP 或 MSIX。
 - 同一冻结提交的两次 GitHub Actions 均已 **success**：https://github.com/Ghou133/DanmakuVoice/actions/runs/37135528079 和 https://github.com/Ghou133/DanmakuVoice/actions/runs/37135824736 。包含 Windows fmt、严格 Clippy、UI/Python/Rust 回归、真实 FFmpeg 构建、Windows 正式构建、源码配对、空 Cargo 缓存离线重建与 MSIX 检查。最终 CI 状态 JSON 已保留在 `target/publish-0.3.0/`。
 - **仍待外部结果或独立验收**：微软认证与公开商店/客户端更新；商店签名包安装、Smart App Control、实际播放和启动项；真实云账号合成/主观听音；实验功能的真实账号开播、人脸验证及真实 OBS 推流/朗读同步。本轮送审和离线/启动证据不替代这些验收。
+
+## 2026-10-04 Store 1.3.0.0 搜索词拒审修正并重新送审
+
+- 用户提供拒审截图后，现场读取完整报告 `7210d7cf-406f-4430-90d6-d0a0b61a27f4`；报告完成日期显示 `10/03/2026`，唯一列出的拒审项为 `10.1.3 Search Terms`。英文问题词在报告中写作 `Bilibilid`，实际英文一览保存的是 `Bilibili`；报告说明搜索词不得使用其他发布者的产品名称。该报告不等于本版程序/签名安装已通过完整验收。
+- 按用户明确要求，商店公开文字改用通用直播弹幕/语音服务措辞，不再提及 Bilibili、哔哩哔哩、B 站、豆包或 Doubao。简短介绍、长描述、相关功能项、版权/商标措辞及第二张截图说明均已更新；说明本应用由独立第三方开发，实际兼容范围、前提和设置步骤见 GitHub 文档，不宣称支持所有直播平台。审核人员可见的测试说明继续如实保留实际支持范围。
+- 英文搜索词已保存为 `danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice`。中文现场读取原搜索词为空，本次保存为 `DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直播助手；文字转语音`。每种语言均为 7 个不重复的自有应用名/相关通用功能词，第三方品牌不进入搜索词。
+- 用户随后明确要求图片原样保留；每种语言的 7 张原图片均保留，共 14 张，不修改图片像素、不移除欢迎/规则图片。仅第二张图的附属文字说明改为通用语音服务表述。两种语言重新进入页面后，简短介绍、完整描述、12 项功能、7 个搜索词、版本说明及版权字段均与本地准备文案完全匹配，且图片数仍为各 7 张。
+- 只修改商店资料与文档，应用继续为 0.3.0，MSIX 继续为 1.3.0.0；现场确认程序包页仅有已验证的 `v1.3.0.0 / X64`。原包 16,025,115 字节、SHA-256 `3f3461670969d38c1f357db844713f8752adc4b0ab49ff66b264c57d7e2aa53e` 核对不变。未重建、替换已冻结的源码 ZIP/MSIX 或移动 `v0.3.0`、`store-v1.3.0.0` 标签。
+- 已补充本次仅修改资料、针对 10.1.3 的审核备注并重新加载确认保存；未提供账号凭据。点击 `Resubmit for certification` 后，现场显示 **Update in certification / Product update: In certification**，仍为 Submission 2，ID `1152921505702033559`；提交 Complete，预处理 In progress，认证/发布 Not started。通过认证后自动发布仍启用，本轮不能宣称审核通过或新版已上架。
+- 证据保留在公开 checkout 忽略提交的 `target/store-keywords-0.3.0/`（拒审报告、准备文案、重新打开后保存字段、审核备注与送审状态）；截图为 `dist/store-proof/rejected-1.3.0.0-search-terms-20261004.jpg` 与 `dist/store-proof/resubmitted-1.3.0.0-search-terms-20261004.jpg`。本轮完成文案禁用名称检查、搜索词唯一性/数量、保存字段匹配、图片数量和包哈希核对；应用代码未改，不重复编译测试，此前冻结版本的两次 CI success 记录保持原证据边界。
+- **仍待结果**：本次重新认证、公开商店/客户端更新，以及此前列出的商店签名包/SAC/实际播放/启动项和真实账号开播/OBS/云语音验收。

@@ -12,19 +12,19 @@
 
 ### 简短介绍
 
-把 B 站直播弹幕读成你喜欢的声音。免费、开源、无广告，支持豆包、Fish Audio 和自行部署的 dots.tts、GPT-SoVITS，可为每位观众设置专属音色。
+把直播间弹幕读成你喜欢的声音。免费、开源、无广告，可接入支持的云端语音服务或自行部署的本地服务，并为每位观众设置专属音色。
 
 ### 描述
 
 把直播间弹幕，读成你喜欢的声音。
 
-超绝可爱弹幕姬是一款免费开源的 Windows 弹幕语音播报工具。它接收哔哩哔哩直播间的弹幕、礼物、醒目留言和上舰消息，按你定的规则用你选的声音读出来，让主播不用一直盯着屏幕也能接住每一条互动。
+超绝可爱弹幕姬是一款免费开源的 Windows 弹幕语音播报工具。它接收受支持直播间的弹幕、礼物、醒目留言和上舰消息，按你定的规则用你选的声音读出来，让主播不用一直盯着屏幕也能接住每一条互动。
 
 【聚光朗读】
 正在朗读的弹幕会展开成一张聚光卡片，读完收回原处；同一观众的连续发言自动合并，排在后面的弹幕在“接下来”里一目了然，点选任意一条即可立即朗读。
 
 【多种声音】
-豆包扫码即可使用；Fish Audio 填写自己的 API Key 即可连接；也可以接入自行部署的 dots.tts、GPT-SoVITS 本地语音服务。在控制坞里随时浏览和切换音色，浏览不影响正在播报的声音。
+可连接支持的云端语音服务，也可以接入自行部署的本地语音服务。在控制坞里随时浏览和切换音色，浏览不影响正在播报的声音。
 
 【观众专属】
 点一下弹幕，就能设置这位观众的名字怎么读、用哪个音色。熟悉的观众一开口就认得出。
@@ -40,13 +40,13 @@
 
 请注意：第三方语音服务可能需要独立账号、API Key 或自行部署，服务商可能另行收费。本应用不包含本地语音模型，也不提供第三方账号或额度。请仅使用你有权使用的账号、音色和音频素材。
 
-本项目为独立开发，与哔哩哔哩、豆包、Fish Audio 无官方隶属关系。源代码以 AGPL-3.0-only 许可公开：https://github.com/Ghou133/DanmakuVoice
+本应用由独立第三方开发。兼容范围、使用前提与配置步骤详见项目 GitHub 文档。源代码以 AGPL-3.0-only 许可公开：https://github.com/Ghou133/DanmakuVoice
 
 ### 产品功能（每行一项）
 
-- 接收哔哩哔哩直播间弹幕、礼物、醒目留言和上舰消息
+- 接收受支持直播间的弹幕、礼物、醒目留言和上舰消息
 - 扫码登录，或输入主播 UID 免登录接收
-- 支持豆包、Fish Audio 及自行部署的 dots.tts、GPT-SoVITS
+- 接入支持的云端语音服务或自行部署的本地语音服务
 - 聚光卡片显示正在朗读的弹幕
 - 查看待读列表，点选任意一条立即朗读
 - 为观众设置名字读法和专属音色
@@ -59,7 +59,7 @@
 
 ### 搜索词
 
-弹幕；弹幕姬；语音播报；直播助手；哔哩哔哩；TTS；文字转语音
+DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直播助手；文字转语音
 
 ### 版本新增内容
 
@@ -73,7 +73,7 @@
 ### 截图说明（与截图依次对应）
 
 1. 正在朗读的弹幕展开成聚光卡片，直播间的节奏一眼就懂。
-2. 在豆包、Fish Audio、dots.tts、GPT-SoVITS 之间切换声音。
+2. 在支持的云端语音服务或本地语音服务之间切换声音。
 3. 点一下弹幕，为观众设置名字读法和专属音色。
 4. 待读弹幕一目了然，点选任意一条立即朗读。
 5. 选择读哪些消息，编写模板、修正读音、配上音效。
@@ -82,7 +82,7 @@
 
 ### 版权与商标信息
 
-© 2026 CurePirsm。应用代码以 AGPL-3.0-only 许可发布。应用图标插画的作品与角色权利归原权利人。哔哩哔哩、豆包、Fish Audio 为其各自所有者的商标。
+© 2026 CurePirsm。应用代码以 AGPL-3.0-only 许可发布。应用图标插画的作品与角色权利归原权利人。第三方服务名称及商标属于其各自权利人。
 
 ### 其他许可条款
 
@@ -92,23 +92,23 @@
 
 ### Product name
 
-DanmakuVoice
+超绝可爱弹幕姬
 
 ### Short description
 
-Hear your Bilibili live chat in the voice you love. Free, open source and ad-free, with Doubao, Fish Audio and self-hosted dots.tts or GPT-SoVITS voices, plus a voice of its own for each viewer.
+Hear your live chat in the voice you love. Free, open source and ad-free, with supported cloud or self-hosted speech services and a voice of its own for each viewer.
 
 ### Description
 
 Hear your live chat in the voice you love.
 
-DanmakuVoice (超绝可爱弹幕姬) is a free, open-source text-to-speech companion for Bilibili live streams on Windows. It receives chat messages, gifts, Super Chats and memberships from a live room and reads them aloud using your rules and your chosen voice, so streamers can keep up with every viewer without watching the screen.
+DanmakuVoice (超绝可爱弹幕姬) is an independent, free, open-source text-to-speech companion for supported live rooms on Windows. It receives chat messages, gifts, Super Chats and memberships from a live room and reads them aloud using your rules and your chosen voice, so streamers can keep up with every viewer without watching the screen.
 
 SPOTLIGHT READING
 The message being read opens into a spotlight card and folds back when it is done. Consecutive messages from one viewer are grouped, and everything waiting to be read is listed under "Up next" – pick any of them to read it right away.
 
 MANY VOICES
-Sign in to Doubao by QR code, connect Fish Audio with your own API key, or use your self-hosted dots.tts and GPT-SoVITS services. Browse and switch voices from the dock without interrupting the live voice.
+Connect supported cloud speech services with your own account or API key, or use your self-hosted speech services. Browse and switch voices from the dock without interrupting the live voice.
 
 A VOICE FOR EVERY REGULAR
 Click a message to set how a viewer's name is pronounced and which voice they get.
@@ -124,13 +124,13 @@ Free, open source, no ads and no in-app purchases. Sign-in data and API keys are
 
 Please note: third-party voice services may require their own account, API key or self-hosting, and providers may charge for them. DanmakuVoice does not include local voice models or third-party accounts or credits. Only use accounts, voices and audio you have the right to use.
 
-DanmakuVoice is an independent project and is not affiliated with Bilibili, Doubao or Fish Audio. Source code (AGPL-3.0-only): https://github.com/Ghou133/DanmakuVoice
+DanmakuVoice is an independent third-party project. See the GitHub documentation for compatibility, prerequisites and setup. Source code (AGPL-3.0-only): https://github.com/Ghou133/DanmakuVoice
 
 ### Product features
 
-- Receives Bilibili live chat, gifts, Super Chats and memberships
+- Receives live chat, gifts, Super Chats and memberships from supported rooms
 - Sign in by QR code, or receive chat with a streamer UID
-- Doubao, Fish Audio and self-hosted dots.tts or GPT-SoVITS voices
+- Supported cloud speech services or self-hosted speech services
 - Spotlight card for the message being read
 - Up next queue: pick any message to read it now
 - Per-viewer name pronunciation and voice
@@ -143,7 +143,7 @@ DanmakuVoice is an independent project and is not affiliated with Bilibili, Doub
 
 ### Search terms
 
-danmaku; live chat; text to speech; TTS; Bilibili; streaming; stream tool
+danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 
 ### What's new in this version
 
@@ -157,7 +157,7 @@ danmaku; live chat; text to speech; TTS; Bilibili; streaming; stream tool
 ### Screenshot captions
 
 1. The message being read opens into a spotlight card.
-2. Switch between Doubao, Fish Audio, dots.tts and GPT-SoVITS.
+2. Switch between supported cloud or self-hosted speech services.
 3. Click a message to give a viewer their own pronunciation and voice.
 4. See what will be read next and pick any message to read it now.
 5. Choose what is read, write templates, fix pronunciations and add sounds.
@@ -166,7 +166,7 @@ danmaku; live chat; text to speech; TTS; Bilibili; streaming; stream tool
 
 ### Copyright and trademark info
 
-© 2026 CurePirsm. Code: AGPL-3.0-only. Icon art and characters belong to their owners. Bilibili, Doubao and Fish Audio are trademarks of their respective owners.
+© 2026 CurePirsm. Code: AGPL-3.0-only. Icon art and characters belong to their owners. Third-party service names and trademarks belong to their respective owners.
 
 ### Additional license terms
 
@@ -191,6 +191,8 @@ Corresponding complete source for package 1.3.0.0 (app 0.3.0): https://github.co
 Commit: 51404fd68c87dedda15e884f46204376c4031ebc.
 
 Version 0.3.0 adds experimental Broadcast and OBS overlay settings, off by default. Broadcast manages only the signed-in user's own Bilibili room; capture, encoding and RTMP publishing remain in OBS. A token-protected overlay is served only on 127.0.0.1 when enabled. These features require the user's own Bilibili account or OBS; no developer credentials are supplied. The local test tone remains available without an account. Bundled serif fonts include their copyright and SIL OFL 1.1 notices. Exact complete source: https://github.com/Ghou133/DanmakuVoice/releases/download/store-v1.3.0.0/DanmakuVoice-source.zip
+
+Metadata-only resubmission addressing report 7210d7cf-406f-4430-90d6-d0a0b61a27f4, policy 10.1.3 Search Terms: the reported third-party product title was removed. Both language listings use seven unique relevant terms, consisting only of our own app names and generic live-chat/speech functions. Public descriptions, features, trademark wording and screenshot captions use generic third-party live-chat and speech wording. Existing screenshots and the validated 1.3.0.0 package are unchanged. Actual compatibility, account requirements, WebView2 requirements and test steps are described above and in the linked source documentation. This resubmission does not add support for additional live platforms or providers.
 
 ### runFullTrust 说明（500 字以内）
 
