@@ -90,7 +90,9 @@ class SourceInventoryTests(unittest.TestCase):
             self.assertLess(size, len(buffer))
             short_root = Path(buffer.value)
             self.assertEqual(digest(short_root / file.name, short_root), digest(file, root))
-            self.assertEqual(digest(short_root / file.name, short_root), digest(file, root.resolve()))
+            canonical_root = root.resolve()
+            self.assertEqual(digest(short_root / file.name, short_root),
+                             digest(canonical_root / file.name, canonical_root))
 
     def test_parent_directory_link_cannot_include_external_files(self):
         with tempfile.TemporaryDirectory() as external:
