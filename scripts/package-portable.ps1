@@ -450,6 +450,9 @@ try {
     Copy-IntoStage (Join-Path $repoRoot 'LICENSE') 'LICENSE'
     Copy-IntoStage (Join-Path $repoRoot 'NOTICE.md') 'NOTICE.md'
     Copy-IntoStage (Join-Path $repoRoot 'README.md') 'README.md'
+    foreach ($image in @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'docs/images') -File -Filter '*.png')) {
+        Copy-IntoStage $image.FullName ("docs/images/" + $image.Name)
+    }
     Copy-IntoStage (Join-Path $repoRoot 'crates\desktop\ui\logo.png') 'crates\desktop\ui\logo.png'
     Copy-IntoStage (Join-Path $repoRoot 'PROGRESS.md') 'PROGRESS.md'
     Copy-IntoStage (Join-Path $repoRoot 'MIGRATION.md') 'MIGRATION.md'
