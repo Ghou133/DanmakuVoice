@@ -210,3 +210,13 @@
 - 同冻结提交的远端 CI https://github.com/Ghou133/DanmakuVoice/actions/runs/37135528079 当前运行中；已通过 fmt/UI/Python/严格 Clippy/真实 FFmpeg/Rust 回归，正在进行正式构建、源码配对与空缓存离线重建。不得将运行中记录为成功。
 - Partner Center 当前停在微软登录页，已向用户请求本人完成登录。1.3.0.0 尚未上传或送审，不能把本地包验证与 GitHub Release 当作商店提交/认证/上架完成。待填的中英版本说明、审核步骤与 500 字以内 runFullTrust 说明已保存在忽略提交的 `target/publish-0.3.0/store-update-fields.json`，不含账号凭据。旧版 1.2.3.0 的后续认证状态本轮尚未读取。
 - **仍待完成**：用户登录后上传 1.3.0.0、保存商店版本说明和审核说明并送审；微软认证与公开商店更新、商店签名包/SAC/实际播放/启动项验收，以及真实账号开播与真实 OBS 推流验收仍须分别确认。本条为发布后文档维护，不改变已冻结的标签、源码 ZIP 或 MSIX。
+
+## 2026-10-04 0.3.0 / Store 1.3.0.0 送审完成
+
+- 用户完成微软登录后，现场确认旧版 1.2.3.0 的 Submission 2 仍在认证；已取消该次认证并恢复同一提交草稿，保留已上架的 Submission 1 与历史发布材料。随后上传、保存 1.3.0.0，平台自动移除本次草稿中覆盖相同客户范围的旧 1.2.3.0。重新打开程序包页，确认只剩 `v1.3.0.0 / X64 / Windows.Desktop / min 10.0.19041.0`。
+- 上传包为 `dist/store-1.3.0.0/submission/DanmakuVoice-store-submission.msix`，16,025,115 字节，SHA-256 `3f3461670969d38c1f357db844713f8752adc4b0ab49ff66b264c57d7e2aa53e`。保留相同产品/包身份；runFullTrust 限制能力提示通过实际用途说明提交审核，不将其描述为已获本版审批。
+- 中英文 0.3.0 版本说明、其他测试信息与 runFullTrust 说明均已保存并通过重新进入页面核对；审核说明指向冻结提交 `51404fd68c87dedda15e884f46204376c4031ebc` 和 `store-v1.3.0.0` 完整配套源码。实验性开播台/OBS 叠加层默认关闭，注明需用户自己的账号或 OBS；未提供开发者凭据。其余商店描述、现有各 7 张截图、年龄分级和可用性沿用本次草稿。
+- 已点击“提交进行认证”，Partner Center 现场显示 **正在认证更新 / 产品更新: 正在认证**。仍为 Submission 2，ID `1152921505702033559`；提交 Complete，预处理 In progress，认证与发布 Not started。发布选项已核对为通过认证后立即发布。旧版“在 Microsoft Store 中”不代表 1.3.0.0 已完成认证或上架。
+- 送审截图保存在公开 checkout 忽略提交的 `dist/store-proof/submitted-1.3.0.0-20261004.jpg`；不含凭据的最终审核文案与现场状态记录在 `target/publish-0.3.0/store-submitted-1.3.0.0.json`。未修改已经冻结的 0.3.0 标签、源码 ZIP 或 MSIX。
+- 同一冻结提交的两次 GitHub Actions 均已 **success**：https://github.com/Ghou133/DanmakuVoice/actions/runs/37135528079 和 https://github.com/Ghou133/DanmakuVoice/actions/runs/37135824736 。包含 Windows fmt、严格 Clippy、UI/Python/Rust 回归、真实 FFmpeg 构建、Windows 正式构建、源码配对、空 Cargo 缓存离线重建与 MSIX 检查。最终 CI 状态 JSON 已保留在 `target/publish-0.3.0/`。
+- **仍待外部结果或独立验收**：微软认证与公开商店/客户端更新；商店签名包安装、Smart App Control、实际播放和启动项；真实云账号合成/主观听音；实验功能的真实账号开播、人脸验证及真实 OBS 推流/朗读同步。本轮送审和离线/启动证据不替代这些验收。

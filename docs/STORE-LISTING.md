@@ -182,11 +182,19 @@ Licensed under the GNU Affero General Public License v3.0 only. Complete source 
 
 This is a free, open-source Windows desktop utility for receiving Bilibili live-room messages and playing text-to-speech or user-selected audio. It does not send chat messages or host a social network. Incoming live chat is third-party user-generated content; the age questionnaire declares user content conservatively. User/keyword playback filtering is available, but the app does not implement reporting or server-side chat moderation.
 
-No developer account, payment, or administrator privileges are needed to open the app. The welcome page leads to a choice of QR login or an anonymous broadcaster UID. Bilibili login can be skipped; a broadcaster UID is needed to connect anonymously. On the voice setup step, speech can be disabled. In Settings > General (通用) > Audio output (音频输出), “播放测试音” (Play test tone) generates a short local tone through the real decoder and selected device, without a cloud account. To test cloud speech, add your own supported provider account/API key; no developer credentials are included. Local TTS requires a separately installed service/model.
+No developer account, payment, or administrator privileges are needed to open the app. The welcome page leads to a choice of QR login or an anonymous broadcaster UID. Bilibili login can be skipped; a broadcaster UID is needed to connect anonymously. On the voice setup step, speech can be disabled. In Settings > General (通用) > Audio output (音频输出), Play test tone (播放测试音) generates a short local tone through the real decoder and selected device, without a cloud account. To test cloud speech, add your own supported provider account/API key; no developer credentials are included. Local TTS requires a separately installed service/model. The UI supports Simplified Chinese and English, selectable in Settings > General. Microsoft Edge WebView2 Runtime is required.
 
 The runFullTrust capability is required by the Rust/Tauri desktop application for its WebView2 window, system audio output, user-selected files, and spawning its bundled FFmpeg decoder. Optional local TTS services are started only when configured by the user. FFmpeg is launched directly from the installed MSIX directory; no executable is downloaded or extracted to AppData for the Store build. StartupTask is disabled by default and is enabled only through the user's setting. Updates are managed by Microsoft Store.
 
 The submission includes FFmpeg (LGPL-2.1-or-later), original third-party license notices, and a link to the exact complete source archive. The application's own source is AGPL-3.0-only. Source and support: https://github.com/Ghou133/DanmakuVoice
+Corresponding complete source for package 1.3.0.0 (app 0.3.0): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.0.0
+Commit: 51404fd68c87dedda15e884f46204376c4031ebc.
+
+Version 0.3.0 adds experimental Broadcast and OBS overlay settings, off by default. Broadcast manages only the signed-in user's own Bilibili room; capture, encoding and RTMP publishing remain in OBS. A token-protected overlay is served only on 127.0.0.1 when enabled. These features require the user's own Bilibili account or OBS; no developer credentials are supplied. The local test tone remains available without an account. Bundled serif fonts include their copyright and SIL OFL 1.1 notices. Exact complete source: https://github.com/Ghou133/DanmakuVoice/releases/download/store-v1.3.0.0/DanmakuVoice-source.zip
+
+### runFullTrust 说明（500 字以内）
+
+Rust/Tauri desktop app: WebView2 window, audio output, user-selected files and bundled FFmpeg decoder. Optional local TTS processes and the token-protected 127.0.0.1 OBS overlay start only when enabled. Bilibili broadcast actions require the user's own account and explicit input. Standard user permissions; no admin rights. Store build uses FFmpeg from its installed package. No executable downloads. StartupTask is off by default. Updates use Microsoft Store.
 
 ## 提交状态
 
