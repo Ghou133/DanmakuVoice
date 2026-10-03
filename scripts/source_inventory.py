@@ -24,12 +24,17 @@ def safe_path(name):
 
 
 def digest(path, root):
-    root = Path(root).resolve()
+    # Derive the lexical suffix before resolving the root. Windows may expand
+    # an 8.3 TEMP path only during resolve(), otherwise the same directory
+    # appears outside itself. Check every suffix component for links below.
+    root = Path(root).absolute()
     path = Path(path).absolute()
     try:
         relative = path.relative_to(root)
     except ValueError as error:
         raise ValueError('Source path is outside the snapshot root') from error
+    root = root.resolve()
+    path = root / relative
     current = root
     for part in relative.parts:
         current /= part

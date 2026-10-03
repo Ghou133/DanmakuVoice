@@ -76,6 +76,22 @@ class SourceInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'identity mismatch'):
             validate_manifest(manifest)
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows short-path regression')
+    def test_short_root_path_preserves_hash_and_link_checks(self):
+        import ctypes
+        with tempfile.TemporaryDirectory(prefix='source inventory long name ',
+                                         dir=self.root) as directory:
+            root = Path(directory)
+            file = root / 'file.py'
+            file.write_bytes(b'short and long paths refer to the same source')
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = ctypes.windll.kernel32.GetShortPathNameW(str(root), buffer, len(buffer))
+            self.assertGreater(size, 0)
+            self.assertLess(size, len(buffer))
+            short_root = Path(buffer.value)
+            self.assertEqual(digest(short_root / file.name, short_root), digest(file, root))
+            self.assertEqual(digest(short_root / file.name, short_root), digest(file, root.resolve()))
+
     def test_parent_directory_link_cannot_include_external_files(self):
         with tempfile.TemporaryDirectory() as external:
             target = Path(external)
