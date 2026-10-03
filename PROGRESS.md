@@ -198,3 +198,15 @@
 - 本轮 Windows fmt、严格 Clippy 与完整 Rust 回归通过；前端 134/134，Python 打包 27/27；headless Edge 的开播 12 场景、本地化、设置稳定性、聚光收回、表情/别名回归通过。测试不使用真实账号、不执行真实开播，不能视作在线合成或主观听音验收。
 - 发布检查补充开播说明到审计包，复制两套字体版权与 OFL 许可到 third-party/Fonts 并保留到 MSIX/许可包；既有打包测试增加实际保留这些材料的断言。
 - 正式构建、源码配对、GitHub 发布和 Partner Center 提交结果待实际完成后追加。浏览器当前需要登录，不导入或导出账号凭据。
+
+
+## 2026-10-04 0.3.0 / Store 1.3.0.0 已推送、GitHub 已发布，商店登录待完成
+
+- 公开 main 和标签 `v0.3.0`、`store-v1.3.0.0` 均已指向冻结提交 `51404fd68c87dedda15e884f46204376c4031ebc`。正式 Release https://github.com/Ghou133/DanmakuVoice/releases/tag/v0.3.0 已公开并设为 latest；配套源码页 https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.0.0 已公开。附件仅为完整源码与 SHA256SUMS.txt，GitHub 返回 digest 与本地完全一致；未公开内部 EXE、审计 ZIP 或未签名 MSIX。
+- 完整源码 `DanmakuVoice-source.zip`：129,746,285 字节；SHA-256 `adf36e326c93cb63c4c42eb322af2da6a6cde6e6ca0e4788e98726ab5ed5aa83`。精确匹配 153 个公开源码文件，包含 325 个 Windows 构建依赖与全部 504 个锁定依赖的源码归档；提取后 VerifyOnly 验证归档与 Cargo.lock 通过。本地本轮未在空 Cargo 缓存下完整重编译源码，远端 CI 包含该门禁。
+- EXE 的 FileVersion/ProductVersion 均为 0.3.0；SHA-256 `b28a00b292314583e7f53f2a95cd0426af2b9768d2cd53800794b33f9841a158`。源码配对、325 包许可核验、受限 PATH/隔离数据/禁网络 8 秒启动通过，实际初始化 WebView2 并释放哈希校验的内嵌 FFmpeg；不作为在线合成、主观听音或实验性功能在线验收。
+- 正式 MSIX 位于 `dist/store-1.3.0.0/submission/DanmakuVoice-store-submission.msix`：16,025,115 字节，SHA-256 `3f3461670969d38c1f357db844713f8752adc4b0ab49ff66b264c57d7e2aa53e`。MakeAppx 语义验证与全部 staged bytes 校验通过；保持相同包身份与 x64 架构，确认 1.3.0.0、两套字体版权/OFL 许可与实际 EXE 哈希均正确。
+- 本轮 Windows fmt、严格 Clippy、Rust 312 通过/8 忽略、前端 134/134、Python 27/27，以及开播台 12 场景和既有浏览器回归通过。日志在源码 checkout 的 `target/publish-0.3.0/`，正式打包/核验/上传证据在公开 checkout 同名目录。
+- 同冻结提交的远端 CI https://github.com/Ghou133/DanmakuVoice/actions/runs/37135528079 当前运行中；已通过 fmt/UI/Python/严格 Clippy/真实 FFmpeg/Rust 回归，正在进行正式构建、源码配对与空缓存离线重建。不得将运行中记录为成功。
+- Partner Center 当前停在微软登录页，已向用户请求本人完成登录。1.3.0.0 尚未上传或送审，不能把本地包验证与 GitHub Release 当作商店提交/认证/上架完成。待填的中英版本说明、审核步骤与 500 字以内 runFullTrust 说明已保存在忽略提交的 `target/publish-0.3.0/store-update-fields.json`，不含账号凭据。旧版 1.2.3.0 的后续认证状态本轮尚未读取。
+- **仍待完成**：用户登录后上传 1.3.0.0、保存商店版本说明和审核说明并送审；微软认证与公开商店更新、商店签名包/SAC/实际播放/启动项验收，以及真实账号开播与真实 OBS 推流验收仍须分别确认。本条为发布后文档维护，不改变已冻结的标签、源码 ZIP 或 MSIX。
