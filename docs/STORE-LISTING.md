@@ -168,7 +168,7 @@ danmaku; live chat; text to speech; TTS; Bilibili; streaming; stream tool
 
 ### Copyright and trademark info
 
-© 2026 CurePirsm. The app code is licensed under AGPL-3.0-only. Rights to the app icon illustration and its character belong to their owners. Bilibili, Doubao and Fish Audio are trademarks of their respective owners.
+© 2026 CurePirsm. Code: AGPL-3.0-only. Icon art and characters belong to their owners. Bilibili, Doubao and Fish Audio are trademarks of their respective owners.
 
 ### Additional license terms
 

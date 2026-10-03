@@ -130,3 +130,16 @@
 - 已通过 fmt、严格 clippy、Rust workspace 292 通过/7 忽略（使用固定真实 FFmpeg）、前端 122/122、Python 打包 27/27。未进行账号联网合成或主观听音，不将离线检查描述为在线验收。
 - 已核对 README 六张图片与商店十四张截图的 PNG 实际格式及尺寸；商店图均为 1920×1080。素材由当前产品 UI 离线渲染后排版，包含虚构示例数据；不作为原生运行或服务登录证明。
 - GitHub Release、正式 MSIX 上传、微软认证及新版商店发布状态待本次实际操作后记录。旧版商店状态已在 Partner Center 现场确认为 In the Microsoft Store。
+
+## 2026-10-03 0.2.3 / Store 1.2.3.0 发布与送审结果
+
+- GitHub `Ghou133/DanmakuVoice` 已更新 README、六张公开预览图与发布改动；公开发布标签 `v0.2.3` 和 `store-v1.2.3.0` 均冻结于 `328eb0803336c81743be05c2cd11a6ae19573628`。GitHub 正式 Release https://github.com/Ghou133/DanmakuVoice/releases/tag/v0.2.3 已发布并设为 latest；专用配套源码页 https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.2.3.0 已公开。
+- 两个 Release 的附件均为完整源码及其 SHA256SUMS，源码 `DanmakuVoice-source.zip` 为 122,145,356 字节，SHA-256 `2729809d505662a718ed6137c0a7e5659ca40e4091ca921f05d74956c3e1669c`；GitHub 返回的附件 digest 与本地一致。保留旧版 Release 与源码，不公开新的内部 EXE、审计 ZIP 或未签名 MSIX。
+- 正式 MSIX 为 `1.2.3.0 / X64 / Windows.Desktop / min 10.0.19041.0`，8,353,307 字节，SHA-256 `6dcd7e15de5e4746032f85eab41b0b7608cc8012e07f972e4aab4573c172d6a6`；应用 EXE SHA-256 `cfcfa2bedb341b62a343f104a68a06e183104f077e9bf2f4a9b1044ca4d014a5`。MakeAppx 语义验证和包内内容核验通过；含 325 个 Windows 依赖包的原许可，完整锁定集合为 504 个包。
+- 完整源码在空 Cargo 缓存下离线重建通过；隔离启动实际 EXE，WebView2 与嵌入 FFmpeg 初始化通过。README 图片遗漏曾使首次打包失败，修复审计 stage 后重新打包、源码配对与空缓存构建通过。保留失败日志，不将启动冒烟升格为云服务/主观听音验收。
+- 同一冻结提交的 GitHub Actions https://github.com/Ghou133/DanmakuVoice/actions/runs/37101576088 已 success，包含严格检查、真实 FFmpeg、Windows 构建、配套源码核验/离线重建与商店包检查。此前新增短路径测试的第二个断言混用短/长路径导致失败，修正为一致路径后本地 27/27 与远端回归均通过。
+- Microsoft Partner Center 已上传并保存新包；平台自动将相同客户范围的旧 1.2.2.0 包移出本次草稿。中文、英文一览均显示 Complete；描述、12 项功能、7 个搜索词、版本说明和各 7 张 1920×1080 截图及对应 caption 已保存。英文仍使用现有已保留的中文产品名，描述包含 DanmakuVoice。截图为用户提供的当前 UI 离线渲染营销素材，无私人账号数据，不作为真实账号联网或原生运行证明。
+- 现场发现英文版权栏上限 200 字；将原 216 字文案缩为 161 字，已同步修正 `docs/STORE-LISTING.md`。权限说明栏上限 500 字，将继承的 967 字说明缩为 473 字；保留 runFullTrust 的实际用途与标准用户权限边界。审核操作说明更新中英文切换、六类设置的本地测试声音路径及精确 1.2.3.0 源码链接，未提供凭据。
+- 已点击 Submit for certification：Submission 2，ID `1152921505702033559`，现场状态为 **Update in certification / Product update: In certification**；Submission Complete、Pre-processing In progress、Certification / Publishing Not started。已设置通过认证后自动发布。此前 Submission 1 当前仍在商店，不能把旧版已上架标志当作新版发布完成。
+- 送审截图保留在忽略提交的 `dist/store-proof/submitted-1.2.3.0-20261003.jpg`；构建/测试/离线源码日志在 `target/publish-0.2.3/`，正式本地材料在公开 checkout 的 `dist/store-1.2.3.0-final/`。十四张上传素材保留在 `Claude outputs/store-screenshots/`，未加入公开提交。
+- **仍待外部结果**：微软认证、新版公开商店页面与客户端更新；商店签名包的安装、Smart App Control、实际播放和启动项验收未在本轮完成。未进行真实云账号连续合成或主观听音。本记录与版权字段修订是发布后的文档维护，不改已冻结的版本标签或安装包。
