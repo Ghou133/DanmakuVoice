@@ -1,6 +1,6 @@
 # Microsoft Store 商店资料
 
-产品：超绝可爱弹幕姬（DanmakuVoice）；Store ID：9P4DFD8HGN03；发布者：CurePirsm。
+产品：超绝可爱弹幕姬（DanmakuVoice）；Store ID：9P4DFD8HGN03；商店发布者显示名称：CurePrism。
 
 以下文案按 Partner Center“商店一览”的字段整理，可直接复制。上传前请在 Partner Center 中核对各字段的当前字数限制。截图素材见文末“截图”一节。
 

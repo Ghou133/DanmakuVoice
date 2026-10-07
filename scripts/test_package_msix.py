@@ -28,6 +28,10 @@ class MsixTests(unittest.TestCase):
         app_id = doc.find(f'{{{FOUNDATION}}}Identity')
         self.assertEqual(app_id.attrib['Name'], 'CurePirsm.334999D231AD4')
         self.assertEqual(app_id.attrib['Publisher'], identity['publisher'])
+        # Partner Center Product Identity, verified 2026-10-07. The immutable
+        # package name keeps its original spelling; the display name differs.
+        self.assertEqual(app_id.attrib['Publisher'], 'CN=1049AC53-C23A-44DB-89F9-D37EC0C2B00A')
+        self.assertEqual(doc.find(f'{{{FOUNDATION}}}Properties/{{{FOUNDATION}}}PublisherDisplayName').text, 'CurePrism')
         self.assertEqual(app_id.attrib['Version'], '1.2.2.0')
         next_doc = ET.fromstring(manifest(identity, '1.0.0'))
         self.assertEqual(next_doc.find(f'{{{FOUNDATION}}}Identity').attrib['Version'], '2.0.0.0')

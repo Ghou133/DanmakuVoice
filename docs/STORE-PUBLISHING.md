@@ -5,8 +5,10 @@
 - Store ID：`9P4DFD8HGN03`
 - Package Name：`CurePirsm.334999D231AD4`
 - Publisher：`CN=1049AC53-C23A-44DB-89F9-D37EC0C2B00A`
-- PublisherDisplayName：`CurePirsm`
+- PublisherDisplayName：`CurePrism`
 - PFN：`CurePirsm.334999D231AD4_srm51y1gxbpqm`
+
+以上值于 2026-10-07 重新核对 Partner Center Product Identity。显示名称 `CurePrism` 与固定包名中的 `CurePirsm` 拼写不同，不能据此修改包名、PFN 或 Publisher CN。
 
 这些是公开包标识，不包含证件、私钥或登录凭据。源配置为 `packaging/store-identity.json`。应用版本 `M.m.p` 映射为 MSIX `(M+1).m.p.0`，例如 `0.2.2 → 1.2.2.0`；第四段留给商店，主版本始终非零且跨 `1.0.0` 仍保持递增。
 

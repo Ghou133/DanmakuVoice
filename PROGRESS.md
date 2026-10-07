@@ -643,3 +643,9 @@ CPU 为采样到的原生窗口和独立引擎进程合计；相邻采样的 CPU
 - 本次同步工作树的 Windows `fmt`、严格全目标 `clippy`、Node UI **172/172**、Python 打包 **28/28** 通过。Rust 全工作区最终 **481 通过、0 失败、10 显式忽略**。首次受限沙箱运行在两项目录链接回归遇到 Windows 1314 权限错误；保留失败日志后，以正常权限完整重跑通过，未修改或跳过这些测试。记录位于 `target/github-sync-20261007/{fmt,clippy,node,python,rust,rust-full}.log`。
 - 产品源码与本轮已验证的审查版本一致，仅同步发布版本和说明；此前原生退出、进程树、UI 行为与视觉回归、30 分钟负载证据及其测试夹具边界，仍按本文件各节描述。真实账号收发／开播、付费云合成、实际音频、真实 OBS 写入、商店签名安装和 SAC 验收没有因本次离线通过而完成。
 - 当前 Partner Center 新窗口要求登录，已请用户本人完成；未导出登录状态或创建长期凭据。GitHub 提交后的对应 Actions 终态、同提交 MSIX／源码配对、线上现有提交状态与最终商店回执必须另行核实；本节不预先宣称成功。
+
+### 线上身份核对与清单纠正（2026-10-07）
+
+- 通用 Partner Center 概述页一度空白；直接进入已知产品专页后成功读取真实页面。当前产品显示 `In Microsoft Store`、`Your latest product is now available on Microsoft Store`，Store presence 为 Submission 2，最后修改日期 2026-10-05，并提供 `Start update`；不再沿用历史“认证中”的状态。
+- Product Identity 实时返回包名 `CurePirsm.334999D231AD4`、Publisher `CN=1049AC53-C23A-44DB-89F9-D37EC0C2B00A`、PFN `CurePirsm.334999D231AD4_srm51y1gxbpqm`、Store ID `9P4DFD8HGN03`。线上 PublisherDisplayName 为 `CurePrism`，本地清单误写成 `CurePirsm`；仅校正打包显示名称及相关说明，不改任何账号资料、固定包名、证书 Publisher 或 PFN。
+- 以线上值补充现有 MSIX 身份回归，旧配置复现 1 项失败（显示名称错拼）；修正后 Python 打包全集 **28/28** 通过。`publisher-before.log`、`python-publisher-final.log`、`store-overview-before.json` 与 `store-identity-before.json` 保留在同步证据目录。本次追加改变了 MSIX 元数据，需要以新的精确提交重新生成并验证配套源码包；前两次被同分支新提交取代的 CI 不能充当最终通过证据。
