@@ -10,17 +10,29 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-test('text edits debounce and persist only the newest captured draft', async () => {
+test('text edits debounce and persist only the newest captured draft', { timeout: 5_000 }, async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
   const writes = [];
-  const queue = createAutosaveQueue({ delay: 30, save: async payload => writes.push(payload) });
+  const saved = deferred();
+  const turn = () => new Promise(resolve => setImmediate(resolve));
+  const queue = createAutosaveQueue({ delay: 30, save: async payload => { writes.push(payload); saved.resolve(); } });
   queue.schedule({ name: 'a' });
+  context.mock.timers.tick(10);
   const latest = { name: 'ab' };
   queue.schedule(latest);
   latest.name = 'changed elsewhere';
   assert.equal(queue.dirty, true);
-  await wait(10);
+  // The first deadline must be cancelled, and the last edit receives a full
+  // debounce interval. Host scheduling delays cannot advance this test clock.
+  context.mock.timers.tick(20);
+  await turn();
   assert.equal(writes.length, 0);
-  await wait(50);
+  context.mock.timers.tick(9);
+  await turn();
+  assert.equal(writes.length, 0);
+  context.mock.timers.tick(1);
+  await saved.promise;
+  await queue.flush();
   assert.deepEqual(writes, [{ name: 'ab' }]);
   assert.equal(queue.dirty, false);
   queue.dispose();

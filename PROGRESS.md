@@ -649,3 +649,9 @@ CPU 为采样到的原生窗口和独立引擎进程合计；相邻采样的 CPU
 - 通用 Partner Center 概述页一度空白；直接进入已知产品专页后成功读取真实页面。当前产品显示 `In Microsoft Store`、`Your latest product is now available on Microsoft Store`，Store presence 为 Submission 2，最后修改日期 2026-10-05，并提供 `Start update`；不再沿用历史“认证中”的状态。
 - Product Identity 实时返回包名 `CurePirsm.334999D231AD4`、Publisher `CN=1049AC53-C23A-44DB-89F9-D37EC0C2B00A`、PFN `CurePirsm.334999D231AD4_srm51y1gxbpqm`、Store ID `9P4DFD8HGN03`。线上 PublisherDisplayName 为 `CurePrism`，本地清单误写成 `CurePirsm`；仅校正打包显示名称及相关说明，不改任何账号资料、固定包名、证书 Publisher 或 PFN。
 - 以线上值补充现有 MSIX 身份回归，旧配置复现 1 项失败（显示名称错拼）；修正后 Python 打包全集 **28/28** 通过。`publisher-before.log`、`python-publisher-final.log`、`store-overview-before.json` 与 `store-identity-before.json` 保留在同步证据目录。本次追加改变了 MSIX 元数据，需要以新的精确提交重新生成并验证配套源码包；前两次被同分支新提交取代的 CI 不能充当最终通过证据。
+
+### 远端 CI 的自动保存测试时序修复（2026-10-07）
+
+- `6eef0a38` 对应 Actions `37552183234` 的实际失败发生在 **Check desktop UI helpers**：`autosave.test.mjs` 用真实 `wait(10)` 断言 30ms 防抖尚未触发；Windows runner 在高负载调度下已经经过截止时间，断言得到 1 次写入。Python 打包测试及身份回归已通过，并非打包实现失败；完整失败日志已保存。
+- 将该回归改用 Node 测试时钟，明确推进第一条的截止点、最后编辑后的第 29ms 与第 30ms，验证旧定时器取消、完整防抖时长、最新草稿快照和落盘完成。生产 `autosave.mjs` 未改，未放宽断言、增加盲等或略过失败。
+- 修正后 autosave focused **10/10**、前端全部 **172/172** 通过；证据 `autosave-ci-regression.log`、`node-ci-final.log`。最终 GitHub Actions 仍须在新提交上完整通过后，才可使用其 MSIX 送审。
