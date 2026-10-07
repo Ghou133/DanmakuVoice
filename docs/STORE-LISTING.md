@@ -176,11 +176,11 @@ Licensed under the GNU Affero General Public License v3.0 only. Complete source 
 
 商店截图位于 `Claude outputs/store-screenshots/`（该目录不进入公开提交），每种语言 7 张，1920×1080 PNG，文件名顺序即上传顺序，与上面的“截图说明”一一对应：`store-zh-CN-01…07`、`store-en-01…07`。README 使用的预览图在 `docs/images/`。
 
-这些图由当前界面源码在浏览器中离线渲染（虚构用户名、直播间和弹幕，不登录、不合成语音），再加上标题排版；不是原生 WebView2 窗口截图。界面与实际版本一致，但上传前请在待提交的构建中对照确认；界面改版后需要重新生成。
+这些既有截图由此前界面源码在浏览器中离线渲染（虚构用户名、直播间和弹幕，不登录、不合成语音），再加上标题排版；不是原生 WebView2 窗口截图。0.3.1 本轮保留已有图片，未将其当作新湖面界面的截图证据；提交前应核对当前商店图片与待提交构建的差异。
 
 ## 审核说明（英文）
 
-This is a free, open-source Windows desktop utility for receiving Bilibili live-room messages and playing text-to-speech or user-selected audio. It does not send chat messages or host a social network. Incoming live chat is third-party user-generated content; the age questionnaire declares user content conservatively. User/keyword playback filtering is available, but the app does not implement reporting or server-side chat moderation.
+This is a free, open-source Windows desktop utility for receiving Bilibili live-room messages and playing text-to-speech or user-selected audio. It does not host a social network. The optional experimental broadcast console can send text/emote messages to the signed-in account's own room and perform mute, live-room block or moderator actions when the platform grants the account permission. Incoming live chat is third-party user-generated content; the existing age questionnaire declares user content conservatively. Local user/keyword playback filtering is separate from these platform moderation actions. The app does not provide its own reporting service.
 
 No developer account, payment, or administrator privileges are needed to open the app. Completing first-run setup and receiving chat require the reviewer's own Bilibili account with a live room: choose Start setup, scan with the Bilibili app, and confirm sign-in. Anonymous broadcaster UID entry is no longer offered. At the voice setup step, choose display-only mode to skip cloud speech setup. After completing setup, Settings > General (通用) > Audio output (音频输出) > Play test tone (播放测试音) generates a short local tone through the real decoder and selected device without a cloud speech account. To test cloud speech, add your own supported provider account/API key; no developer credentials are included. Local TTS requires a separately installed service/model. The UI supports Simplified Chinese and English, selectable in Settings > General. Microsoft Edge WebView2 Runtime is required.
 
