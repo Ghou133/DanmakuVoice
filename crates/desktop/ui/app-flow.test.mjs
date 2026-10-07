@@ -5,11 +5,11 @@ import vm from 'node:vm';
 import { createAutosaveQueue } from './autosave.mjs';
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, uiIsActive, validUid } from './helpers.mjs';
+import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, uiIsActive, validUid } from './helpers.mjs';
 
 function appContext() {
   setLanguage('zh-CN');
-  const surface = { listeners: {}, addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }, querySelector() { return null; }, querySelectorAll() { return []; } };
+  const surface = { listeners: {}, classList: { add() {}, remove() {}, toggle() {} }, addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }, querySelector() { return null; }, querySelectorAll() { return []; } };
   const document = { querySelector(selector) { return selector?.startsWith('[data-brand') ? null : surface; }, addEventListener() {}, hasFocus() { return true; }, documentElement: { dataset: {} } };
   const context = vm.createContext({
     document,
@@ -35,6 +35,7 @@ function appContext() {
     playbackFallbackNotice,
     playbackIssue,
     qrNeedsRoomFallback,
+    safeMediaUrl,
     uiIsActive,
     validUid,
     deviceValue,
@@ -137,12 +138,14 @@ test('audio settings offer a local sound test and show asynchronous output error
   assert.deepEqual(Array.from(context.calls), ['audio.test']);
 });
 
-test('current masthead follows account-room selection, anonymous mode and logout', () => {
+test('current masthead follows logged account identity and logout', () => {
   const context = appContext();
   vm.runInContext("snapshot = { setup: { mode: 'account', room_id: 123 }, account: { user_id: 42, name: '桃子<测试>' } }", context);
   assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('mastheadView(snapshot)', context))), {name:'桃子<测试>',suffix:'的直播间'});
+  vm.runInContext("snapshot.preferences = { broadcast_console: true }; snapshot.broadcast = { room: { title: '不应替换用户名字的直播标题' } }", context);
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('mastheadView(snapshot)', context))), {name:'桃子<测试>',suffix:'的直播间'});
   vm.runInContext("snapshot.setup.mode = 'anonymous'", context);
-  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('mastheadView(snapshot)', context))), {name:'直播间',suffix:'123'});
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('mastheadView(snapshot)', context))), {name:'桃子<测试>',suffix:'的直播间'});
   vm.runInContext("snapshot.account = {}; snapshot.setup = {}", context);
   assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('mastheadView(snapshot)', context))), {name:'直播间',suffix:''});
 });
@@ -338,7 +341,7 @@ test('GPT-SoVITS names omit the prefix in both save paths and existing voice dis
   assert.doesNotMatch(vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[0])', context), /GPT-SoVITS · 流萤/);
   const panel = context.document.querySelector('#tts-menu');
   vm.runInContext('renderVoicePanel()', context);
-  assert.match(panel.innerHTML, />流萤<\/span>/);
+  assert.match(panel.innerHTML, />流萤<\/(?:span|b)>/);
   assert.doesNotMatch(panel.innerHTML, /GPT-SoVITS · 流萤/);
   context.testForm.fields.name = '自定义流萤';
   assert.equal(vm.runInContext('collectAutosave(testForm).payload.preset.name', context), '自定义流萤');
@@ -412,10 +415,10 @@ test('unconnected Doubao selection opens QR instead of replacing the live voice'
   assert.deepEqual(calls, ['doubao-voice', 'doubao-voice']);
   assert.equal(vm.runInContext('snapshot.rules.default_preset_id', context), 'dots-voice');
 
-  const menu = { hidden: true, innerHTML: '', style: {} };
+  const menu = { hidden: true, innerHTML: '', style: {}, classList: { remove() {} } };
   context.document.querySelector = selector => selector === '#tts-menu' ? menu : { setAttribute() {} };
   await vm.runInContext('handleAction', context)('tts.open', '', { getBoundingClientRect: () => ({ left: 10, bottom: 10 }), setAttribute() {} });
-  assert.match(menu.innerHTML, /data-action="voice\.browse" data-id="doubao"/);
+  assert.match(menu.innerHTML, /data-action="voice\.pick" data-id="doubao-voice"/);
   assert.match(menu.innerHTML, /data-action="voice\.pick" data-id="dots-voice"/);
 });
 
@@ -472,7 +475,7 @@ test('a connected Doubao service without a voice opens voice setup instead of QR
     snapshot.rules.default_preset_id = 'dots-voice'; editor = null;`, context);
   const calls = [];
   context.mockGuide = async () => { throw new Error('unexpected QR'); };
-  context.mockLoad = async id => { calls.push(['load', id]); };
+  context.mockLoad = async id => { calls.push(['load', id]); return true; };
   context.mockRender = () => { calls.push(['render']); };
   context.mockOpen = async (tab, nextEditor) => {
     calls.push(['open', tab]);
@@ -837,77 +840,22 @@ test('IME composition keeps a draft but does not queue an unfinished write', () 
   assert.deepEqual(calls, ['cancel', '你好']);
 });
 
-test('saving a room UID waits for gift edits and retains failed or composing drafts', async () => {
+test('anonymous navigation and legacy UID forms are disabled before invoking any command', async () => {
   const context = appContext();
-  context.createAutosaveQueue = createAutosaveQueue;
-  const calls = [];
-  let giftFailure = false;
-  const giftInput = {};
-  const makeForm = (type, fields) => ({
-    dataset: { form: type },
-    fields,
-    elements: {},
-    checkValidity() { return true; },
-    querySelector() { return null; },
-    querySelectorAll() { return []; },
-    cloneNode() {
-      return {
-        dataset: { form: type },
-        querySelectorAll() { return []; },
-        removeAttribute() {},
-        outerHTML: '<form></form>',
-      };
-    },
-  });
-  const uid = makeForm('room-uid', { uid: '123' });
-  const gift = makeForm('gift-merge', { enabled: true, initial_seconds: '1.5', increment_seconds: '0.5', maximum_seconds: '5' });
-  const dialog = context.document.querySelector('#settings');
-  dialog.open = true;
-  dialog.querySelectorAll = selector => selector === '[data-form]' ? [uid, gift] : selector === 'input,textarea' ? [giftInput] : [];
-  context.mockCommand = async action => {
-    calls.push(action);
-    if (action === 'live.save' && giftFailure) throw new Error('直播连接中，请先断开');
-    return { result: null };
-  };
-  context.mockRender = () => { calls.push('render'); };
-  vm.runInContext('settingsTab = "room"; command = mockCommand; renderSettings = mockRender; mountAutosaves()', context);
-  gift.fields.initial_seconds = '2';
-  vm.runInContext('scheduleAutosave', context)(gift, false);
-  uid.fields.uid = '456';
-  vm.runInContext('scheduleAutosave', context)(uid, true);
-  const uidQueue = vm.runInContext('autosaves.get(settingsDialog.querySelectorAll("[data-form]")[0]).queue', context);
-  const giftQueue = vm.runInContext('autosaves.get(settingsDialog.querySelectorAll("[data-form]")[1]).queue', context);
-  await uidQueue.flush();
-  assert.deepEqual(calls, ['onboarding.anonymous', 'live.save', 'render']);
-
-  calls.length = 0;
-  giftFailure = true;
-  gift.fields.initial_seconds = '3';
-  vm.runInContext('scheduleAutosave', context)(gift, false);
-  uid.fields.uid = '789';
-  vm.runInContext('scheduleAutosave', context)(uid, true);
-  await uidQueue.flush();
-  assert.deepEqual(calls, ['onboarding.anonymous', 'live.save']);
-  assert.match(giftQueue.error.message, /直播连接中/);
-  assert.equal(vm.runInContext('autosaves.get(settingsDialog.querySelectorAll("[data-form]")[1]).touched', context), true);
-
-  giftFailure = false;
-  giftQueue.retry();
-  await giftQueue.flush();
-  calls.length = 0;
-  context.giftInput = giftInput;
-  vm.runInContext('composingInputs.add(giftInput)', context);
-  gift.fields.initial_seconds = '4';
-  vm.runInContext('scheduleAutosave', context)(gift, false, false, true);
-  uid.fields.uid = '987';
-  vm.runInContext('scheduleAutosave', context)(uid, true);
-  await uidQueue.flush();
-  assert.deepEqual(calls, ['onboarding.anonymous']);
-  assert.equal(vm.runInContext('autosaves.get(settingsDialog.querySelectorAll("[data-form]")[1]).touched', context), true);
-  vm.runInContext('composingInputs.delete(giftInput)', context);
-  vm.runInContext('scheduleAutosave', context)(gift, true);
-  await giftQueue.flush();
-  vm.runInContext('unmountAutosaves()', context);
+  context.calls = [];
+  vm.runInContext("command = async action => calls.push(action); snapshot.account = {}; snapshot.setup = { mode: 'anonymous', room_id: 123 }; snapshot.preferences = {};", context);
+  for (const action of ['setup.uid', 'room.anonymous']) {
+    await assert.rejects(vm.runInContext(`handleAction('${action}', '', null)`, context), /扫码登录/);
+  }
+  for (const type of ['anonymous', 'room-uid']) {
+    context.form = { dataset: { form: type }, fields: { uid: '123' }, elements: {} };
+    await assert.rejects(vm.runInContext('handleForm(form, null)', context), /扫码登录/);
+  }
+  vm.runInContext("step = 'connect'", context);
+  assert.doesNotMatch(vm.runInContext('renderStep()', context), /setup\.uid|免登录|输入主播 UID|匿名/);
+  vm.runInContext("step = 'login'", context);
+  assert.doesNotMatch(vm.runInContext('renderStep()', context), /setup\.uid|改用主播 UID|匿名/);
+  assert.equal(context.calls.length, 0);
 });
 
 test('unsaved Fish API key requires explicit discard and is never copied into drafts', async () => {
@@ -970,7 +918,7 @@ test('a successful fallback updates the footer once and expires without replay',
   assert.doesNotMatch(expected, /下一条播报正文/);
 });
 
-test('chat renders large images only for explicitly marked emotes', () => {
+test('chat renders large images only for explicitly marked emotes and keeps names accessible without visible text or hover titles', () => {
   const context = appContext();
   const base = { kind: 'danmaku', message: '[妙]' };
   const image = { text: '[妙]', url: 'https://i0.hdslb.com/bfs/live/a.png' };
@@ -978,15 +926,24 @@ test('chat renders large images only for explicitly marked emotes', () => {
   assert.match(vm.runInContext('renderChatBody(chatEvent)', context), /class="message-emote large"/);
   context.chatEvent = { ...base, emotes: [{ ...image, large: false }] };
   assert.match(vm.runInContext('renderChatBody(chatEvent)', context), /class="message-emote"/);
+  for (const large of [false, true]) {
+    context.chatEvent = { ...base, emotes: [{ ...image, large }] };
+    const body = vm.runInContext('renderChatBody(chatEvent)', context);
+    const lake = vm.runInContext('lakeLettersHtml(messageParts(chatEvent)).html', context);
+    for (const markup of [body, lake]) {
+      assert.match(markup, /alt="" aria-label="\[妙\]"/);
+      assert.doesNotMatch(markup, /\btitle=|>\[妙\]</);
+    }
+  }
 });
 
-test('logged-in room settings hide UID input unless own-room discovery failed', () => {
+test('room settings never expose anonymous UID controls, including no-own-room and logged-out states', () => {
   const context = appContext();
   vm.runInContext(`snapshot.account = { user_id: 12 }; snapshot.setup = { mode: 'account', room_id: 34 }; snapshot.qr = { provider: 'bilibili', status: 'complete' }; editor = null;`, context);
   assert.doesNotMatch(vm.runInContext('renderRoomSettings()', context), /data-form="room-uid"/);
   vm.runInContext(`snapshot.setup.room_id = null; snapshot.qr.status = 'expired'; editor = { type: 'qr', provider: 'bilibili' };`, context);
   const fallback = vm.runInContext('renderRoomSettings()', context);
-  assert.match(fallback, /data-form="room-uid"/);
+  assert.doesNotMatch(fallback, /data-form="room-uid"|room\.anonymous|主播 UID|匿名/);
   assert.match(fallback, /未找到本账号直播间/);
   assert.doesNotMatch(fallback, /已使用登录账号的直播间/);
   vm.runInContext(`snapshot.setup.room_id = 34; snapshot.live = { state: 'session_expired' }; editor = null;`, context);
@@ -1145,15 +1102,17 @@ test('Fish accepts a manually pasted key without a clipboard watcher', async () 
   assert.equal(form.elements.credential.value, '');
 });
 
-test('settings merge legacy categories and add the experimental broadcast and overlay pages', async () => {
+test('settings merge legacy categories, and 开播 and OBS 叠加层 into one OBS page', async () => {
   const context = appContext();
   context.document.querySelector().focus = () => {};
   vm.runInContext(`settingsTab = 'voices'; editor = null; renderSettings = () => {}; allowLeaveSettings = async () => true;`, context);
-  assert.equal(vm.runInContext('tabs.map(([id]) => id).join()', context), 'room,voices,rules,assets,broadcast,overlay,general,data');
-  for (const [legacy, page] of [['audio', 'general'], ['appearance', 'general'], ['about', 'data'], ['missing', 'voices']]) {
+  assert.equal(vm.runInContext('tabs.map(([id]) => id).join()', context), 'room,voices,rules,assets,live,general,data');
+  for (const [legacy, page] of [['audio', 'general'], ['appearance', 'general'], ['about', 'data'], ['missing', 'voices'], ['overlay', 'live'], ['live', 'live'], ['broadcast', 'live']]) {
     await vm.runInContext('handleAction', context)('settings.tab', legacy);
     assert.equal(vm.runInContext('settingsTab', context), page);
+    if (legacy === 'overlay' || legacy === 'live') assert.equal(vm.runInContext('livePanel', context), 'overlay', 'the old overlay entry opens its panel and the page keeps it');
   }
+  assert.equal(vm.runInContext('livePanel', context), 'broadcast');
 });
 
 test('category navigation returns to its root including when already selected', async () => {
@@ -1307,6 +1266,27 @@ test('language rerenders both surfaces without restarting QR login or changing s
   vm.runInContext('acceptSnapshot', context)(next);
   assert.deepEqual(calls, ['app','settings']);
   assert.equal(vm.runInContext('voiceAuditionDraft.text', context), '你好，欢迎来到直播间。');
+});
+
+test('snapshot polling leaves the shell title unchanged until the language changes', () => {
+  const context = appContext();
+  const titles = [];
+  let title = '';
+  Object.defineProperty(context.document, 'title', {
+    get: () => title,
+    set: value => { title = value; titles.push(value); },
+  });
+  vm.runInContext(`step = 'login'; settingsDialog.open = false;
+    renderApp = () => {}; updateQr = () => {};
+    snapshot.config_revision = 1; snapshot.preferences = {language:'zh-CN'};`, context);
+  const accept = vm.runInContext('acceptSnapshot', context);
+  for (let i = 0; i < 20; i++) accept({ config_revision: 1, config_unchanged: true, live: { errors: i } });
+  assert.deepEqual(titles, ['超绝可爱弹幕姬']);
+  accept(vm.runInContext("({...snapshot, config_revision:2, config_unchanged:false, preferences:{language:'en'}})", context));
+  for (let i = 0; i < 20; i++) accept({ config_revision: 2, config_unchanged: true, live: { errors: i } });
+  assert.deepEqual(titles, ['超绝可爱弹幕姬', 'DanmakuVoice']);
+  accept(vm.runInContext("({...snapshot, config_revision:3, config_unchanged:false, preferences:{language:'zh-CN'}})", context));
+  assert.deepEqual(titles, ['超绝可爱弹幕姬', 'DanmakuVoice', '超绝可爱弹幕姬']);
 });
 
 test('standalone emote filter defaults on, preserves disabled settings, and autosaves either value', () => {
@@ -1510,9 +1490,14 @@ const overlaySnapshot = () => ({
 test('overlay settings render every choice and keep the token off the page', () => {
   const context = appContext();
   context.overlay = overlaySnapshot();
-  vm.runInContext("snapshot.overlay = overlay; settingsTab = 'overlay';", context);
+  vm.runInContext("snapshot.overlay = overlay; settingsTab = 'live'; livePanel = 'overlay';", context);
   const html = vm.runInContext('renderSettingsPage()', context);
   assert.match(html, /data-form="overlay"/);
+  assert.match(html, /data-live-panel="overlay" role="tabpanel" aria-labelledby="live-tab-overlay">/);
+  assert.match(html, /data-live-panel="broadcast"[^>]+hidden/);
+  assert.match(html, /data-action="overlay\.obs_add"/);
+  assert.match(html, /data-form="obs"/);
+  assert.match(html, /data-form="obs-link"/);
   assert.match(html, /name="enabled" checked/);
   assert.match(html, /name="style" value="spine" checked/);
   assert.match(html, /name="corner" value="top_right" checked/);
@@ -1520,7 +1505,7 @@ test('overlay settings render every choice and keep the token off the page', () 
   assert.match(html, /name="show_guard">/);
   assert.match(html, /name="scale"[^>]+value="1\.1"/);
   assert.match(html, /name="vignette"[^>]+value="0\.6"/);
-  assert.match(html, /name="title" value="今晚的弹幕" maxlength="12" required/);
+  assert.doesNotMatch(html, /name="title"/);
   assert.match(html, /data-action="overlay\.copy"/);
   assert.match(html, /data-action="overlay\.token\.reset"/);
   assert.match(html, /data-action="overlay\.test" data-id="super_chat"/);
@@ -1549,7 +1534,7 @@ test('overlay connection states read plainly in both languages', () => {
   assert.equal(status().tone, 'idle');
   vm.runInContext("snapshot.preferences = { language: 'en' }; applyLanguage(); overlay.settings.title = 'Tonight'; overlay.error = null; overlay.settings.enabled = true; overlay.clients = [{ width: 2560, height: 1600 }];", context);
   assert.equal(status().text, 'OBS connected · 2560 × 1600');
-  const html = vm.runInContext("settingsTab = 'overlay'; renderSettingsPage()", context);
+  const html = vm.runInContext("settingsTab = 'live'; renderSettingsPage()", context);
   assert.doesNotMatch(html, /\p{Script=Han}/u);
   assert.match(html, /Add to OBS/);
 });
@@ -1562,11 +1547,11 @@ test('overlay autosave sends the edited settings and keeps app-owned fields', ()
   context.overlayForm = { dataset: { form: 'overlay' }, fields, checkValidity: () => true };
   const envelope = vm.runInContext('collectAutosave(overlayForm)', context);
   assert.equal(envelope.action, 'overlay.save');
-  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.settings)), { ...context.overlay.settings, enabled: true, style: 'card', corner: 'bottom_left', scale: 1.25, vignette: 0.3, title: '深夜电台', tagline: 'one more round.', show_danmaku: true, show_gift: false, show_super_chat: true, show_guard: false, names: 'none', merge_duplicates: false, linger_seconds: 20 });
+  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.settings)), { ...context.overlay.settings, enabled: true, style: 'card', corner: 'bottom_left', scale: 1.25, vignette: 0.3, title: context.overlay.settings.title, tagline: 'one more round.', show_danmaku: true, show_gift: false, show_super_chat: true, show_guard: false, names: 'none', merge_duplicates: false, linger_seconds: 20 });
   fields.linger_seconds = '2';
   assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /停留时间/);
   fields.linger_seconds = '20'; fields.title = '  ';
-  assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /标题/);
+  assert.equal(vm.runInContext('collectAutosave(overlayForm).payload.settings.title', context), context.overlay.settings.title);
 });
 
 test('overlay actions copy the full address, confirm a new token and send test items', async () => {
@@ -1582,7 +1567,7 @@ test('overlay actions copy the full address, confirm a new token and send test i
   await act('overlay.copy');
   assert.equal(context.calls[0].copied, context.overlay.url);
   await act('overlay.token.reset');
-  assert.deepEqual(JSON.parse(JSON.stringify(context.calls.slice(2))), ['confirm', { action: 'overlay.token.reset', payload: {} }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls.slice(2))), ['confirm', { action: 'overlay.token.reset', payload: {} }, { action: 'obs.overlay.sync', payload: {} }, { toast: '已生成新地址，记得更新 OBS 里的地址' }]);
   await act('overlay.test', 'super_chat');
   await act('overlay.test', 'danmaku');
   assert.deepEqual([...context.calls.slice(-2).map(call => call.payload.kind)], ['super_chat', 'danmaku']);
@@ -1622,7 +1607,8 @@ test('broadcast refresh is read-only, opt-in and rate limited', async () => {
   context.calls = [];
   context.view = broadcastSnapshot({ room: null });
   vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 }; snapshot.preferences = { broadcast_console: false }; step = 'main';
-    command = async (action, payload, options) => { calls.push({ action, options }); return snapshot; };
+    window.__TAURI__ = { core: { invoke: async (kind, args) => { if (kind !== 'dispatch') throw new Error('unexpected IPC'); calls.push(args); return snapshot; } } };
+    acceptSnapshot = next => { snapshot = next; };
     updateBroadcastViews = () => {};`, context);
   const refresh = vm.runInContext('refreshBroadcast', context);
   await refresh();
@@ -1634,7 +1620,8 @@ test('broadcast refresh is read-only, opt-in and rate limited', async () => {
   await refresh();
   await refresh();
   assert.deepEqual(context.calls.map(call => call.action), ['bili.broadcast.refresh']);
-  assert.equal(context.calls[0].options.silent, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls[0].payload)), {});
+  assert.equal(vm.runInContext('pendingCommands', context), 0, 'background room read must not pause snapshot polling');
   vm.runInContext('snapshot.account = { user_id: 43 };', context);
   await refresh();
   assert.equal(context.calls.length, 2);
@@ -1663,7 +1650,7 @@ test('going live submits pending title edits first, then opens with the saved ca
     { action: 'bili.broadcast.start', payload: { confirmed: true, area_id: 87 } },
   ]);
   assert.equal(form.dataset.dirty, undefined);
-  assert.deepEqual(context.calls.filter(call => call.panel).map(call => call.panel), ['push']);
+  assert.deepEqual(context.calls.filter(call => call.panel).map(call => call.panel), []);
 });
 
 test('face verification opens its own panel instead of claiming the room is live', async () => {
@@ -1678,25 +1665,65 @@ test('face verification opens its own panel instead of claiming the room is live
     updateBroadcastViews = () => {};`, context);
   await vm.runInContext('startBroadcast', context)();
   assert.deepEqual(context.calls.filter(call => call.panel).map(call => call.panel), ['face']);
-  assert.equal(context.calls.find(call => call.toast).toast, '请先扫码完成人脸验证');
+  assert.deepEqual(context.calls.filter(call => call.toast), [], 'main face sheet already explains verification');
+  assert.equal(vm.runInContext('snapshot.broadcast.room.live_status', context), 0);
+  context.calls.length = 0;
+  vm.runInContext('settingsDialog.open = true', context);
+  await vm.runInContext('startBroadcast', context)();
+  assert.deepEqual(context.calls.filter(call => call.panel), [], 'Settings keeps its own face section');
+  assert.deepEqual(context.calls.filter(call => call.toast).map(call => call.toast), ['请先扫码完成人脸验证']);
+  assert.equal(vm.runInContext('snapshot.broadcast.room.live_status', context), 0);
 });
 
-test('ending the stream needs confirmation and never touches chat reception', async () => {
+test('ending the stream is one click, reports the OBS link and never touches chat reception', async () => {
   const context = appContext();
   context.calls = [];
+  context.toasts = [];
   context.view = broadcastSnapshot({ room: { ...broadcastSnapshot().room, live_status: 1, live_since: 1 }, has_stream_key: true });
   vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 };
-    let answer = false; document.querySelectorAll = () => [];
-    confirmAction = async () => { calls.push('confirm'); return answer; };
-    command = async action => { calls.push({ action }); return snapshot; };
-    showToast = () => {}; closeOnAirPanel = () => {}; updateBroadcastViews = () => {};
-    globalThis.setAnswer = value => { answer = value; };`, context);
+    let obs = null; document.querySelectorAll = () => [];
+    confirmAction = async () => { calls.push('confirm'); return false; };
+    command = async action => { calls.push({ action }); return obs ? { ...snapshot, result: { obs } } : snapshot; };
+    showToast = (message, error = false) => { toasts.push([message, error]); }; closeOnAirPanel = () => {}; updateBroadcastViews = () => {};
+    globalThis.setObs = value => { obs = value; };`, context);
   const act = vm.runInContext('handleAction', context);
   await act('broadcast.stop');
-  assert.deepEqual(JSON.parse(JSON.stringify(context.calls)), ['confirm']);
-  vm.runInContext('setAnswer(true)', context);
+  assert.deepEqual(context.calls.map(call => call.action || call), ['bili.broadcast.stop']);
+  vm.runInContext(`setObs({ outcome: 'stopped' })`, context);
   await act('broadcast.stop');
-  assert.deepEqual(context.calls.filter(call => call.action).map(call => call.action), ['bili.broadcast.stop']);
+  vm.runInContext(`setObs({ error: 'OBS WebSocket 密码不正确 [DV-OB03]' })`, context);
+  await act('broadcast.stop');
+  assert.deepEqual(context.calls.map(call => call.action || call), ['bili.broadcast.stop', 'bili.broadcast.stop', 'bili.broadcast.stop']);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.toasts)), [
+    ['已下播', false],
+    ['已下播，OBS 已停止推流', false],
+    ['已下播，但 OBS 没能停止推流，请在 OBS 里手动停止：OBS WebSocket 密码不正确 [DV-OB03]', true],
+  ]);
+});
+
+test('OBS page: one connection card, separate forms, launch/test/add send their own commands', async () => {
+  const context = appContext();
+  context.overlay = overlaySnapshot();
+  context.calls = [];
+  vm.runInContext(`snapshot.overlay = overlay; snapshot.preferences = { broadcast_console: true };
+    snapshot.obs = { settings: { enabled: true, host: '127.0.0.1', port: 4455, auto_launch: true, executable: null }, has_password: true, status: { state: 'ok', streaming: false, obs_version: '31.0.0' }, detected: 'C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe', local: true };
+    showToast = (message, error = false) => calls.push({ toast: message, error });
+    command = async (action, payload) => { calls.push({ action, payload });
+      return { result: action === 'obs.overlay.add' ? { created: true, added_to_scene: true, found: true, scene: '游戏场景', width: 2560, height: 1440 } : action === 'obs.launch' ? { launched: true } : { streaming: false } }; };`, context);
+  const html = vm.runInContext("settingsTab = 'live'; livePanel = 'broadcast'; renderSettingsPage()", context);
+  assert.equal((html.match(/data-obs-root/g) || []).length, 1);
+  assert.match(html, /已连接 OBS 31\.0\.0/);
+  assert.match(html, /自动：C:\\Program Files\\obs-studio\\bin\\64bit\\obs64\.exe/);
+  assert.match(html, /name="auto_launch" checked/);
+  assert.match(html, /data-action="obs\.launch"/);
+  assert.doesNotMatch(html, /data-obs-more open/, 'a working connection keeps its details folded');
+  const act = vm.runInContext('handleAction', context);
+  await act('obs.launch');
+  await act('obs.test');
+  await act('overlay.obs_add');
+  assert.deepEqual(context.calls.filter(call => call.action).map(call => call.action), ['obs.launch', 'obs.test', 'obs.overlay.add']);
+  assert.deepEqual(context.calls.filter(call => call.toast).map(call => call.toast), ['OBS 已启动并连上', 'OBS 连接正常 · 未在推流', '已添加到 OBS · “游戏场景” · 2560 × 1440']);
+  assert.equal(vm.runInContext('obsBusy', context), '');
 });
 
 test('broadcast settings show a preview until enabled and never print push credentials', () => {
@@ -1707,7 +1734,7 @@ test('broadcast settings show a preview until enabled and never print push crede
   vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 }; snapshot.preferences = { broadcast_console: false };
     settingsDialog.open = true; settingsDialog.querySelector = selector => selector === '[data-broadcast-body]' ? body : null;
     refreshBroadcast = async () => {}; startOnAirClocks = () => {};`, context);
-  const page = vm.runInContext('renderBroadcastSettings()', context);
+  const page = vm.runInContext('renderBroadcastPanel()', context);
   assert.match(page, /data-broadcast-enable/);
   assert.doesNotMatch(page, /data-broadcast-enable checked/);
   vm.runInContext('updateBroadcastSettings()', context);
@@ -1723,4 +1750,91 @@ test('broadcast settings show a preview until enabled and never print push crede
   vm.runInContext('snapshot.account = { user_id: null };', context);
   vm.runInContext('updateBroadcastSettings()', context);
   assert.match(body.innerHTML, /data-id="room"/);
+});
+
+
+test('a failed voice choice is consumed so a second close can finish', async () => {
+  const context = appContext();
+  vm.runInContext('voiceAuditionDefaultSave = Promise.reject(new Error("temporary"));', context);
+  assert.equal(await vm.runInContext('settleVoiceAuditionChoice()', context), false);
+  assert.equal(await vm.runInContext('settleVoiceAuditionChoice()', context), true);
+});
+
+test('an older voice metadata reply cannot replace the latest editor data', async () => {
+  const context = appContext();
+  let release;
+  context.oldReply = new Promise(resolve => { release = resolve; });
+  vm.runInContext(`snapshot.connections.push({id:'new', settings:{provider:'dots'}});
+    command = async (action, payload) => payload.connection_id === 'dots-connection' ? oldReply : {result:[{new:true}]};`, context);
+  const old = vm.runInContext("loadVoiceEditorData('dots-connection')", context);
+  vm.runInContext("editor = {type:'preset',connectionId:'new'}", context);
+  await vm.runInContext("loadVoiceEditorData('new')", context);
+  release({result:[{old:true}]}); await old;
+  assert.equal(vm.runInContext('referenceProfiles[0].new', context), true);
+});
+
+
+test('dots edits typed during save are committed after ID reconciliation', async () => {
+  const context = appContext();
+  vm.runInContext('renderPresetEditor("")', context);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const calls = [];
+  context.mockCommand = async (action, payload) => {
+    calls.push(structuredClone(payload));
+    if (calls.length === 1) await gate;
+    context.savedPreset = payload.preset;
+    vm.runInContext('snapshot.presets = [{...savedPreset,id:"created"}]', context);
+    return {result:{id:'created'}};
+  };
+  vm.runInContext('command = mockCommand', context);
+  const form = {dataset:{id:'',connectionId:'dots-connection'},
+    fields:{name:'first',audio_path:'C:\\fictional.wav',reference_text:'',speed:'1',volume:'1'},
+    checkValidity(){return true},querySelectorAll(){return []},
+    cloneNode(){return {dataset:{...this.dataset},querySelectorAll(){return []},removeAttribute(){},outerHTML:'<form></form>'}}};
+  const saving = vm.runInContext('saveDotsPresetForm', context)(form);
+  form.fields.name = 'typed while saving';
+  release(); await saving;
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].preset.id, 'created');
+  assert.equal(calls[1].preset.name, 'typed while saving');
+  assert.equal(form.dataset.dirty, undefined);
+  assert.equal(vm.runInContext('formDrafts.size', context), 0);
+});
+
+test('settling an older voice choice never erases a newer pending choice', async () => {
+  const context = appContext();
+  let reject;
+  context.first = new Promise((_, fail) => {reject=fail});
+  context.second = Promise.resolve('new choice');
+  vm.runInContext('voiceAuditionDefaultSave = first', context);
+  const settling = vm.runInContext('settleVoiceAuditionChoice()',context);
+  vm.runInContext('voiceAuditionDefaultSave = second',context);
+  reject(new Error('old failed')); await settling;
+  assert.equal(vm.runInContext('voiceAuditionDefaultSave === second',context),true);
+});
+
+test('reference edits during a save are serialized and the latest text is retained', async () => {
+  const context = appContext();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const writes = [];
+  context.mockCommand = async (action, payload) => {
+    if (action === 'references.list') return {result: []};
+    assert.equal(action, 'references.save');
+    writes.push(structuredClone(payload.profile));
+    if (writes.length === 1) await gate;
+  };
+  context.presetForm = {dataset:{id:'voice'},checkValidity(){return true},elements:{connection_id:{value:'dots-connection'},voice_id:{value:'role'}}};
+  vm.runInContext(`editor.makePreferred=false; command=mockCommand; scheduleAutosave=()=>{}; showToast=()=>{};
+    settingsDialog.querySelector=selector=>selector==='[data-form="preset"]'?presetForm:null;`, context);
+  const form = {dataset:{dirty:'true'},fields:{audio_path:'C:\\fixture.wav',reference_text:'first'}};
+  const save = vm.runInContext('saveReferenceForm', context);
+  const first = save(form);
+  await new Promise(resolve => setImmediate(resolve));
+  form.fields.reference_text = 'new edit';
+  const duplicate = save(form);
+  release(); await Promise.all([first, duplicate]);
+  assert.deepEqual(writes.map(profile => profile.reference_text), ['first', 'new edit']);
+  assert.equal(form.dataset.dirty, undefined);
 });

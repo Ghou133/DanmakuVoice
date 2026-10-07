@@ -49,3 +49,15 @@ test('every font the OBS overlay asks for is embedded and allowed by the overlay
     assert.ok(server.includes(`"${font}"`), `${font} is used by the overlay but not served`);
   }
 });
+
+test('scene and overlay preserve original Google font weight matching', () => {
+  for (const file of ['./styles.css', '../overlay/overlay.html']) {
+    const source = readFileSync(new URL(file, import.meta.url), 'utf8');
+    for (const [name, weight] of [['Medium', 500], ['Bold', 700], ['Black', 900]]) {
+      const rule = [...source.matchAll(/@font-face\{([^}]+)\}/g)]
+        .find(match => match[1].includes(`DanmakuVoiceSerifSC-${name}.woff2`))?.[1];
+      assert.ok(rule, `${file} embeds the ${name} face`);
+      assert.match(rule, new RegExp(`font-weight:${weight}(?:;|$)`), `${file} matches the original exact ${weight} declaration`);
+    }
+  }
+});

@@ -12,9 +12,9 @@
    a 1920×1080 canvas multiplied by --p, so 2K, 4K, 16:10 and ultrawide
    browser sources scale from their real size.
    ========================================================================== */
-@font-face{font-family:"DV Serif";src:url("/overlay/fonts/DanmakuVoiceSerifSC-Medium.woff2") format("woff2");font-weight:100 599;font-display:block}
-@font-face{font-family:"DV Serif";src:url("/overlay/fonts/DanmakuVoiceSerifSC-Bold.woff2") format("woff2");font-weight:600 849;font-display:block}
-@font-face{font-family:"DV Serif";src:url("/overlay/fonts/DanmakuVoiceSerifSC-Black.woff2") format("woff2");font-weight:850 1000;font-display:block}
+@font-face{font-family:"DV Serif";src:url("/overlay/fonts/DanmakuVoiceSerifSC-Medium.woff2") format("woff2");font-weight:500;font-display:block}
+@font-face{font-family:"DV Serif";src:url("/overlay/fonts/DanmakuVoiceSerifSC-Bold.woff2") format("woff2");font-weight:700;font-display:block}
+@font-face{font-family:"DV Serif";src:url("/overlay/fonts/DanmakuVoiceSerifSC-Black.woff2") format("woff2");font-weight:900;font-display:block}
 @font-face{font-family:"DV Numeral";src:url("/overlay/fonts/InstrumentSerif-Regular.woff2") format("woff2");font-style:normal;font-display:block}
 @font-face{font-family:"DV Numeral";src:url("/overlay/fonts/InstrumentSerif-Italic.woff2") format("woff2");font-style:italic;font-display:block}
 :root{
@@ -261,6 +261,7 @@ const state = {
   tickets: new Map(),      // seq -> ticket record
   lastSeq: 0,
   instance: "",
+  session: null,
   inbox: [],               // paced arrivals in busy rooms
 };
 const corners = { top_left: "tl", top_right: "tr", bottom_left: "bl", bottom_right: "br" };
@@ -284,6 +285,8 @@ function applyConfig(config) {
   fit();
   refreshTagline();
   layoutChanged();
+  trim();
+  ensureLoop();
 }
 
 // ---------------------------------------------------------------- masthead
@@ -342,18 +345,37 @@ function face(viewer, avatar) {
   }
   return wrap;
 }
+function emoteImage(kind, emote) {
+  const img = h("img", kind);
+  img.alt = ""; img.setAttribute("aria-label", emote.text); img.referrerPolicy = "no-referrer";
+  img.onerror = () => {
+    const fallback = h("span", `${kind} emote-unavailable`);
+    fallback.setAttribute("role", "img"); fallback.setAttribute("aria-label", emote.text);
+    fallback.style.display = kind === "sticker" ? "block" : "inline-block";
+    fallback.style.width = fallback.style.height = kind === "sticker" ? "calc(96 * var(--p))" : "1.45em";
+    fallback.innerHTML = '<svg viewBox="0 0 24 24" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><circle cx="8" cy="8" r="1.5"/><path d="m4 17 5-5 3 3 3-4 5 6"/></svg>';
+    img.replaceWith(fallback);
+  };
+  img.src = emote.url;
+  return img;
+}
 function messageNodes(item, target) {
   const msg = String(item.message || "");
-  const emotes = (item.emotes || []).filter(e => e && e.text && SAFE_IMG.test(e.url || ""));
+  const emotes = (Array.isArray(item.emotes) ? item.emotes : []).slice(0, 32).filter(e => {
+    if (!e || typeof e.text !== "string" || !e.text || !SAFE_IMG.test(e.url || "")) return false;
+    try {
+      const url = new URL(e.url);
+      return url.protocol === "https:" && /^i\d+\.hdslb\.com$/i.test(url.hostname) && !url.port && !url.username && !url.password && url.pathname.startsWith("/bfs/") && !/\.svg(?:$|@)/i.test(url.pathname);
+    } catch { return false; }
+  }).sort((a, b) => b.text.length - a.text.length);
   if (item.sticker && emotes.length === 1 && emotes[0].text === msg.trim()) {
-    const img = h("img", "sticker"); img.alt = msg; img.referrerPolicy = "no-referrer"; img.src = emotes[0].url;
-    target.append(img); return true;
+    target.append(emoteImage("sticker", emotes[0])); return true;
   }
   let i = 0, buffer = "";
   const flush = () => { if (buffer) { target.append(buffer); buffer = ""; } };
   while (i < msg.length) {
     const e = emotes.find(e => msg.startsWith(e.text, i));
-    if (e) { flush(); const img = h("img", "emote"); img.alt = e.text; img.referrerPolicy = "no-referrer"; img.src = e.url; target.append(img); i += e.text.length; }
+    if (e) { flush(); target.append(emoteImage("emote", e)); i += e.text.length; }
     else { buffer += msg[i]; i++; }
   }
   flush();
@@ -390,12 +412,13 @@ function buildItem(item) {
 
 // ---------------------------------------------------------------- items
 function lingerMs() { return Math.max(3, Number(state.config.linger_seconds) || 14) * 1000; }
+function retainsRows() { return ov.dataset.style === "spine"; }
 function spotHoldMs(rec) { return Math.min(lingerMs(), 4500 + 140 * [...String(rec.item.message || "")].length); }
 
 // Busy rooms: at most one new line every 300 ms. Lines that will be read are
 // never dropped; display-only lines beyond a short backlog are skipped.
 function receive(item) {
-  if (!item || !item.seq || item.seq <= state.lastSeq) return;
+  if (!item || (item.session != null && item.session !== state.session) || !item.seq || item.seq <= state.lastSeq) return;
   state.lastSeq = item.seq;
   if (item.kind === "super_chat") return addTicket(item);
   state.inbox.push(item);
@@ -416,9 +439,12 @@ function pump() {
   }, wait);
 }
 
-function addItem(item) {
+function addItem(item, restoring = false) {
   if (!item) return;
   if (item.kind === "super_chat") return addTicket(item);
+  // A long queued job can be restored after falling out of the server cache
+  // while its original pending row is still on screen. Keep that same row.
+  if (item.job_id != null && [...state.items.values()].some(rec => !rec.leaving && rec.job === item.job_id)) return;
   // Spam that will not be read merges into the matching line on screen.
   if (state.config.merge && item.kind === "danmaku" && item.job_id == null && textKey(item)) {
     for (const rec of state.items.values()) {
@@ -433,17 +459,20 @@ function addItem(item) {
   }
   const rec = {
     seq: item.seq, item, el: buildItem(item), job: item.job_id ?? null, count: 1, leaving: false,
-    born: now(), expires: now() + lingerMs(), state: item.job_id != null ? "pending" : "none",
+    born: now(), expires: now() + lingerMs(), state: restoring ? "done" : item.job_id != null ? "pending" : "none",
     demoUntil: item.demo_read_ms ? now() + 700 + item.demo_read_ms : 0, demoStart: item.demo_read_ms ? now() + 700 : 0,
   };
   if (rec.state === "pending") rec.expires = now() + 90000;
   state.items.set(rec.seq, rec);
-  rec.el.classList.add("enter");
+  if (!restoring) rec.el.classList.add("enter");
   flip(() => list.prepend(rec.el));
   // A new message takes the spotlight unless someone is being read.
-  if (!readingRecord()) setSpot(rec, rec.state === "pending" ? "waiting" : "timer");
+  if (restoring) {
+    if (state.reading && rec.job === state.reading.job_id) { rec.state = "reading"; setSpot(rec, "reading"); }
+    markRecent();
+  } else if (!readingRecord()) setSpot(rec, rec.state === "pending" ? "waiting" : "timer");
   trim();
-  pulse();
+  if (!restoring) pulse();
   refreshTagline();
   ensureLoop();
 }
@@ -473,6 +502,7 @@ function setSpot(rec, mode) {
     }
     markRecent();
   });
+  if (retainsRows()) trim();
 }
 function demote(rec) {
   rec.el.classList.remove("spot", "timer", "reading");
@@ -499,6 +529,15 @@ function markRecent() {
 function setLit(rec, fraction) {
   rec.el.querySelector(".lit").style.setProperty("--lit", `${Math.round(Math.min(1, Math.max(0, fraction)) * 1000) / 10}%`);
 }
+function settle(rec) {
+  if (rec.leaving || state.items.get(rec.seq) !== rec) return;
+  flip(() => {
+    demote(rec);
+    markRecent();
+    if (retainsRows()) trim(); else depth();
+  });
+  refreshTagline();
+}
 
 function trim() {
   const alive = [...state.items.values()].filter(r => !r.leaving).sort((a, b) => b.seq - a.seq);
@@ -523,10 +562,26 @@ function remove(rec) {
   rec.el.classList.add("out");
   const height = rec.el.offsetHeight;
   setTimeout(() => {
-    flip(() => { rec.el.remove(); state.items.delete(rec.seq); });
+    flip(() => { rec.el.remove(); if (state.items.get(rec.seq) === rec) state.items.delete(rec.seq); });
     markRecent(); depth(); refreshTagline(); layoutChanged();
   }, motion ? 450 : 0);
   return height;
+}
+function clearOverlay() {
+  clearTimeout(pumpTimer); pumpTimer = 0; lastInsert = 0;
+  state.inbox.length = 0;
+  state.reading = null;
+  for (const rec of [...state.items.values()]) remove(rec);
+  state.items.clear();
+  for (const rec of [...state.tickets.values()]) dropTicket(rec);
+  state.spot = null;
+  refreshTagline();
+}
+function restoreItem(item) {
+  if (!item || (item.session != null && item.session !== state.session) || !item.seq || item.seq <= state.lastSeq) return;
+  state.lastSeq = item.seq;
+  // Restored jobs can still become active, but old readings never replay.
+  addItem(item, true);
 }
 
 // FLIP keeps rows sliding instead of jumping when the list changes.
@@ -612,6 +667,7 @@ function readingFraction() {
   return Math.min(.985, heard / total);
 }
 function setReading(reading) {
+  if (reading?.session != null && reading.session !== state.session) return;
   const previous = state.reading;
   state.reading = reading && reading.job_id != null ? { ...reading, at: now() } : null;
   if (previous && (!state.reading || previous.job_id !== state.reading.job_id)) finishJob(previous.job_id);
@@ -634,7 +690,7 @@ function finishJob(job) {
     rec.el.classList.remove("reading");
     rec.expires = now() + lingerMs();
     // Stay large for a breath, then fold back into the list.
-    setTimeout(() => { if (state.spot === rec.seq && !readingRecord()) flip(() => { demote(rec); markRecent(); depth(); }); }, 1600);
+    setTimeout(() => { if (state.spot === rec.seq && !readingRecord()) settle(rec); }, 1600);
   }
   const ticket = [...state.tickets.values()].find(r => r.job === job);
   if (ticket) { ticket.el.classList.remove("reading"); setTicketLit(ticket, 1); ticket.readDone = now(); }
@@ -663,19 +719,21 @@ function frame() {
       } else {
         rec.demoUntil = 0; rec.el.style.setProperty("--prog", "1"); rec.el.style.setProperty("--live", "0"); setLit(rec, 1); rec.el.classList.remove("reading");
         rec.expires = t + lingerMs();
-        setTimeout(() => { if (state.spot === rec.seq && !readingRecord()) flip(() => { demote(rec); markRecent(); depth(); }); refreshTagline(); }, 1600);
+        setTimeout(() => { if (state.spot === rec.seq && !readingRecord()) settle(rec); }, 1600);
       }
     } else if (state.spot === rec.seq && rec.spotMode === "timer") {
       const f = (t - rec.spotAt) / spotHoldMs(rec);
       rec.el.style.setProperty("--prog", Math.min(1, f).toFixed(4));
-      if (f >= 1) flip(() => { demote(rec); markRecent(); depth(); });
+      if (f >= 1) settle(rec);
       else busy = true;
     } else if (state.spot === rec.seq && rec.spotMode === "waiting" && t - rec.spotAt > 20000) {
       // Queued behind a long read: give the spotlight back.
-      flip(() => { demote(rec); markRecent(); depth(); });
+      settle(rec);
     }
-    if (t > rec.expires && state.spot !== rec.seq && rec.state !== "reading") remove(rec);
-    else if (!busy) busy = true;
+    if (!retainsRows()) {
+      if (t > rec.expires && state.spot !== rec.seq && rec.state !== "reading") remove(rec);
+      else busy = true;
+    } else if (state.spot === rec.seq && rec.spotMode === "waiting") busy = true;
   }
   for (const rec of state.tickets.values()) {
     const left = Math.max(0, 1 - (t - rec.start) / rec.total);
@@ -697,34 +755,118 @@ function frame() {
 
 // ---------------------------------------------------------------- connection
 const token = new URLSearchParams(location.search).get("token") || "";
-let source = null, sizeTimer = 0;
+let source = null, sizeTimer = 0, recoveryTimer = 0, watchdogTimer = 0;
+let retryAttempt = 0, connectionStopped = false, tokenRevoked = false;
+const SOURCE_CHECK_MS = 5000, SOURCE_IDLE_MS = 45000;
+function stopConnection(revoked = false) {
+  tokenRevoked ||= revoked;
+  connectionStopped = true;
+  clearTimeout(sizeTimer); sizeTimer = 0;
+  clearTimeout(recoveryTimer); recoveryTimer = 0;
+  clearTimeout(watchdogTimer); watchdogTimer = 0;
+  const previous = source; source = null;
+  previous?.close();
+}
+function recoverConnection() {
+  if (!token || connectionStopped || tokenRevoked || recoveryTimer) return;
+  clearTimeout(watchdogTimer); watchdogTimer = 0;
+  if (source && source.readyState !== EventSource.CLOSED) source.close();
+  state.status = { ...state.status, connection: "reconnecting" };
+  refreshTagline();
+  const delay = Math.min(30000, 1000 * 2 ** retryAttempt);
+  retryAttempt = Math.min(5, retryAttempt + 1);
+  recoveryTimer = setTimeout(() => { recoveryTimer = 0; connect(); }, delay);
+}
 function connect() {
-  if (source) source.close();
+  if (!token || connectionStopped || tokenRevoked) return;
+  clearTimeout(sizeTimer); sizeTimer = 0;
+  clearTimeout(recoveryTimer); recoveryTimer = 0;
+  clearTimeout(watchdogTimer); watchdogTimer = 0;
+  const previous = source; source = null;
+  previous?.close();
   const query = new URLSearchParams({ token, w: String(innerWidth), h: String(innerHeight) });
-  source = new EventSource(`/overlay/events?${query}`);
-  source.addEventListener("hello", e => {
+  let current;
+  try { current = new EventSource(`/overlay/events?${query}`); }
+  catch { recoverConnection(); return; }
+  source = current;
+  let lastFrameAt = now(), helloReceived = false, heartbeatTimeout = 0;
+  const active = () => source === current && !connectionStopped && !tokenRevoked;
+  const listen = (name, handler) => current.addEventListener(name, e => {
+    if (!active() || (recoveryTimer && name !== "reset")) return;
+    lastFrameAt = now();
+    handler(e);
+  });
+  const watch = () => {
+    watchdogTimer = 0;
+    if (!active()) return;
+    if (current.readyState === EventSource.CLOSED) { recoverConnection(); return; }
+    // CONNECTING owns the browser's normal retry loop. OPEN without a hello,
+    // or without the server's advertised heartbeat, can otherwise stay stuck.
+    const idleLimit = helloReceived ? heartbeatTimeout : SOURCE_IDLE_MS;
+    if (current.readyState === EventSource.OPEN && idleLimit && now() - lastFrameAt >= idleLimit) {
+      recoverConnection(); return;
+    }
+    watchdogTimer = setTimeout(watch, SOURCE_CHECK_MS);
+  };
+  watchdogTimer = setTimeout(watch, SOURCE_CHECK_MS);
+  current.onopen = () => { if (active()) lastFrameAt = now(); };
+  listen("hello", e => {
     const data = JSON.parse(e.data);
-    if (data.instance !== state.instance) {
-      // The app restarted: its message numbers start again.
+    if (data.instance === state.instance && data.session != null && state.session != null && data.session < state.session) return;
+    helloReceived = true;
+    retryAttempt = 0;
+    // Older servers only sent SSE comments, which EventSource cannot observe.
+    const heartbeatMs = Number(data.heartbeat_ms);
+    heartbeatTimeout = Number.isFinite(heartbeatMs) && heartbeatMs > 0
+      ? Math.max(SOURCE_IDLE_MS, Math.min(300000, heartbeatMs * 3)) : 0;
+    if (data.instance !== state.instance || (data.session != null && data.session !== state.session)) {
+      // A new app or receiving/broadcast session cannot retain old rows.
+      clearOverlay();
       state.instance = data.instance;
+      state.session = data.session ?? null;
       state.lastSeq = 0;
     }
     applyConfig(data.config || {});
     state.status = { ...state.status, ...(data.status || {}) };
-    for (const item of data.items || []) if (Date.now() - (item.at || 0) < lingerMs()) receive(item);
     setReading(data.reading);
+    for (const item of data.items || []) {
+      if (retainsRows() && item.kind !== "super_chat") restoreItem(item);
+      else if (Date.now() - (item.at || 0) < lingerMs()) receive(item);
+    }
+    const active = readingRecord();
+    if (retainsRows() && active) setSpot(active, "reading");
     ov.classList.add("ready");
   });
-  source.addEventListener("config", e => applyConfig(JSON.parse(e.data)));
-  source.addEventListener("status", e => { state.status = { ...state.status, ...JSON.parse(e.data) }; refreshTagline(); });
-  source.addEventListener("item", e => receive(JSON.parse(e.data)));
-  source.addEventListener("reading", e => setReading(JSON.parse(e.data)));
-  source.addEventListener("clear", () => { for (const rec of [...state.items.values()]) remove(rec); for (const rec of [...state.tickets.values()]) dropTicket(rec); });
+  listen("heartbeat", () => {});
+  listen("config", e => applyConfig(JSON.parse(e.data)));
+  listen("status", e => { state.status = { ...state.status, ...JSON.parse(e.data) }; refreshTagline(); });
+  listen("item", e => receive(JSON.parse(e.data)));
+  listen("reading", e => setReading(JSON.parse(e.data)));
+  listen("clear", e => {
+    const session = JSON.parse(e.data).session;
+    // A reconnect hello can already include this boundary and its newer rows.
+    if (session != null && state.session != null && session <= state.session) return;
+    clearOverlay();
+    if (session != null) state.session = session;
+  });
   // The streamer created a new address: this page stops showing chat.
-  source.addEventListener("reset", () => { source.close(); ov.classList.remove("ready"); });
-  source.onerror = () => { state.status = { ...state.status, connection: "reconnecting" }; refreshTagline(); };
+  listen("reset", () => { stopConnection(true); ov.classList.remove("ready"); });
+  current.onerror = () => {
+    if (!active() || recoveryTimer) return;
+    state.status = { ...state.status, connection: "reconnecting" }; refreshTagline();
+    if (current.readyState === EventSource.CLOSED) recoverConnection();
+  };
 }
-addEventListener("resize", () => { fit(); clearTimeout(sizeTimer); sizeTimer = setTimeout(connect, 800); });
+addEventListener("resize", () => {
+  fit();
+  if (!token || connectionStopped || tokenRevoked) return;
+  clearTimeout(sizeTimer); sizeTimer = setTimeout(connect, 800);
+});
+addEventListener("pagehide", () => stopConnection());
+addEventListener("pageshow", e => {
+  if (!e.persisted || !connectionStopped || tokenRevoked) return;
+  connectionStopped = false; retryAttempt = 0; connect();
+});
 clock(); setInterval(clock, 10000);
 fit(); refreshTagline();
 if (token) connect();

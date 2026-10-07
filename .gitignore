@@ -1,6 +1,7 @@
 /target/
 /dist/
 /data/
+/Claude outputs/
 /crates/desktop/gen/
 *.log
 *.pdb

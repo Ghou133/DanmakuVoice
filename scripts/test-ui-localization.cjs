@@ -12,7 +12,7 @@ const output = path.resolve(__dirname, '../dist/language-tests');
 const state = {
   config_revision: 1, onboarding_done: true, network_disabled: true, app_version: '0.2.2', data_dir: 'E:/测试数据',
   preferences: { language:'zh-CN', appearance:'dark', scale:1, output:'default', master_volume:1, muted:false, tts_enabled:true },
-  setup: {room_id:123,tts_enabled:true,mode:'anonymous',uid:42},
+  setup: {room_id:123,tts_enabled:true,mode:'account',uid:42},
   live_settings: {room_id:123,gift_merge:{enabled:false,initial_seconds:1.5,increment_seconds:.5,maximum_seconds:5}},
   live: {running:false,state:'stopped',events:[{room_id:123,kind:'danmaku',user_name:'设置声音',message:'中文弹幕 <img src=x onerror=alert(1)>',observed_at_ms:1}],errors:0,no_voice:0},
   queue: {current:null,pending:[],history:[]},
@@ -44,7 +44,7 @@ let failLanguage = false;
   const origin = 'http://127.0.0.1:'+server.address().port;
   let browser;
   try {
-    browser = await chromium.launch({headless:true,channel:'msedge'});
+    browser = await chromium.launch({headless:true,channel:'msedge',args:['--disable-features=msWindowTabManagerPublic']});
     const context = await browser.newContext({viewport:{width:1040,height:740}});
     await context.route('**/*',route=>route.request().url().startsWith(origin+'/')?route.continue():route.abort());
     const page = await context.newPage();
@@ -69,7 +69,7 @@ let failLanguage = false;
       window.__TAURI__={core:{invoke:(command,args)=>window.__offlineInvoke(command,args)},event:{listen:async(name,listener)=>{window.__offlineListeners[name]=listener;return()=>{};}}};
     });
     await page.goto(origin);
-    await page.locator('#chat-feed article').waitFor();
+    await page.locator('#lake-current .lake-message').waitFor();
     await page.locator('[data-action="settings.open"]').click();
     const tab = id => page.locator(`.settings-nav [data-id="${id}"]`).click();
     const switchLanguage = async language => {
@@ -84,7 +84,7 @@ let failLanguage = false;
     assert.equal(state.rules.templates.danmaku,'{user_name}说：{message}');
     assert.equal(state.presets[0].name,'中文音色设置');
     await page.screenshot({path:path.join(output,'appearance-en-dark.png')});
-    for(const id of ['room','voices','rules','assets','overlay','general','data']) {
+    for(const id of ['room','voices','rules','assets','live','general','data']) {
       await tab(id);
       assert.ok(await page.locator('#settings-content').innerText(),id);
       const overflow = await page.locator('#settings-content').evaluate(node=>node.scrollWidth>node.clientWidth+2);
@@ -113,7 +113,7 @@ let failLanguage = false;
     assert.equal(await page.locator('input[name="name"]').inputValue(),'未完成中文音色');
     assert.match(await page.locator('#settings-content').innerText(),/Add dots voice/);
     await page.reload();
-    await page.locator('#chat-feed article').waitFor();
+    await page.locator('#lake-current .lake-message').waitFor();
     await page.locator('[data-action="settings.open"]').click();
     // Failed language persistence retains English and restores the selected value.
     await tab('general');
@@ -124,10 +124,10 @@ let failLanguage = false;
     assert.equal(await page.locator('html').getAttribute('lang'),'en');
     failLanguage=false;
     await page.reload();
-    await page.locator('#chat-feed article').waitFor();
+    await page.locator('#lake-current .lake-message').waitFor();
     assert.equal(await page.locator('html').getAttribute('lang'),'en');
-    assert.match(await page.locator('#chat-feed').innerText(),/中文弹幕 <img src=x onerror=alert\(1\)>/);
-    assert.equal(await page.locator('#chat-feed .message-bubble img').count(),0);
+    assert.equal(await page.locator('#lake-current .lake-message-text').textContent(),'中文弹幕 <img src=x onerror=alert(1)>');
+    assert.equal(await page.locator('#lake-current .lake-message-text img').count(),0);
     await page.locator('[data-action="settings.open"]').click();
     await tab('general');
     await page.setViewportSize({width:780,height:580});

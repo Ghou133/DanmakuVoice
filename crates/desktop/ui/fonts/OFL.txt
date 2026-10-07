@@ -1,7 +1,14 @@
-Copyright 2017-2023 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+Copyright 2012 Google Inc. All Rights Reserved.
+(c) 2017-2024 Adobe (http://www.adobe.com/).
 
-The files in this folder are a modified version (subset and renamed) of Noto Serif CJK SC 2.002
-(https://github.com/notofonts/noto-cjk). Family name: "DanmakuVoice Serif SC".
+The DanmakuVoiceSerifSC-Medium/Bold/Black.woff2 files are a modified version
+(subset and renamed) of Google Fonts Noto Serif SC 2.003-H1 variable TrueType.
+Family name: "DanmakuVoice Serif SC". Original variable outlines and interpolation
+are preserved; the three compatible asset names contain identical font bytes.
+Source: https://github.com/google/fonts/tree/main/ofl/notoserifsc
+Original NotoSerifSC[wght].ttf SHA256:
+050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9
+Subset: GB2312 hanzi and app UI characters; CSS selects weights 500/700/900.
 Noto is a trademark of Google Inc.
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.

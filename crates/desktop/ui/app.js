@@ -1,8 +1,9 @@
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback } from './helpers.mjs';
+import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
 import { createAutosaveQueue } from './autosave.mjs';
 import { mountSelects, closeSelect, stripSelects } from './select.mjs';
+import { lakeSceneMarkup } from './lake-scene.mjs';
 
 setLanguage(document.documentElement.lang || window.__DANMAKUVOICE_STARTUP_THEME__?.language);
 
@@ -26,6 +27,7 @@ const icons = {
   folder: '<path d="M3 6h7l2 3h9v11H3ZM3 6V4h7l2 2h9v3"/>', info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
   refresh: '<path d="M20 4v6h-6M4 20v-6h6M20 10a8 8 0 0 0-13-6M4 14a8 8 0 0 0 13 6"/>',
   arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
   navRoom: '<path d="M3 6h18v11H3zM8 21h8M12 17v4"/>', navVoice: '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/>',
   navRules: '<path d="M4 6h10M4 12h16M4 18h7M18 4v4M14 16v4"/>', navSounds: '<path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>',
   navOverlay: '<path d="m12 3 9 5-9 5-9-5Z"/><path d="m3 13 9 5 9-5"/>',
@@ -75,8 +77,8 @@ const toggle = (name, label, checked, description = '') => `<label class="toggle
 const heading = (title, description = '') => `<h2 class="settings-page-title">${esc(title)}</h2>${description ? `<p class="settings-page-description">${esc(description)}</p>` : ''}`;
 const saveButton = (label = t('保存更改')) => `<button type="submit" class="button primary">${esc(label)}</button>`;
 const autoStatus = () => t('<div class="autosave-status" role="status" aria-live="polite" hidden><span data-autosave-label></span><button type="button" class="text-button" data-action="autosave.retry" hidden>重试</button><button type="button" class="text-button" data-action="autosave.discard" hidden>丢弃草稿</button></div>');
-const autoFormTypes = new Set(['room-uid', 'gift-merge', 'preset', 'binding', 'tts-toggle', 'rules', 'sound-words', 'audio', 'appearance', 'startup', 'service-local', 'fish-settings', 'fish-preset', 'overlay']);
-const manualSaveFormTypes = new Set(['service-fish', 'fish-voice', 'alias', 'asset', 'migration-apply', 'broadcast-room']);
+const autoFormTypes = new Set(['gift-merge', 'preset', 'binding', 'tts-toggle', 'rules', 'sound-words', 'audio', 'appearance', 'startup', 'service-local', 'fish-settings', 'fish-preset', 'overlay', 'obs', 'obs-link']);
+const manualSaveFormTypes = new Set(['service-fish', 'fish-voice', 'alias', 'asset', 'migration-apply', 'broadcast-room', 'onair-bitrate']);
 const autosaves = new Map();
 const formDrafts = new Map();
 const dotsSaves = new WeakMap();
@@ -117,9 +119,32 @@ let qrFailure = '';
 let qrBusy = false;
 let errorText = '';
 let toastTimer;
+let toastUndo = null;
 let feedSignature = '';
+let lakeTranscriptSignature = '';
+let lakeClockTimer = null;
+let lakeEnded = false;
+let lakePreviousBroadcastLive = false;
+let lakeSessionSummary = null;
+let lakeSessionAccount = '';
+const lakeMessageNodes = new Map();
+const lakeMessageContents = new WeakMap();
+const lakePresentationIdentities = new WeakMap();
+let lakePresentationLedger = null;
+let lakePresentationContext = '';
+let lakePresentationFrame = 0;
+let lakeLetterFlip = false;
 const feedEvents = new Map();
 let viewerContext = null;
+let viewerModerationBusy = false;
+let viewerModerationAccount = '';
+let audienceQuery = '';
+let audienceMoreAt = 0;
+let audienceCloseTimer = null;
+let audiencePinned = false;
+let audienceSignature = '';
+let audienceReturn = false;
+const audienceEntries = new Map();
 let aliasReturnContext = null;
 let volumeDraft = null;
 const voiceAuditionDraft = { provider: '', presetId: '', text: '你好，欢迎来到直播间。' };
@@ -151,6 +176,225 @@ let settingsInkTop = null;
 // Preview-only choices for the OBS overlay page; they never reach OBS.
 let overlayPreview = { backdrop: 'dark' };
 let broadcastBusy = false;
+let chatSendBusy = false;
+let chatMessageDraft = '';
+let chatEmoticonsOpen = false;
+let chatMetadataContext = '';
+let chatEmoteContext = '';
+let chatMetadataLoadedContext = '';
+let chatEmotePackIndex = 0;
+let chatEmotePackKey = '';
+let chatEmotePackTokens = [];
+let chatContextRevision = 0;
+let chatRequestSequence = 0;
+let chatEmoticonError = '';
+
+function syncChatEmoticonContext() {
+  const context = `${snapshot.account?.user_id || ''}:${snapshot.setup?.room_id || ''}`;
+  if (context === chatEmoteContext) return;
+  chatEmoteContext = context;
+  chatMetadataContext = '';
+  chatMetadataLoadedContext = '';
+  chatEmotePackIndex = 0;
+  chatEmotePackKey = '';
+  chatEmotePackTokens = [];
+  chatEmoticonError = '';
+  chatEmoticonsOpen = false;
+  chatSendBusy = false;
+  ++chatContextRevision;
+  ++chatRequestSequence;
+  const picker = document.querySelector('#chat-emoticon-picker');
+  if (picker) { picker.hidden = true; patchMarkup(picker, ''); }
+}
+
+function chatEmoticonView() {
+  const view = snapshot.chat_send || {};
+  const owned = String(view.account_id || '') === String(snapshot.account?.user_id || '') && !!snapshot.account?.user_id;
+  return owned && chatMetadataLoadedContext === chatEmoteContext ? view : {
+    ...view, emoticons: [], warnings: [], message_limit: 20, busy: owned && view.busy, error: owned ? view.error || chatEmoticonError : chatEmoticonError || null,
+  };
+}
+
+function chatEmoticonPackKey(pack) {
+  // The official component exposes name/type/cover, but does not expose a
+  // verified package ID. Cover updates must not reset the selected package.
+  return JSON.stringify([String(pack?.source || 'live'), pack?.pkg_type ?? null, String(pack?.name || '')]);
+}
+
+function chatEmoticonWarnings(view) {
+  return [...new Set((Array.isArray(view.warnings) ? view.warnings : []).filter(warning => typeof warning === 'string' && warning.trim()).map(warning => localizeDiagnostic(warning)))];
+}
+
+function chatEmoticonPackTokens(pack) {
+  return (Array.isArray(pack?.emoticons) ? pack.emoticons : []).map(item => String(item.kind === 'text' ? item.text || item.emoji || '' : item.emoticon_unique || ''));
+}
+
+function chatEmoticonImageFallback() {
+  return '<svg class="lake-emote-fallback" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"></rect><circle cx="8" cy="8" r="1.5"></circle><path d="m4 17 5-5 3 3 3-4 5 6"></path></svg>';
+}
+
+function renderChatEmoticons(picker, view, disabled) {
+  const previousPackKey = chatEmotePackKey;
+  const previousScrollTop = picker.querySelector?.('#chat-emote-page')?.scrollTop || 0;
+  const packs = Array.isArray(view.emoticons) ? view.emoticons : [];
+  if (chatEmotePackKey) {
+    const previousTokens = new Set(chatEmotePackTokens);
+    const matching = packs.map((pack, index) => ({ index, key: chatEmoticonPackKey(pack), overlap: chatEmoticonPackTokens(pack).filter(token => previousTokens.has(token)).length })).filter(pack => pack.key === chatEmotePackKey);
+    if (matching.length) chatEmotePackIndex = matching.reduce((best, candidate) => candidate.overlap > best.overlap ? candidate : best).index;
+  }
+  chatEmotePackIndex = Math.max(0, Math.min(chatEmotePackIndex, packs.length - 1));
+  const pack = packs[chatEmotePackIndex];
+  chatEmotePackKey = pack ? chatEmoticonPackKey(pack) : '';
+  chatEmotePackTokens = chatEmoticonPackTokens(pack);
+  const items = Array.isArray(pack?.emoticons) ? pack.emoticons : [];
+  const tabs = packs.map((item, index) => {
+    const cover = safeMediaUrl(item.icon) || (Array.isArray(item.emoticons) ? item.emoticons.map(emote => safeMediaUrl(emote.url)).find(Boolean) : '');
+    return `<button type="button" role="tab" id="chat-emote-tab-${index}" data-action="chat.emoticon.pack" data-id="${index}" aria-label="${esc(item.name)}" aria-selected="${index === chatEmotePackIndex}" aria-controls="chat-emote-page" tabindex="${index === chatEmotePackIndex ? 0 : -1}">${cover ? `<img class="lake-emote-pack-icon" src="${esc(cover)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : chatEmoticonImageFallback()}</button>`;
+  }).join('');
+  const emoteButtonMarkup = item => {
+    const url = safeMediaUrl(item.url);
+    return `<button type="button" class="lake-emote-sticker" data-action="chat.emoticon.send" data-id="${esc(item.emoticon_unique)}" aria-label="${esc(item.emoji)}"${!item.allowed ? ` aria-description="${esc(item.description || t('当前账号不可发送'))}"` : ''}${disabled || !item.allowed || !item.emoticon_unique ? ' disabled' : ''}>${url ? `<img src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : chatEmoticonImageFallback()}</button>`;
+  };
+  const emptyLabel = chatSendBusy || view.busy ? t('正在读取表情包…') : view.error ? localizeDiagnostic(view.error) : t('暂无可发送的表情包');
+  const content = items.length ? `<div class="lake-emote-stickers">${items.map(emoteButtonMarkup).join('')}</div>` : `<div class="lake-emote-empty" role="status">${chatSendBusy || view.busy ? '<span class="spinner" aria-hidden="true"></span>' : chatEmoticonImageFallback()}<span class="sr-only">${esc(emptyLabel)}</span></div>`;
+  const warnings = chatEmoticonWarnings(view);
+  const warning = warnings.length ? `<div class="lake-emote-warning" role="status"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7v6m0 3h.01"></path></svg><span class="sr-only">${warnings.map(esc).join(' · ')}</span></div>` : '';
+  patchMarkup(picker, `${packs.length ? `<div class="lake-emote-tabs" role="tablist" aria-label="${esc(t('表情包'))}">${tabs}</div>` : ''}${warning}<div id="chat-emote-page" role="tabpanel"${pack ? ` aria-labelledby="chat-emote-tab-${chatEmotePackIndex}"` : ''} data-pack-index="${chatEmotePackIndex}" data-item-count="${items.length}" data-room-id="${esc(view.room_id || '')}">${content}</div>`);
+  const scrollBody = picker.querySelector?.('#chat-emote-page');
+  if (scrollBody && previousPackKey === chatEmotePackKey) scrollBody.scrollTop = previousScrollTop;
+}
+
+function updateChatCompose() {
+  const host = document.querySelector('#chat-compose');
+  if (!host) return;
+  syncChatEmoticonContext();
+  const enabled = step === 'main';
+  host.hidden = !enabled;
+  document.querySelector('#live-shell')?.classList.toggle('chat-compose-mode', enabled);
+  if (!enabled) { chatEmoticonsOpen = false; chatMetadataContext = ''; return; }
+  if (!host.querySelector('form')) {
+    host.innerHTML = `<div class="chat-compose-note" role="status" hidden></div><form data-form="chat-send" class="lake-compose-line"><label class="sr-only" for="chat-message">${esc(t('发送弹幕'))}</label><input id="chat-message" name="message" autocomplete="off" placeholder="${esc(t('说点什么…'))}"><span class="lake-compose-count" hidden></span><button type="button" data-action="chat.emoticons" aria-label="${esc(t('表情包'))}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M8.6 14.2c.9 1.2 2.1 1.9 3.4 1.9s2.5-.7 3.4-1.9"></path><path d="M9.2 9.8h.01M14.8 9.8h.01" style="stroke-width:2.6"></path></svg></button><button type="submit" aria-label="${esc(t('发送'))}">${icon('arrowRight')}</button></form>`;
+    host.querySelector('#chat-message').value = chatMessageDraft;
+    host.querySelector('#chat-message').addEventListener('input', inputEvent => {
+      const count = host.querySelector('.lake-compose-count');
+      count.hidden = !inputEvent.target.value;
+      count.textContent = `${Array.from(inputEvent.target.value).length}/${inputEvent.target.maxLength}`;
+      updateChatCompose();
+    });
+  }
+  const view = chatEmoticonView();
+  const warnings = chatEmoticonWarnings(view);
+  const disabled = !snapshot.account?.user_id || snapshot.network_disabled || chatSendBusy || view.busy;
+  for (const control of host.querySelectorAll('form input, form button')) control.disabled = !!disabled;
+  const input = host.querySelector('#chat-message');
+  input.maxLength = view.message_limit || 20;
+  const diagnostic = [view.error ? localizeDiagnostic(view.error) : '', ...warnings].filter(Boolean).join('\n');
+  const note = !snapshot.account?.user_id ? t('请先扫码登录 B站账号') : snapshot.network_disabled ? t('离线测试窗口不可发送弹幕') : diagnostic;
+  input.title = note;
+  const noteHost = host.querySelector('.chat-compose-note');
+  noteHost.textContent = diagnostic;
+  noteHost.hidden = !diagnostic;
+  const count = host.querySelector('.lake-compose-count');
+  count.hidden = !input.value;
+  count.textContent = `${Array.from(input.value).length}/${input.maxLength}`;
+  const emoteButton = host.querySelector('[data-action="chat.emoticons"]');
+  emoteButton.setAttribute('aria-expanded', String(chatEmoticonsOpen));
+  emoteButton.classList.toggle('on', chatEmoticonsOpen);
+  const submit = host.querySelector('button[type="submit"]');
+  submit.disabled = !!disabled || !input.value.trim();
+  const sending = chatSendBusy || view.busy;
+  if (submit.dataset.sending !== String(!!sending)) {
+    submit.dataset.sending = String(!!sending);
+    submit.innerHTML = sending ? '<span class="spinner" aria-hidden="true"></span>' : icon('arrowRight');
+  }
+  host.querySelector('form').classList.toggle('sending', !!sending);
+  const picker = document.querySelector('#chat-emoticon-picker');
+  if (!picker) return;
+  picker.hidden = !chatEmoticonsOpen;
+  // Load this account/room's actual text limit once; failed reads are retried
+  // only by explicitly opening the picker. Switching windows keeps the draft.
+  const context = chatEmoteContext;
+  if (!disabled && !document.hidden && chatMetadataContext !== context) {
+    chatMetadataContext = context;
+    if (chatMetadataLoadedContext !== context) { void refreshChatEmoticons(true).catch(() => {}); return; }
+  }
+  if (!chatEmoticonsOpen) return;
+  renderChatEmoticons(picker, view, disabled);
+}
+
+async function refreshChatEmoticons(automatic = false) {
+  syncChatEmoticonContext();
+  if (chatSendBusy || !snapshot.account?.user_id || snapshot.network_disabled) return;
+  const context = chatEmoteContext;
+  const sequence = ++chatRequestSequence;
+  chatSendBusy = true;
+  updateChatCompose();
+  try {
+    const next = await command('bili.chat.emoticons.refresh', {}, { quiet: true, silent: automatic, accept: chatResponseGuard() });
+    if (next && sequence === chatRequestSequence && context === chatEmoteContext && String(next.chat_send?.account_id || '') === String(snapshot.account?.user_id || '') && next.chat_send?.room_id) { chatMetadataLoadedContext = context; chatEmoticonError = ''; }
+  } catch (error) {
+    if (sequence === chatRequestSequence && context === chatEmoteContext) chatEmoticonError = errorMessage(error);
+    throw error;
+  }
+  finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); }
+}
+
+async function sendChatMessage(emoticon_unique = '') {
+  syncChatEmoticonContext();
+  if (chatSendBusy || !snapshot.account?.user_id || snapshot.network_disabled) return;
+  if (composingInputs.has(document.querySelector('#chat-message'))) return;
+  const message = chatMessageDraft.trim();
+  if (!emoticon_unique && !message) throw new Error(t('请输入弹幕内容'));
+  const account = String(snapshot.account.user_id);
+  const room = String(snapshot.setup?.room_id || '');
+  const submittedDraft = chatMessageDraft;
+  const sequence = ++chatRequestSequence;
+  if (emoticon_unique) chatEmoticonsOpen = false;
+  chatSendBusy = true;
+  updateChatCompose();
+  try {
+    const next = await command(emoticon_unique ? 'bili.chat.emoticon.send' : 'bili.chat.send', emoticon_unique ? { emoticon_unique, confirmed: true } : { message, confirmed: true }, { quiet: true, accept: chatResponseGuard() });
+    if (!next) return;
+    if (!emoticon_unique && String(snapshot.account?.user_id) === account && String(snapshot.setup?.room_id || '') === room && chatMessageDraft === submittedDraft) {
+      chatMessageDraft = '';
+      const input = document.querySelector('#chat-message');
+      if (input) input.value = '';
+    }
+    if (String(snapshot.account?.user_id) === account && String(snapshot.setup?.room_id || '') === room) showToast(t('已发送'));
+  } finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); }
+}
+
+function chatResponseGuard() {
+  const account = String(snapshot.account?.user_id || '');
+  const room = String(snapshot.setup?.room_id || '');
+  const revision = chatContextRevision;
+  return next => revision === chatContextRevision && !snapshot.network_disabled && !next.network_disabled
+    && String(snapshot.account?.user_id || '') === account && String(next.account?.user_id || '') === account
+    && String(snapshot.setup?.room_id || '') === room && String(next.setup?.room_id || '') === room;
+}
+
+function selectChatEmoticonPack(index, focus = false) {
+  const packs = chatEmoticonView().emoticons || [];
+  if (!Number.isSafeInteger(index) || index < 0 || index >= packs.length) return;
+  chatEmotePackIndex = index;
+  chatEmotePackKey = chatEmoticonPackKey(packs[index]);
+  chatEmotePackTokens = chatEmoticonPackTokens(packs[index]);
+  updateChatCompose();
+  document.querySelector('#chat-emote-page')?.scrollTo({ top: 0 });
+  const tab = document.querySelector(`#chat-emote-tab-${index}`);
+  tab?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  if (focus) tab?.focus({ preventScroll: true });
+}
+
+document.addEventListener('keydown', event => {
+  const tab = event.target.closest?.('.lake-emote-tabs [role="tab"]');
+  if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const count = chatEmoticonView().emoticons?.length || 0;
+  if (!count) return;
+  event.preventDefault();
+  const index = event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : (Number(tab.dataset.id) + (event.key === 'ArrowRight' ? 1 : -1) + count) % count;
+  selectChatEmoticonPack(index, true);
+});
 
 // Motion: script-driven animations follow the same rules as CSS ones — none when the
 // system asks for reduced motion, and none while the window is in the background.
@@ -182,8 +426,16 @@ function revealTheme(next, origin) {
   const y = rect ? rect.top + rect.height / 2 : 20;
   root.style.setProperty('--reveal-x', `${x}px`);
   root.style.setProperty('--reveal-y', `${y}px`);
-  root.style.setProperty('--reveal-r', `${Math.hypot(Math.max(x, window.innerWidth - x), Math.max(y, window.innerHeight - y))}px`);
-  document.startViewTransition(() => { root.dataset.theme = next; });
+  root.style.setProperty('--reveal-r', '160vmax');
+  let applied = false;
+  try {
+    document.startViewTransition(() => {
+      applied = true;
+      root.dataset.theme = next;
+      return new Promise(resolve => setTimeout(resolve, 50));
+    });
+    setTimeout(() => { if (!applied) root.dataset.theme = next; }, 300);
+  } catch { root.dataset.theme = next; }
 }
 
 function closeQueuePanel(focusPill = false) {
@@ -232,14 +484,16 @@ const invoke = (command, args) => {
   return window.__TAURI__.core.invoke(command, args).catch(error => { throw new Error(errorMessage(error, command === 'snapshot' ? 'DV-X12' : command === 'check_update' ? 'DV-U01' : 'DV-UI02')); });
 };
 
-function showToast(message, isError = false) {
+function showToast(message, isError = false, undo = null) {
   const target = document.querySelector('#toast');
   clearTimeout(toastTimer);
   target.classList.add('toast');
   target.textContent = String(message);
+  toastUndo = typeof undo === 'function' ? undo : null;
+  if (toastUndo) target.innerHTML = `<span>${esc(String(message))}</span><button type="button" data-action="toast.undo">${esc(t('撤销'))}</button>`;
   target.classList.toggle('error', isError);
   target.hidden = false;
-  toastTimer = setTimeout(() => { leaveGhost(target, 260); target.hidden = true; }, isError ? 8000 : 3000);
+  toastTimer = setTimeout(() => { toastUndo = null; if (step !== 'main') leaveGhost(target, 260); target.hidden = true; }, isError ? 8000 : step === 'main' ? 3600 : 3000);
 }
 
 function showError(error) {
@@ -272,8 +526,9 @@ function applyAppearance() {
 
 function applyLanguage() {
   const changed = setLanguage(snapshot?.preferences?.language);
-  document.documentElement.lang = getLanguage();
-  document.title = t('超绝可爱弹幕姬');
+  if (document.documentElement.lang !== getLanguage()) document.documentElement.lang = getLanguage();
+  const title = t('超绝可爱弹幕姬');
+  if (document.title !== title) document.title = title;
   const startupTheme = window.__DANMAKUVOICE_STARTUP_THEME__;
   if (startupTheme?.session && startupTheme.language !== getLanguage()) {
     startupTheme.language = getLanguage();
@@ -302,18 +557,23 @@ async function command(action, payload = {}, options = {}) {
   pendingCommands++;
   try {
     const next = await invoke('dispatch', { action, payload });
+    if (options.accept && !options.accept(next)) return null;
     acceptSnapshot(next);
     if (options.success) showToast(options.success);
     return next;
   } catch (error) {
-    try { acceptSnapshot(await invoke('snapshot')); } catch { /* Preserve the original command error. */ }
+    try {
+      const next = await invoke('snapshot');
+      if (options.accept && !options.accept(next)) return null;
+      acceptSnapshot(next);
+    } catch { /* Preserve the original command error. */ }
     if (!options.silent) showError(error);
     throw error;
   } finally { pendingCommands--; if (boot.polling) scheduleSnapshotPolling(); }
 }
 
 function setStep(next) {
-  step = next;
+  step = next === 'uid' ? 'login' : next;
   clearError();
   renderApp();
   if (next === 'login') void startQr('bilibili');
@@ -323,13 +583,242 @@ function errorSlot() { return '<div id="step-error" class="inline-error" role="a
 
 function renderChatBody(item) {
   return messageParts(item).map(part => part.type === 'emote'
-    ? `<img class="message-emote${part.large ? ' large' : ''}" src="${esc(part.url)}" alt="${esc(part.text)}" title="${esc(part.text)}" loading="lazy" referrerpolicy="no-referrer">`
+    ? `<img class="message-emote${part.large ? ' large' : ''}" src="${esc(part.url)}" alt="" aria-label="${esc(part.text)}" loading="lazy" referrerpolicy="no-referrer">`
     : esc(part.text)).join('');
 }
 
 
 function qrMarkup(provider, inSettings = false) {
   return ui`<div class="${inSettings ? 'settings-qr' : ''}" data-qr-provider="${provider}"><div class="qr-frame"><div class="qr-placeholder"><span class="spinner" aria-hidden="true"></span><span>正在生成二维码</span></div></div><div class="qr-status" role="status" aria-live="polite"><span class="status-dot pulse"></span><span data-qr-label>正在生成二维码</span></div><div class="actions qr-retry" hidden>${button(t('重新生成二维码'), 'qr.retry', { icon: 'refresh', class: 'quiet small' })}</div></div>`;
+}
+
+function updateThemeControl() {
+  const control = document.querySelector('#titlebar-actions [data-action="theme.toggle"]');
+  if (!control) return;
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const label = t(dark ? '切换到日间' : '切换到夜间');
+  if (control.title === label && control.dataset.iconTheme === String(dark)) return;
+  control.dataset.iconTheme = String(dark);
+  control.title = label;
+  control.setAttribute('aria-label', label);
+  control.innerHTML = dark ? icon('moon') : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M5 19l1.5-1.5M17.5 6.5 19 5"/></svg>';
+}
+
+function updateLakeClock() {
+  const part = document.querySelector('#lake-daypart');
+  const clock = document.querySelector('#lake-date-time');
+  if (!part || !clock || document.documentElement.dataset.inactive === 'true') return;
+  const now = new Date();
+  const weekday = now.toLocaleDateString('en-US', { weekday: 'long' });
+  const label = `${weekday} night`;
+  if (part.dataset.label !== label) {
+    part.dataset.label = label;
+    part.innerHTML = `<span>${esc(weekday)}</span> <span>night</span>`;
+  }
+  const time = `${now.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }).toUpperCase()} · ${clockLabel(now.getTime())}`;
+  if (clock.textContent !== time) clock.textContent = time;
+}
+
+function lakeLettersHtml(parts) {
+  const letters = parts.flatMap(part => part.type === 'emote'
+    ? [`<img class="message-emote${part.large ? ' large' : ''}" src="${esc(part.url)}" alt="" aria-label="${esc(part.text)}" loading="lazy" referrerpolicy="no-referrer">`]
+    : [...new Intl.Segmenter(getLanguage(), { granularity: 'grapheme' }).segment(part.text)].map(({ segment }) => esc(segment)));
+  const count = letters.length;
+  const per = Math.max(1, Math.ceil(count / (count <= 8 ? 1 : count <= 16 ? 2 : 3)));
+  const lines = [];
+  for (let start = 0; start < count; start += per) lines.push(`<span class="lake-text-line">${letters.slice(start, start + per).map((letter, index) => `<span class="lake-letter ${lakeLetterFlip ? 'a' : 'b'}" style="--letter-delay:${(start + index) * 160}ms">${letter}</span>`).join('')}</span>`);
+  return { size: count <= 16 ? 'normal' : count <= 26 ? 'medium' : 'small', html: lines.join('') };
+}
+
+function lakeMessageHtml(event, key) {
+  const text = lakeLettersHtml(messageParts(event));
+  const price = event.price_yuan ? `<span class="lake-message-price">¥${esc(event.price_yuan)}</span>` : '';
+  const open = `data-action="viewer.open" data-id="${esc(key)}"`;
+  return `<div class="chat-hit"><span class="lake-message-meta"><button type="button" class="lake-avatar-button" ${open} aria-label="${esc(event.user_name || t('访客'))}">${viewerAvatar(event)}</button><button type="button" class="lake-message-name" ${open}>${esc(event.user_name || t('访客'))}</button>${price}<time datetime="${new Date(Number(event.observed_at_ms) || 0).toISOString()}">${esc(clockLabel(event.observed_at_ms))}<span class="lake-relative" aria-hidden="true"></span></time></span><span class="lake-message-text" data-size="${text.size}">${text.html}</span>${price ? `<em class="lake-history-price">¥${esc(event.price_yuan)}</em>` : ''}</div>`;
+}
+
+function lakeLedger() {
+  if (!lakePresentationLedger) {
+    let storage;
+    try { storage = window.sessionStorage; } catch { /* Recovery storage is optional. */ }
+    lakePresentationLedger = createLakePresentationLedger(storage, window.__DANMAKUVOICE_STARTUP_THEME__?.session || '');
+  }
+  return lakePresentationLedger;
+}
+
+function lakePresentationIsVisible() {
+  return step === 'main' && !settingsDialog.open && uiIsActive(nativeActive, windowFocused, document.hidden);
+}
+
+function rememberLakePresentation() {
+  if (lakePresentationFrame || !lakePresentationIsVisible()) return;
+  const context = lakePresentationContext;
+  const pending = [...lakeMessageNodes.values()].filter(node => node.isConnected && node.getClientRects().length && !lakeLedger().has(context, lakePresentationIdentities.get(node)));
+  if (!pending.length) return;
+  // The second frame records a surface that had a chance to paint in the first.
+  // Background snapshots and nodes replaced before that paint remain unseen.
+  lakePresentationFrame = requestAnimationFrame(() => {
+    lakePresentationFrame = requestAnimationFrame(() => {
+      lakePresentationFrame = 0;
+      if (context !== lakePresentationContext || !lakePresentationIsVisible()) return;
+      const painted = pending.filter(node => node.isConnected && node.getClientRects().length);
+      if (painted.length) lakeLedger().mark(context, painted.map(node => lakePresentationIdentities.get(node)));
+      rememberLakePresentation();
+    });
+  });
+}
+
+function restoreLakePresentation() {
+  if (!lakePresentationIsVisible()) return;
+  for (const node of lakeMessageNodes.values()) {
+    if (lakeLedger().has(lakePresentationContext, lakePresentationIdentities.get(node))) node.classList.add('lake-restored');
+  }
+  rememberLakePresentation();
+}
+
+function renderLakeHistory(events, keys) {
+  const feed = document.querySelector('#chat-feed');
+  if (!feed) return;
+  feedEvents.clear();
+  keys.forEach((key, index) => feedEvents.set(key, events[index]));
+  if (!document.querySelector('#lake-history-dialog')?.open) return;
+  const signature = JSON.stringify([keys, events.map(event => messageParts(event)), viewerOpenIdentity, getLanguage()]);
+  if (signature === feedSignature) return;
+  patchMarkup(feed, events.map((event, index) => {
+    const price = event.price_yuan;
+    return `<button type="button" class="lake-history-entry${viewerIdentity(event) === viewerOpenIdentity ? ' selected' : ''}" data-action="viewer.open" data-id="${esc(keys[index])}"><span class="lake-history-time${price ? ' gold' : ''}">${esc(price ? `¥${price}` : clockLabel(event.observed_at_ms))}</span><span class="lake-history-body"><b>${renderChatBody(event)}</b><small>${viewerAvatar(event)}${esc(event.user_name || t('访客'))}</small></span></button>`;
+  }).reverse().join(''));
+  feedSignature = signature;
+}
+
+function renderLakeTranscript(events, keys) {
+  const current = document.querySelector('#lake-current');
+  const history = document.querySelector('#lake-history');
+  if (!current || !history) return;
+  const enabled = broadcastEnabled();
+  const room = snapshot.broadcast?.room;
+  const live = enabled && broadcastLive(room);
+  const account = broadcastAccount();
+  const presentationContext = JSON.stringify([account, String(snapshot.live?.room_id || snapshot.setup?.room_id || '')]);
+  if (presentationContext !== lakePresentationContext) {
+    cancelAnimationFrame(lakePresentationFrame); lakePresentationFrame = 0;
+    for (const node of lakeMessageNodes.values()) node.remove();
+    lakeMessageNodes.clear(); lakeTranscriptSignature = ''; lakePresentationContext = presentationContext;
+  }
+  // A reused platform ID at a different reception time is a new observation.
+  const firstShown = Math.max(0, events.length - 5);
+  const presentationKeys = keys.slice(firstShown).map((key, index) => JSON.stringify([key, events[firstShown + index]?.observed_at_ms ?? null]));
+  const contentSignatures = events.slice(firstShown).map(event => JSON.stringify(messageParts(event)));
+  const sessionContext = `${account}:${room?.room_id || ''}`;
+  if (sessionContext !== lakeSessionAccount) { lakeSessionAccount = sessionContext; lakePreviousBroadcastLive = false; lakeEnded = false; }
+  lakeSessionSummary = enabled && account && room ? broadcastSessionSummary(snapshot.broadcast) : null;
+  if (live) lakeEnded = false;
+  else if (enabled && lakePreviousBroadcastLive) {
+    lakeEnded = !!lakeSessionSummary;
+  }
+  lakePreviousBroadcastLive = live;
+  if (!enabled) lakeEnded = false;
+  const prepared = enabled && !!room && !live;
+  const face = enabled && !!snapshot.broadcast?.face_image && onAirPanelMode === 'face';
+  const scene = face ? 'face' : prepared ? lakeEnded ? 'ended' : 'offair' : !events.length ? 'empty' : (snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled) && snapshot.queue?.current ? 'live' : 'calm';
+  const shell = document.querySelector('#live-shell');
+  shell.dataset.scene = scene;
+  const connection = liveConnectionView(snapshot.live || {});
+  const emptyConnection = !prepared && !events.length
+    ? [connection.online, connection.emptyTitle, connection.emptyDescription, !!snapshot.live?.running]
+    : null;
+  const signature = JSON.stringify([presentationKeys.slice(-5), contentSignatures.slice(-5), scene, room?.title, lakeSessionSummary, getLanguage(), viewerOpenIdentity, emptyConnection]);
+  if (signature !== lakeTranscriptSignature) {
+    const shown = prepared ? [] : keys.slice(-5);
+    const previousFeatured = current.querySelector('[data-key]')?.dataset.key;
+    if (shown.at(-1) !== previousFeatured) lakeLetterFlip = !lakeLetterFlip;
+    history.querySelectorAll('.lake-session-line').forEach(node => node.remove());
+    for (const [key, node] of lakeMessageNodes) if (!shown.includes(key)) { node.remove(); lakeMessageNodes.delete(key); }
+    current.querySelector('.lake-state')?.remove();
+    const historyNodes = [];
+    for (const key of shown) {
+      const index = keys.indexOf(key);
+      let node = lakeMessageNodes.get(key);
+      if (node && lakePresentationIdentities.get(node) !== presentationKeys[index - firstShown]) { node.remove(); lakeMessageNodes.delete(key); node = null; }
+      let restored = node ? node.classList.contains('lake-restored') : lakeLedger().has(presentationContext, presentationKeys[index - firstShown]);
+      if (!node) {
+        node = document.createElement('article'); node.dataset.key = key; node.innerHTML = lakeMessageHtml(events[index], key);
+        lakeMessageNodes.set(key, node); lakePresentationIdentities.set(node, presentationKeys[index - firstShown]);
+        lakeMessageContents.set(node, contentSignatures[index - firstShown]);
+      } else if (lakeMessageContents.get(node) !== contentSignatures[index - firstShown]) {
+        // Late trusted image metadata changes only the body of the same event.
+        // An already shown phrase gets its final form, never another entrance.
+        restored ||= lakeLedger().has(presentationContext, presentationKeys[index - firstShown]);
+        const body = node.querySelector('.lake-message-text');
+        const text = lakeLettersHtml(messageParts(events[index]));
+        body.dataset.size = text.size; body.innerHTML = text.html;
+        lakeMessageContents.set(node, contentSignatures[index - firstShown]);
+      }
+      const featured = key === keys.at(-1);
+      const newlySunk = !featured && key === previousFeatured && node.parentElement === current;
+      const sink = newlySunk ? `lake-sink-${lakeLetterFlip ? 'a' : 'b'}` : !featured && node.parentElement === history ? [...node.classList].find(name => /^lake-sink-[ab]$/.test(name)) : '';
+      node.className = `lake-message ${featured ? 'lake-featured' : 'lake-line'}${restored ? ' lake-restored' : ''}${sink ? ` ${sink}` : ''}${viewerIdentity(events[index]) === viewerOpenIdentity ? ' selected' : ''}`;
+      node.style.setProperty('--lake-depth', String(featured ? 1 : Math.max(.4, 1 - (keys.length - 1 - index) * .14)));
+      const hit = node.querySelector('.chat-hit');
+      if (featured) { hit.removeAttribute('data-action'); hit.removeAttribute('data-id'); hit.removeAttribute('role'); hit.removeAttribute('tabindex'); }
+      else { hit.dataset.action = 'viewer.open'; hit.dataset.id = key; hit.setAttribute('role', 'button'); hit.tabIndex = 0; }
+      if (featured) { if (node.parentElement !== current) current.append(node); }
+      else historyNodes.push(node);
+    }
+    let nextHistory = history.querySelector('.lake-history-open');
+    for (const node of historyNodes) {
+      if (node.parentElement !== history || node.nextSibling !== nextHistory) history.insertBefore(node, nextHistory);
+      nextHistory = node;
+    }
+    if (!shown.length) {
+      if (prepared) {
+        const title = lakeLettersHtml([{ type: 'text', text: lakeEnded ? t('今晚辛苦啦') : room.title || '' }]);
+        current.innerHTML = `<div class="lake-state">${lakeEnded ? '<span class="lake-message-meta"><span class="lake-message-name">that’s a wrap.</span><em></em></span>' : ''}<span class="lake-state-title lake-message-text" data-size="${title.size}">${title.html}</span></div>`;
+        const duration = lakeSessionSummary?.seconds != null ? `${Math.floor(lakeSessionSummary.seconds / 3600)} ${t('小时')} ${Math.floor(lakeSessionSummary.seconds % 3600 / 60)} ${t('分')}` : '';
+        const endedAt = lakeSessionSummary ? new Date(lakeSessionSummary.endedAt * 1000) : null;
+        const sessionDate = endedAt ? `${String(endedAt.getMonth() + 1).padStart(2, '0')}.${String(endedAt.getDate()).padStart(2, '0')}` : '';
+        const summary = !lakeSessionSummary ? [] : lakeEnded
+          ? [ ...(duration ? [`${t('今晚')} ${duration}`] : []), `${lakeSessionSummary.messages} ${t('句弹幕沉进了湖里')}`, 'see you next time.' ]
+          : [`${t('上一场')} · ${sessionDate}${duration ? ` · ${duration}` : ''}`, `${lakeSessionSummary.messages} ${t('句弹幕')}`];
+        history.insertAdjacentHTML('afterbegin', summary.map(line => `<div class="lake-message lake-line lake-session-line">${esc(line)}</div>`).join(''));
+      } else {
+        current.innerHTML = `<div class="lake-state lake-state-still">${connection.online ? 'the lake is still.' : esc(connection.emptyTitle)}<small>${esc(connection.online ? t('第一句弹幕会浮现在这里') : connection.emptyDescription)}</small>${!snapshot.live?.running ? button(t('连接直播间'), 'live.toggle', { class: 'quiet small' }) : ''}</div>`;
+      }
+    }
+    lakeTranscriptSignature = signature;
+  }
+  for (const [key, node] of lakeMessageNodes) {
+    const event = events[keys.indexOf(key)];
+    const relative = node.querySelector('.lake-relative');
+    const minutes = Math.max(0, Math.floor((Date.now() - Number(event?.observed_at_ms || Date.now())) / 60000));
+    const words = ['just now', 'a minute ago', 'two minutes ago', 'three minutes ago', 'four minutes ago', 'five minutes ago', 'six minutes ago', 'seven minutes ago', 'eight minutes ago', 'nine minutes ago', 'ten minutes ago'];
+    const reading = !!(snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled) && !!snapshot.queue?.current && key === keys.at(-1);
+    const label = ` · ${reading ? words[0] : words[minutes] || 'a while ago'}`;
+    if (relative.textContent !== label) relative.textContent = label;
+  }
+  const count = document.querySelector('#lake-history-total');
+  if (count) count.textContent = String(events.length);
+  const more = document.querySelector('.lake-history-open');
+  more.hidden = prepared || events.length <= 1;
+  if (history.lastElementChild !== more) history.append(more);
+  rememberLakePresentation();
+}
+
+function closeLakeHistory() {
+  document.querySelector('#lake-history-dialog')?.close();
+  document.querySelector('[data-action="history.open"]')?.focus({ preventScroll: true });
+}
+
+function closeLakeSound() {
+  if (document.querySelector('#tts-menu')?.classList.contains('from-orb')) closeVoicePanel();
+  for (const trigger of document.querySelectorAll('[data-action="volume.toggle"]')) trigger.setAttribute('aria-expanded', 'false');
+}
+
+function updateLakePopScrim() {
+  const scrim = document.querySelector('#lake-pop-scrim');
+  if (!scrim) return;
+  const voice = document.querySelector('#tts-menu');
+  scrim.hidden = !(voice && !voice.hidden || chatEmoticonsOpen || audiencePinned && document.querySelector('#audience-dialog')?.open || onAirPanelMode === 'info');
 }
 
 function renderApp() {
@@ -340,9 +829,36 @@ function renderApp() {
   if (titlebarActions) titlebarActions.innerHTML = step ? iconButton('moon', t('切换深浅色'), 'theme.toggle') + iconButton('settings', t('打开设置'), 'settings.open') : '';
   updateTitlebar();
   if (step === 'main') {
-    const volume = Math.round((snapshot.preferences?.master_volume ?? 1) * 100);
-    app.innerHTML = ui`<div class="app-shell live-shell" id="live-shell"><div class="live-aura one" aria-hidden="true"></div><div class="live-aura two" aria-hidden="true"></div><div class="live-grain" aria-hidden="true"></div>${snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : ''}<main class="chat-main live-stage"><header class="masthead"><div class="masthead-kicker" id="masthead-kicker"><span id="connection-dot" class="status-dot"></span><span aria-hidden="true">LIVE</span><span id="room-caption" class="sr-only"></span></div><h1 class="masthead-title"><span id="masthead-name" class="masthead-name"></span><span id="masthead-suffix" class="masthead-suffix"></span></h1><span class="masthead-rule" aria-hidden="true"></span></header><div class="onair-wrap" data-broadcast-scope="main"><div id="onair" class="onair" role="group" aria-label="开播" hidden></div><div id="onair-panel" class="onair-panel" role="dialog" aria-label="开播" hidden></div></div><div id="live-error" class="live-error" role="status" hidden><span></span>${button(t('查看'), 'settings.room', { class: 'quiet small' })}</div><div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="收到的弹幕"><div id="chat-empty" class="chat-empty"></div><div id="chat-feed" class="chat-feed" role="log" aria-label="实时弹幕" aria-live="polite" aria-relevant="additions"></div></div><button id="new-messages" class="new-messages" data-action="chat.bottom" hidden>${icon('down')}回到最新弹幕</button></main><div class="dock-wrap"><div id="tts-menu" class="voice-panel" role="dialog" aria-label="播报声音" hidden></div><div id="queue-panel" class="queue-panel" role="list" aria-label="待读弹幕" hidden></div><div class="dock"><button type="button" id="tts-switch" class="dock-voice" data-action="tts.open" aria-haspopup="dialog" aria-expanded="false"></button><span class="dock-sep" aria-hidden="true"></span><div class="dock-volume"><button type="button" class="dock-mute" data-action="audio.mute"></button><label class="sr-only" for="main-volume-range">播报主音量</label><input id="main-volume-range" type="range" min="0" max="200" step="5" value="${volume}"><output id="main-volume-value" for="main-volume-range">${volume}</output></div><span id="queue-sep" class="dock-sep" aria-hidden="true" hidden></span><button type="button" id="queue-pill" class="queue-pill" data-action="queue.toggle" aria-expanded="false" hidden></button><span class="dock-sep" aria-hidden="true"></span><button type="button" id="speech-switch" class="speech-switch" role="switch" data-action="speech.toggle" aria-label="弹幕播报" aria-checked="false"><span></span></button></div></div><div id="viewer-drawer" class="viewer-layer" hidden></div></div>`;
+    app.innerHTML = ui`<div class="app-shell live-shell lake-mode" id="live-shell">${lakeSceneMarkup()}${snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : ''}<main class="chat-main live-stage lake-content"><header class="masthead lake-header"><div class="lake-date"><span id="lake-daypart"></span><time id="lake-date-time"></time></div><div class="lake-room-row"><div class="masthead-kicker" id="masthead-kicker"><span id="connection-dot" class="status-dot"></span><span id="room-caption" class="sr-only"></span></div><h1 class="masthead-title"><button type="button" id="lake-title" data-action="onair.info"><span class="lake-room-name"><span id="masthead-name" class="masthead-name"></span><span id="masthead-suffix" class="masthead-suffix"></span></span><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"></path></svg></button></h1><button type="button" id="audience-count" class="audience-byline" data-action="audience.open" aria-haspopup="dialog" aria-controls="audience-dialog" aria-expanded="false" hidden></button></div></header><div id="live-error" class="live-error" role="status" hidden><span></span>${button(t('查看'), 'settings.room', { class: 'quiet small' })}</div><div class="lake-body" id="lake-transcript"><div id="lake-current" class="lake-current" role="log" aria-label="此刻这一句" aria-live="polite" aria-relevant="additions"></div><div id="lake-history" class="lake-history"><button type="button" class="lake-history-open" data-action="history.open" aria-haspopup="dialog" aria-controls="lake-history-dialog">earlier tonight →</button></div></div></main><div class="onair-wrap" data-broadcast-scope="main"><div id="onair" class="onair" role="group" aria-label="开播" hidden></div><div id="onair-panel" class="onair-panel" role="dialog" aria-label="开播" hidden></div></div><div class="lake-foot"><button type="button" id="tts-switch" class="dock-voice" data-action="tts.open" aria-haspopup="dialog" aria-expanded="false"></button><div id="chat-compose" class="chat-compose" hidden></div></div><div id="chat-emoticon-picker" class="chat-emoticon-picker" hidden></div><div id="tts-menu" class="voice-panel" role="dialog" aria-label="播报声音" hidden></div><span id="queue-sep" hidden></span><button type="button" id="queue-pill" class="sr-only" data-action="queue.toggle" aria-expanded="false" hidden></button><div id="queue-panel" class="queue-panel" role="list" aria-label="待读弹幕" hidden></div><div id="viewer-drawer" class="viewer-layer" hidden></div><dialog id="lake-history-dialog" class="lake-history-dialog" aria-labelledby="lake-history-title"><header class="lake-drawer-head"><i id="lake-history-title">Earlier tonight</i><div id="lake-history-summary"><span id="lake-history-total"></span> 句 · 从新到旧</div></header><div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="收到的弹幕"><div id="chat-empty" class="chat-empty"></div><div id="chat-feed" class="chat-feed" aria-label="实时弹幕"></div></div><button id="new-messages" class="new-messages" data-action="chat.bottom" hidden>${icon('down')}回到最新弹幕</button></dialog></div>`;
+    const queueShortcut = document.querySelector('#queue-pill');
+    if (queueShortcut) queueShortcut.tabIndex = -1;
+    lakeTranscriptSignature = ''; lakeMessageNodes.clear(); closeLakeSound(); updateThemeControl(); updateLakeClock();
+    clearInterval(lakeClockTimer); lakeClockTimer = setInterval(() => { if (!snapshot || !uiIsActive(nativeActive, windowFocused, document.hidden)) return; updateLakeClock(); if (!settingsDialog.open) renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); }, 1000);
+    const historyDialog = document.querySelector('#lake-history-dialog');
+    historyDialog.addEventListener('cancel', event => { event.preventDefault(); closeLakeHistory(); });
+    historyDialog.addEventListener('click', event => { if (event.target !== historyDialog) return; const r = historyDialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closeLakeHistory(); });
     feedSignature = ''; feedLastKey = ''; onAirSignature = ''; onAirPanelMode = ''; feedEvents.clear(); viewerContext = null; viewerOpenIdentity = ''; liveMainSignature = ''; liveRenderSignature = ''; queueSignature = '';
+    audienceSignature = ''; audienceReturn = false; audiencePinned = false; audienceMoreAt = 0; audienceEntries.clear(); clearTimeout(audienceCloseTimer);
+    document.querySelector('#live-shell').insertAdjacentHTML('beforeend', '<button type="button" id="lake-pop-scrim" data-action="lake.pop.close" aria-label="收起" hidden></button>');
+    document.querySelector('#live-shell').insertAdjacentHTML('beforeend', '<dialog id="audience-dialog" class="audience-dialog" aria-labelledby="audience-title"></dialog>');
+    document.querySelector('#audience-dialog').addEventListener('cancel', event => { event.preventDefault(); closeAudience(); });
+    const watching = document.querySelector('#audience-count');
+    const audienceDialog = document.querySelector('#audience-dialog');
+    watching.addEventListener('mouseenter', () => {
+      clearTimeout(audienceCloseTimer);
+      if (!watching.hidden && !audienceDialog.open && !settingsDialog.open && !viewerContext && !onAirPanelMode) openAudience(false);
+    });
+    watching.addEventListener('mouseleave', () => {
+      clearTimeout(audienceCloseTimer);
+      audienceCloseTimer = setTimeout(() => { if (!audiencePinned) closeAudience(false); }, 350);
+    });
+    audienceDialog.addEventListener('mouseenter', () => clearTimeout(audienceCloseTimer));
+    audienceDialog.addEventListener('mouseleave', () => { if (!audiencePinned) closeAudience(false); });
+    document.querySelector('#audience-dialog').addEventListener('click', event => {
+      if (event.target.id !== 'audience-dialog') return;
+      const rect = event.target.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeAudience();
+    });
     document.querySelector('#chat-scroll').addEventListener('scroll', event => {
       const node = event.currentTarget;
       if (node.scrollHeight - node.scrollTop - node.clientHeight < 70) document.querySelector('#new-messages').hidden = true;
@@ -356,10 +872,9 @@ function renderApp() {
     app.innerHTML = ui`<div class="app-shell onboard-shell">${note}<div class="onboard-aura one" aria-hidden="true"></div><div class="onboard-aura two" aria-hidden="true"></div><main class="welcome"><div class="welcome-mark" aria-hidden="true"><span></span><span></span><span></span><img src="./logo.png" width="148" height="148" alt="" draggable="false"></div><h1>超绝可爱弹幕姬</h1><p>接收 B 站直播弹幕，用你喜欢的声音读出来。</p><button type="button" class="onboard-cta" data-action="setup.start">开始设置${icon('arrow')}</button><p class="welcome-foot">${icon('shield')}登录凭据仅加密保存在这台电脑</p></main></div>`;
     return;
   }
-  const phase = ['connect', 'login', 'uid'].includes(step) ? 1 : ['tts', 'doubaoQr'].includes(step) ? 2 : 3;
-  const roomDone = !!snapshot.setup?.room_id;
+  const phase = ['connect', 'login'].includes(step) ? 1 : ['tts', 'doubaoQr'].includes(step) ? 2 : 3;
   const stepSubs = [
-    snapshot.setup?.mode === 'anonymous' && roomDone ? t('通过主播 UID') : roomDone ? t('扫码登录') : t('扫码或输入 UID'),
+    t('扫码登录'),
     phase > 2 ? (setupTts ? t('豆包') : t('仅显示弹幕')) : t('可跳过'),
     t('开始接收弹幕'),
   ];
@@ -392,14 +907,13 @@ function updateFallbackStatus(queue) {
 
 function renderStep() {
   const back = step === 'ready' && snapshot.onboarding_done ? '' : ui`<button type="button" class="back-button" data-action="setup.back">${icon('back')}返回</button>`;
-  if (step === 'connect') return ui`${back}<h1>连接直播间</h1><p class="setup-description">选择接收弹幕的方式，之后也可以在设置里更改。</p><div class="choice-grid"><button type="button" class="choice-card" data-action="setup.qr"><span class="choice-top"><span class="choice-glyph pink">${icon('qr')}</span><span class="choice-badge">推荐</span></span><strong>扫码登录</strong><span>用哔哩哔哩 App 扫码，自动找到你的直播间。</span></button><button type="button" class="choice-card" data-action="setup.uid"><span class="choice-top"><span class="choice-glyph blue">${icon('person')}</span></span><strong>输入主播 UID</strong><span>免登录，接收任意主播直播间的弹幕。</span></button></div>${errorSlot()}`;
-  if (step === 'login') return ui`${back}<div class="qr-layout"><div class="qr-copy"><h1>用哔哩哔哩扫码</h1><ol class="qr-steps"><li><span>1</span>打开哔哩哔哩 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol><button type="button" class="text-link onboard-link" data-action="setup.uid">改用主播 UID</button></div>${qrMarkup('bilibili')}</div>${errorSlot()}`;
-  if (step === 'uid') return ui`${back}<h1>输入主播 UID</h1><p class="setup-description">填写主播个人主页中的 UID，会自动查找直播间。</p><form data-form="anonymous" class="anonymous-form uid-form"><label for="anonymous-uid" class="onboard-field-label">主播 UID</label><div class="anonymous-input"><input id="anonymous-uid" name="uid" inputmode="numeric" autocomplete="off" placeholder="输入主播 UID" required pattern="[1-9][0-9]{0,19}" maxlength="20"><button type="submit" class="onboard-cta" aria-label="使用主播 UID 匿名继续">继续 ${icon('arrow')}</button></div></form>${errorSlot()}`;
+  if (step === 'connect') return ui`${back}<h1>连接直播间</h1><p class="setup-description">用哔哩哔哩 App 扫码，自动找到你的直播间。</p><button type="button" class="onboard-cta" data-action="setup.qr">扫码登录${icon('arrow')}</button>${errorSlot()}`;
+  if (step === 'login') return ui`${back}<div class="qr-layout"><div class="qr-copy"><h1>用哔哩哔哩扫码</h1><ol class="qr-steps"><li><span>1</span>打开哔哩哔哩 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol></div>${qrMarkup('bilibili')}</div>${errorSlot()}`;
   if (step === 'tts') return ui`${back}<h1>要读出弹幕吗？</h1><p class="setup-description">其他语音服务可以稍后在设置中添加。</p><div class="choice-grid"><button type="button" class="choice-card" data-action="setup.doubao"><span class="choice-top"><span class="choice-glyph gradient">${icon('voice')}</span></span><strong>用豆包朗读</strong><span>扫码连接豆包，使用默认音色朗读新弹幕。</span></button><button type="button" class="choice-card" data-action="setup.silent"><span class="choice-top"><span class="choice-glyph quiet">${icon('chatSmall')}</span></span><strong>暂时只看弹幕</strong><span>不需要音频设备，随时可以在设置中开启。</span></button></div>${errorSlot()}`;
   if (step === 'doubaoQr') return ui`${back}<div class="qr-layout"><div class="qr-copy"><h1>扫码连接豆包</h1><ol class="qr-steps"><li><span>1</span>打开豆包 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol><button type="button" class="text-link onboard-link" data-action="setup.silent">暂时只看弹幕</button></div>${qrMarkup('doubao')}</div>${errorSlot()}`;
   const room = snapshot.setup?.room_id;
   const voice = setupTts ? `${providerLabel(snapshot.presets?.find(p => p.id === snapshot.rules?.default_preset_id)?.provider || 'doubao')}` : t('仅显示弹幕');
-  return ui`${back}<h1>一切就绪</h1><dl class="setup-summary-card"><div><dt>直播间</dt><dd>${snapshot.setup?.mode === 'anonymous' ? t('匿名接收') : t('我的直播间')} · <span class="num">${esc(room || '')}</span></dd></div><div><dt>播报</dt><dd>${esc(voice)}</dd></div></dl><button type="button" class="onboard-cta" data-action="setup.finish">开始接收弹幕${icon('arrow')}</button>${errorSlot()}`;
+  return ui`${back}<h1>一切就绪</h1><dl class="setup-summary-card"><div><dt>直播间</dt><dd>${t('我的直播间')} · <span class="num">${esc(room || '')}</span></dd></div><div><dt>播报</dt><dd>${esc(voice)}</dd></div></dl><button type="button" class="onboard-cta" data-action="setup.finish">开始接收弹幕${icon('arrow')}</button>${errorSlot()}`;
 }
 
 function updateQr() {
@@ -424,14 +938,14 @@ function updateQr() {
     container.dataset.renderSignature = signature;
     if (frame.dataset.signature !== signature) {
       frame.dataset.signature = signature;
-      if (needsRoom) frame.innerHTML = ui`<div class="qr-placeholder">${icon('check')}<span>账号已登录<br>请改用主播 UID</span></div>`;
+      if (needsRoom) frame.innerHTML = ui`<div class="qr-placeholder">${icon('check')}<span>账号已登录<br>请先开通直播间</span></div>`;
       else if (qrFailure) frame.innerHTML = ui`<div class="qr-placeholder">${icon('qr')}<span>暂时无法生成二维码<br>请稍后重新尝试</span></div>`;
       else if (qr.status === 'expired') frame.innerHTML = ui`<div class="qr-placeholder">${icon('refresh')}<span>二维码已过期<br>重新生成后再扫码</span></div>`;
       else if (qr.status === 'complete') frame.innerHTML = ui`<div class="qr-placeholder">${icon('check')}<span>已完成登录</span></div>`;
       else if (url) { const image = document.createElement('img'); image.src = url; image.alt = container.dataset.qrProvider === 'bilibili' ? t('哔哩哔哩登录二维码') : t('豆包登录二维码'); frame.replaceChildren(image); }
       else frame.innerHTML = ui`<div class="qr-placeholder"><span class="spinner" aria-hidden="true"></span><span>正在生成二维码</span></div>`;
     }
-    container.querySelector('[data-qr-label]').textContent = needsRoom ? t('未找到本账号直播间；可填写主播 UID 匿名接收') : qrFailure || qrLabel(qr);
+    container.querySelector('[data-qr-label]').textContent = needsRoom ? t('未找到本账号直播间，请先在 B站开通直播间后重新扫码') : qrFailure || qrLabel(qr);
     container.querySelector('.status-dot').className = `status-dot ${qrFailure ? '' : qr.status === 'waiting' || qr.status === 'idle' ? 'pulse' : 'online'}`;
     container.querySelector('.qr-retry').hidden = needsRoom || qrBusy || (!qrFailure && !['expired', 'idle'].includes(qr.status));
   }
@@ -512,11 +1026,11 @@ function updateTitlebar() {
   }
 }
 
-// The masthead names whose room this is; a broadcaster name is only known for the signed-in account.
+// The byline keeps the signed-in user's identity, independently of the live title.
 function mastheadView(snapshot) {
   const identity = headerIdentity(snapshot);
   const room = snapshot.live?.room_id || snapshot.setup?.room_id;
-  if (snapshot.setup?.mode === 'account' && identity.loggedIn) return { name: identity.name, suffix: t('的直播间') };
+  if (identity.loggedIn) return { name: identity.name, suffix: t('的直播间') };
   return { name: t('直播间'), suffix: room ? String(room) : '' };
 }
 
@@ -878,65 +1392,68 @@ function renderDockVoice() {
   const switcher = document.querySelector('#tts-switch');
   if (!switcher) return;
   const preferred = snapshot.presets?.find(item => item.id === snapshot.rules?.default_preset_id);
-  const title = preferred ? presetLabel(preferred) : t('选择声音');
+  const enabled = !!(snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled);
+  const muted = !enabled || !!snapshot.preferences?.muted || Number(snapshot.preferences?.master_volume ?? 1) === 0;
+  const state = muted ? 'muted' : snapshot.queue?.current ? 'reading' : 'quiet';
+  const title = !enabled ? t('朗读已关') : preferred ? presetLabel(preferred) : t('选择声音');
   const service = preferred ? providerLabel(preferred.provider) : t('尚未设置音色');
-  const signature = `${title}\u0000${service}`;
+  const tip = document.querySelector('.lake-orb-tip');
+  if (tip) tip.textContent = enabled ? `${title} · ${snapshot.queue?.current ? 'reading' : 'listening'}` : 'voice off';
+  document.querySelector('.lake-orb')?.setAttribute('aria-label', `${t('声音')}：${title}`);
+  const signature = `${title}\u0000${service}\u0000${state}`;
   if (switcher.dataset.label === signature) return;
   switcher.dataset.label = signature;
-  switcher.innerHTML = `<span class="orb" aria-hidden="true"><span><i></i><i></i><i></i><i></i></span></span><span class="dock-voice-text"><span class="dock-voice-name">${esc(title)}</span><span class="dock-voice-service">${esc(service)}</span></span>${icon('up')}`;
+  switcher.innerHTML = `<span class="lake-voice-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span class="lake-voice-name">${esc(title)}</span><em class="lake-voice-state">${state}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14l5-5 5 5"></path></svg>`;
   switcher.setAttribute('aria-label', `${t('播报声音')}：${title} · ${service}`);
 }
+
+const lakeVolumeIcon = muted => muted ? icon('muted') : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h3l5 4V6L7 10H4z"></path><path d="M16 9.5a3.5 3.5 0 0 1 0 5"></path></svg>';
 
 function renderVoicePanel() {
   const panel = document.querySelector('#tts-menu');
   if (!panel) return;
   const preferred = snapshot.presets?.find(item => item.id === snapshot.rules?.default_preset_id);
-  const browse = voiceBrowse || preferred?.provider || 'doubao';
-  const services = serviceProviders.map(provider => {
-    const status = providerStatus(provider, serviceConnection(provider));
-    return `<button type="button" class="voice-service${provider === browse ? ' on' : ''}" data-action="voice.browse" data-id="${esc(provider)}"><span class="service-light ${status.tone}" aria-hidden="true"></span><span><span class="voice-service-name">${esc(providerLabel(provider))}</span><small>${esc(status.label)}</small></span></button>`;
-  }).join('');
-  const presets = (snapshot.presets || []).filter(item => item.provider === browse);
-  const auditioning = snapshot.queue?.current?.origin === 'audition' || Date.now() - auditionStartedAt < 1500;
-  let body;
-  if (browse === 'doubao' && !doubaoConnection()?.has_credential) {
-    body = `<div class="voice-empty"><p>${esc(t('扫码连接豆包后即可选择音色。'))}</p>${button(t('扫码连接'), 'voice.login', { class: 'small' })}</div>`;
-  } else if (!presets.length) {
-    const hint = browse === 'dots' ? t('选择 dots.tts 安装目录并添加参考音频后，这里会出现可选的音色。')
-      : browse === 'gpt_sovits' ? t('选择 GPT-SoVITS 安装目录，会自动配对角色模型。')
-      : t('先为这个服务添加音色');
-    body = `<div class="voice-empty"><p>${esc(hint)}</p>${button(t('去设置'), 'settings.open', { class: 'small' })}</div>`;
-  } else {
-    body = `<div class="voice-rows">${presets.map(preset => {
-      const on = preset.id === preferred?.id;
-      const playing = auditioning && auditionPresetId === preset.id;
-      return `<div class="voice-row${on ? ' on' : ''}"><button type="button" class="voice-pick" data-action="voice.pick" data-id="${esc(preset.id)}" aria-pressed="${on}"><span class="voice-radio" aria-hidden="true"><span></span></span><span>${esc(presetLabel(preset))}</span></button><button type="button" class="voice-play${playing ? ' busy' : ''}" data-action="voice.audition" data-id="${esc(preset.id)}" aria-label="${esc(`${t('试听')} ${presetLabel(preset)}`)}">${playing ? '<span class="reading-mark" aria-hidden="true"><i></i><i></i><i></i></span>' : icon('play')}</button></div>`;
-    }).join('')}</div>`;
-  }
-  patchMarkup(panel, `<div class="voice-services"><span class="panel-kicker">${esc(t('服务'))}</span>${services}</div><div class="voice-list"><span class="panel-kicker">${esc(providerLabel(browse))}</span>${body}<div class="voice-foot"><span>${esc(t('选中即用于直播播报'))}</span><button type="button" class="text-link" data-action="settings.open">${esc(t('管理声音'))}${icon('arrow')}</button></div></div>`);
+  const presets = snapshot.presets || [];
+  const enabled = !!(snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled);
+  const reading = enabled && !!snapshot.queue?.current;
+  const stored = Math.round((snapshot.preferences?.master_volume ?? 1) * 100);
+  const muted = volumeDraft === null ? (!!snapshot.preferences?.muted || stored === 0) : volumeDraft === 0;
+  const volume = volumeDraft ?? (muted ? 0 : stored);
+  const rows = presets.map(preset => {
+    const on = preset.id === preferred?.id;
+    return `<button type="button" class="lake-voice-row${on ? ' on' : ''}" data-action="voice.pick" data-id="${esc(preset.id)}" aria-pressed="${on}">${viewerAvatar({ user_name: presetLabel(preset), user_id: preset.id })}<span class="lake-voice-copy"><b>${esc(presetLabel(preset))}</b><small>${esc(providerLabel(preset.provider))}</small></span><svg class="lake-voice-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"></path></svg></button>`;
+  }).join('') || `<div class="lake-voice-empty"><p>${esc(t('请先添加一个声音预设'))}</p><button type="button" data-action="settings.open">${esc(t('去设置'))}</button></div>`;
+  patchMarkup(panel, `<div class="lake-voice-head"><span class="panel-kicker">${reading ? 'NOW READING' : 'THE VOICE'}</span><button type="button" id="speech-switch" class="lake-speech-switch${enabled ? ' on' : ''}" role="switch" data-action="speech.toggle" aria-label="${esc(t('朗读弹幕'))}" aria-checked="${enabled}"><span>${esc(t('朗读弹幕'))}</span><span class="lake-switch-track"></span></button></div>${rows}<div class="lake-voice-volume"><button type="button" class="dock-mute" data-action="audio.mute" aria-label="${esc(t(muted ? '取消静音' : '静音'))}" aria-pressed="${muted}">${lakeVolumeIcon(muted)}</button><input id="main-volume-range" class="lake-volume-range" type="range" min="0" max="100" step="1" value="${Math.min(100, volume)}" aria-label="${esc(t('音量'))}" style="--fill:${Math.min(100, volume)}%"><output id="main-volume-value" for="main-volume-range">${volume}</output></div>`);
 }
 
 function closeVoicePanel() {
   const panel = document.querySelector('#tts-menu');
-  if (panel) { leaveGhost(panel, 220); panel.hidden = true; }
+  if (panel) panel.hidden = true;
   document.querySelector('#tts-switch')?.setAttribute('aria-expanded', 'false');
+  updateLakePopScrim();
 }
 
 function pendingLiveJobs() {
   return (snapshot.queue?.pending || []).filter(job => job.origin !== 'audition');
 }
 
+function queueJobEvent(job) {
+  const event = job.origin === 'live' && job.event;
+  return event && typeof event === 'object' && !Array.isArray(event) && typeof event.kind === 'string' && typeof event.message === 'string' ? event : null;
+}
+
 function renderQueuePanel(events) {
   const panel = document.querySelector('#queue-panel');
   if (!panel) return;
   const pending = pendingLiveJobs();
-  const signature = JSON.stringify(pending.slice(0, 8).map(job => [job.id, job.user_name, job.text]).concat([pending.length, getLanguage()]));
+  const signature = JSON.stringify(pending.slice(0, 8).map(job => [job.id, job.user_name, job.text, queueJobEvent(job) ? messageParts(job.event) : null]).concat([pending.length, getLanguage()]));
   if (queueSignature === signature) return;
   queueSignature = signature;
   panel.innerHTML = pending.slice(0, 8).map((job, index) => {
     const name = job.user_name || t('访客');
     const text = jobDisplayText(job, events);
-    return `<button type="button" class="queue-item" role="listitem" data-action="queue.jump" data-id="${esc(job.id)}" aria-label="${esc(`${t('立即朗读')}：${name}：${text}`)}" title="${esc(t('立即朗读'))}" style="--queue-opacity:${Math.max(0.55, 1 - index * 0.1).toFixed(2)}"><span class="queue-index">${index + 1}</span><span class="queue-text"><span class="queue-name">${esc(name)}</span><span class="queue-line">${esc(text)}</span></span><span class="queue-play" aria-hidden="true">${icon('play')}</span></button>`;
+    const body = queueJobEvent(job) ? renderChatBody(job.event) : esc(text);
+    return `<button type="button" class="queue-item" role="listitem" data-action="queue.jump" data-id="${esc(job.id)}" aria-label="${esc(`${t('立即朗读')}：${name}：${text}`)}" title="${esc(t('立即朗读'))}" style="--queue-opacity:${Math.max(0.55, 1 - index * 0.1).toFixed(2)}"><span class="queue-index">${index + 1}</span><span class="queue-text"><span class="queue-name">${esc(name)}</span><span class="queue-line">${body}</span></span><span class="queue-play" aria-hidden="true">${icon('play')}</span></button>`;
   }).join('') + (pending.length > 8 ? `<p class="queue-more">+${pending.length - 8} ${esc(t('条'))}</p>` : '');
 }
 
@@ -945,28 +1462,207 @@ function viewerChipsHtml(event) {
   const bound = record?.binding?.enabled ? record.binding.preset_id : '';
   const canBind = validUid(event.user_id) || !!String(event.user_name || '').trim();
   const presets = snapshot.presets || [];
-  const chips = [`<button type="button" class="voice-chip${bound ? '' : ' on'}" data-action="viewer.bind" data-id=""${canBind ? '' : ' disabled'}>${esc(t('跟随默认'))}</button>`]
-    .concat(presets.map(preset => `<button type="button" class="voice-chip${bound === preset.id ? ' on' : ''}" data-action="viewer.bind" data-id="${esc(preset.id)}" title="${esc(providerLabel(preset.provider))}"${canBind ? '' : ' disabled'}>${esc(presetLabel(preset))}</button>`));
-  const boundPreset = presets.find(item => item.id === bound);
-  const preferred = presets.find(item => item.id === snapshot.rules?.default_preset_id);
-  const note = !canBind ? t('这条弹幕没有可用用户名或 UID，无法指定声音。')
-    : boundPreset ? ui`这位观众的弹幕将用「${presetLabel(boundPreset)}」朗读。`
-    : preferred ? ui`使用当前直播声音「${presetLabel(preferred)}」朗读。` : t('请先添加一个声音预设');
-  return `<div class="voice-chips">${chips.join('')}</div><p class="viewer-hint">${esc(note)}</p>`;
+  return `<button type="button" class="voice-chip${bound ? '' : ' on'}" data-action="viewer.bind" data-id="" aria-pressed="${!bound}"${canBind ? '' : ' disabled'}>${esc(t('跟随默认'))}</button>`
+    + presets.map(preset => `<button type="button" class="voice-chip${bound === preset.id ? ' on' : ''}" data-action="viewer.bind" data-id="${esc(preset.id)}" aria-pressed="${bound === preset.id}" title="${esc(`${presetLabel(preset)} · ${providerLabel(preset.provider)}`)}"${canBind ? '' : ' disabled'}>${esc(presetLabel(preset))}</button>`).join('');
+}
+
+function updateViewerVoices(event) {
+  const host = document.querySelector('#viewer-voices');
+  if (!host || !event) return;
+  const body = host.closest('.viewer-body');
+  const scrollTop = body?.scrollTop || 0;
+  const active = host.contains(document.activeElement) ? document.activeElement.closest('[data-action="viewer.bind"]')?.dataset.id : undefined;
+  patchMarkup(host, viewerChipsHtml(event));
+  if (body) body.scrollTop = scrollTop;
+  if (active !== undefined) [...host.querySelectorAll('[data-action="viewer.bind"]')].find(button => button.dataset.id === active && !button.disabled)?.focus({ preventScroll: true });
+}
+
+function viewerSaidMarkup(event) {
+  const recent = normalizedEvents(snapshot).filter(item => viewerIdentity(item) === viewerIdentity(event) && ['danmaku', 'super_chat'].includes(item.kind) && eventText(item)).slice(-3);
+  const lines = recent.length ? recent.map(item => {
+    const body = renderChatBody(item);
+    const hasText = messageParts(item).some(part => part.type === 'text' && part.text.trim());
+    return `<p>${hasText ? `“${body}”` : body}</p>`;
+  }).join('') : `<p>“${esc(t('今晚还没说过话'))}”</p>`;
+  return { count: recent.length, html: `<span class="panel-kicker" aria-hidden="true">SAID TONIGHT</span>${lines}` };
+}
+
+function updateViewerSaid(event) {
+  const host = document.querySelector('#viewer-drawer .viewer-said');
+  if (!host || !event) return;
+  const said = viewerSaidMarkup(event);
+  patchMarkup(host, said.html);
+  const count = document.querySelector('#viewer-drawer .viewer-uid');
+  if (count && count.textContent !== `said ${said.count} tonight`) count.textContent = `said ${said.count} tonight`;
 }
 
 function renderViewerDrawer() {
   const layer = document.querySelector('#viewer-drawer');
   if (!layer) return;
   const event = viewerContext;
-  if (!event) { leaveGhost(layer, 300); layer.hidden = true; layer.innerHTML = ''; return; }
+  if (!event) {
+    const returnFocus = layer.viewerReturnFocus;
+    layer.viewerReturnFocus = null;
+    layer.hidden = true; layer.innerHTML = '';
+    if (returnFocus) requestAnimationFrame(() => {
+      const usable = returnFocus.isConnected && !returnFocus.disabled && returnFocus.getClientRects().length && !returnFocus.closest('[hidden], dialog:not([open])');
+      (usable ? returnFocus : document.querySelector('#tts-switch'))?.focus({ preventScroll: true });
+    });
+    return;
+  }
+  if (layer.hidden) layer.viewerReturnFocus = document.activeElement;
   const alias = viewerAlias(event);
   const voiceMarkup = viewerChipsHtml(event);
-  const uid = validUid(event.user_id) ? `<span class="viewer-uid">UID ${esc(event.user_id)}</span>` : '';
-  layer.innerHTML = `<button type="button" class="viewer-scrim" data-action="viewer.close" aria-label="${esc(t('关闭观众卡片'))}"></button><aside class="viewer-sheet" role="dialog" aria-modal="true" aria-label="${esc(t('观众设置'))}"><header class="viewer-head">${viewerAvatar(event, true)}<div class="viewer-title"><span class="viewer-name">${esc(event.user_name || t('访客'))}</span>${uid}</div>${iconButton('close', t('关闭'), 'viewer.close')}</header><section class="viewer-section"><label class="panel-kicker" for="viewer-alias">${esc(t('读作'))}</label><input id="viewer-alias" class="viewer-alias" maxlength="40" autocomplete="off" placeholder="${esc(t('按原名朗读'))}" value="${esc(alias)}"${String(event.user_name || '').trim() ? '' : ' disabled'}><p class="viewer-hint">${esc(t('播报时这样称呼：'))}<strong id="viewer-spoken">${esc(alias || event.user_name || t('访客'))}</strong></p></section><section class="viewer-section"><span class="panel-kicker">${esc(t('专属音色'))}</span><div id="viewer-voices">${voiceMarkup}</div></section><footer class="viewer-foot">${button(t('试听'), 'viewer.audition', { class: 'small', icon: 'play' })}<button type="button" class="text-link" data-action="viewer.manage">${esc(t('管理全部观众'))}${icon('arrow')}</button></footer></aside>`;
+  const mentionDisabled = !snapshot.account?.user_id || snapshot.network_disabled || !String(event.user_name || '').trim();
+  const saidView = viewerSaidMarkup(event);
+  const said = `<section class="viewer-section viewer-said" aria-label="${esc(t('收到的弹幕'))}">${saidView.html}</section>`;
+  layer.innerHTML = `<button type="button" class="viewer-scrim" data-action="viewer.close" aria-label="${esc(t('关闭观众卡片'))}"></button><aside class="viewer-sheet" role="dialog" aria-modal="true" aria-label="${esc(t('观众设置'))}"><header class="viewer-head">${viewerAvatar(event, true)}<div class="viewer-name"${validUid(event.user_id) ? ` title="UID ${esc(event.user_id)}"` : ''}>${esc(event.user_name || t('访客'))}</div><span class="viewer-uid">said ${saidView.count} tonight</span><div class="viewer-quick"><button type="button" class="viewer-quick-button" data-action="viewer.at"${mentionDisabled ? ' disabled' : ''}>@ TA</button><button type="button" class="viewer-quick-button" data-action="viewer.audition">${esc(t('试听称呼'))}</button></div></header><div class="viewer-body">${said}<section class="viewer-section viewer-voice-settings"><label class="viewer-alias-field" for="viewer-alias"><span>${esc(t('读作'))}</span><input id="viewer-alias" class="viewer-alias" maxlength="40" autocomplete="off" placeholder="${esc(event.user_name || t('访客'))}" value="${esc(alias)}"${String(event.user_name || '').trim() ? '' : ' disabled'}></label><div id="viewer-voices" class="voice-chips" role="group" aria-label="${esc(t('观众声音'))}">${voiceMarkup}</div></section><section id="viewer-moderation" class="viewer-section"></section></div></aside>`;
   markupCache.set(layer.querySelector('#viewer-voices'), voiceMarkup);
+  markupCache.set(layer.querySelector('.viewer-said'), saidView.html);
   layer.hidden = false;
-  requestAnimationFrame(() => layer.querySelector('#viewer-alias:not([disabled])')?.focus({ preventScroll: true }));
+  updateViewerModeration();
+  layer.querySelector('.viewer-sheet').addEventListener('keydown', key => {
+    if (key.key !== 'Tab') return;
+    const controls = [...layer.querySelectorAll('.viewer-sheet button:enabled, .viewer-sheet input:enabled, .viewer-sheet [tabindex="0"]')].filter(node => node.getClientRects().length && (node.type !== 'radio' || node.checked));
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (key.shiftKey && document.activeElement === first) { key.preventDefault(); last?.focus(); }
+    else if (!key.shiftKey && document.activeElement === last) { key.preventDefault(); first?.focus(); }
+  });
+  requestAnimationFrame(() => {
+    const sheet = layer.querySelector('.viewer-sheet');
+    if (sheet) { sheet.tabIndex = -1; sheet.focus({ preventScroll: true }); }
+  });
+}
+
+function viewerModerationTarget() {
+  const event = viewerContext;
+  return event && !event.mystery && validUid(event.user_id) ? String(event.user_id) : '';
+}
+
+function updateViewerModeration() {
+  const host = document.querySelector('#viewer-moderation');
+  if (!host || !viewerContext) return;
+  host.hidden = !broadcastEnabled();
+  if (host.hidden) return;
+  const target = viewerModerationTarget();
+  const account = snapshot.account?.user_id;
+  const view = snapshot.moderation || {};
+  const matching = target && String(view.user_id) === target;
+  const ready = matching && !!account && viewerModerationAccount === String(account) && String(account) !== target && !view.busy && !viewerModerationBusy && !snapshot.network_disabled;
+  const self = target && String(account) === target;
+  const note = !target ? t('该用户没有公开 UID，无法管理。') : !account ? t('扫码登录后可管理直播间用户') : self ? t('不能禁言或拉黑自己') : snapshot.network_disabled ? t('离线测试窗口不可管理直播间') : matching && view.message ? localizeDiagnostic(view.message) : matching && (view.can_moderate || view.can_blacklist || view.can_manage_admins) ? `${t('当前直播间')} · ${view.room_id}` : matching && view.busy ? t('正在读取管理权限…') : t('仅主播或获授权的房管可操作');
+  const mute = ready && !self && view.can_moderate && typeof view.muted === 'boolean';
+  const blacklist = ready && !self && view.can_blacklist && typeof view.blacklisted === 'boolean';
+  const admin = ready && view.can_manage_admins && typeof view.is_admin === 'boolean';
+  const oldHours = host.querySelector('#viewer-mute-hours')?.value ?? '1';
+  const durations = [[0, '本场'], [1, '1 小时'], [24, '24 小时'], [168, '7 天'], [-1, '永久']];
+  const muted = !!(matching && view.muted);
+  const blocked = !!(matching && view.blacklisted);
+  const appointed = !!(matching && view.is_admin);
+  const blockArmed = !blocked && host.dataset.blockArmed === target && host.dataset.blockArmAccount === String(account);
+  const durationLabel = t(durations.find(([value]) => String(value) === oldHours)?.[1] || '本场');
+  const permissionVisible = !ready || !(view.can_moderate || view.can_blacklist || view.can_manage_admins);
+  const html = `<span class="viewer-settings-label">${esc(t('直播间管理'))}</span><div class="viewer-room-controls"><p class="viewer-hint viewer-permissions" role="status"${permissionVisible ? '' : ' hidden'}>${esc(note)}</p><div class="viewer-mute-group"><div class="viewer-moderation-row"><span class="viewer-control-copy"><strong>${esc(t('禁言'))}</strong><small${muted ? ' class="air"' : ''}>${esc(t(muted ? '已禁言' : '不能在直播间发言'))}</small></span>${muted ? `<button type="button" class="viewer-line-button" data-action="viewer.moderation.unmute"${mute ? '' : ' disabled'}>${esc(t('解除'))}</button>` : `<button type="button" class="viewer-mute-action" data-action="viewer.moderation.mute"${mute ? '' : ' disabled'}>${esc(`${t('禁言')} ${durationLabel}`)}</button>`}</div><select class="viewer-duration-value" aria-label="${esc(t('禁言时长'))}" id="viewer-mute-hours" hidden tabindex="-1" aria-hidden="true"${mute && !muted ? '' : ' disabled'}>${durations.map(([value, label]) => option(value, t(label), oldHours)).join('')}</select><fieldset class="viewer-durations" aria-label="${esc(t('禁言时长'))}"${muted ? ' hidden' : ''}${mute && !muted ? '' : ' disabled'}>${durations.map(([value, label]) => `<label class="viewer-duration"><input type="radio" id="viewer-duration-${value}" name="viewer-mute-duration" value="${value}"${String(value) === oldHours ? ' checked' : ''}><span>${esc(t(label))}</span></label>`).join('')}</fieldset></div><div class="viewer-moderation-row viewer-block-row"><span class="viewer-control-copy"><strong>${esc(t('直播间拉黑'))}</strong><small>${esc(t(blocked ? '已在直播间黑名单' : blockArmed ? '再点一次确认' : '不能再进入你的直播间'))}</small></span><button type="button" class="viewer-line-button${blocked ? '' : ' risk'}${blockArmed ? ' armed' : ''}" data-action="${blocked ? 'viewer.moderation.unblacklist' : 'viewer.moderation.blacklist'}"${blacklist ? '' : ' disabled'}>${esc(t(blocked ? '解除' : blockArmed ? '确认拉黑' : '拉黑'))}</button></div><div class="viewer-moderation-row viewer-admin-row"><span class="viewer-control-copy"><strong>${esc(t('房管'))}</strong><small>${esc(t(appointed ? '可以帮你禁言' : '让 TA 帮你管理弹幕'))}</small></span><button type="button" class="viewer-admin-switch${appointed ? ' on' : ''}" data-action="${appointed ? 'viewer.moderation.dismiss' : 'viewer.moderation.appoint'}" role="switch" aria-checked="${appointed}" aria-label="${esc(t(appointed ? '撤销房管' : '设为房管'))}"${admin ? '' : ' disabled'}><span class="viewer-switch-track"></span></button></div></div>`;
+  const active = host.contains(document.activeElement) ? document.activeElement?.id : '';
+  // The native select remains the canonical command value; radios provide the visible duration control.
+  if (markupCache.get(host) === html) return;
+  closeSelect();
+  patchMarkup(host, html);
+  const select = host.querySelector('#viewer-mute-hours');
+  select.value = oldHours;
+  host.querySelector('.viewer-durations').addEventListener('change', change => {
+    if (change.target.name !== 'viewer-mute-duration' || select.disabled) return;
+    select.value = change.target.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  select.addEventListener('change', () => {
+    for (const radio of host.querySelectorAll('[name="viewer-mute-duration"]')) radio.checked = radio.value === select.value;
+    const action = host.querySelector('.viewer-mute-action');
+    if (action) action.textContent = `${t('禁言')} ${t(durations.find(([value]) => String(value) === select.value)?.[1] || '本场')}`;
+  });
+  if (active) host.querySelector(`#${active}`)?.focus({ preventScroll: true });
+}
+
+async function refreshViewerModeration() {
+  const user_id = viewerModerationTarget();
+  if (!broadcastEnabled() || !user_id || !snapshot.account?.user_id || snapshot.network_disabled || viewerModerationBusy || String(snapshot.account.user_id) === user_id) return;
+  viewerModerationBusy = true;
+  const account = String(snapshot.account.user_id);
+  viewerModerationAccount = account;
+  updateViewerModeration();
+  try { await command('bili.moderation.refresh', { user_id }, { quiet: true, silent: true, accept: moderationResponseGuard() }); }
+  finally {
+    viewerModerationBusy = false;
+    updateViewerModeration();
+    if (viewerModerationTarget() && (viewerModerationTarget() !== user_id || String(snapshot.account?.user_id || '') !== account)) void refreshViewerModeration().catch(() => updateViewerModeration());
+  }
+}
+
+async function moderateViewer(action) {
+  const user_id = viewerModerationTarget();
+  const view = snapshot.moderation;
+  if (!broadcastEnabled() || !user_id || !snapshot.account?.user_id || viewerModerationAccount !== String(snapshot.account.user_id) || snapshot.network_disabled || viewerModerationBusy || String(snapshot.account.user_id) === user_id || String(view?.user_id) !== user_id || view.busy) return;
+  const payload = { user_id, room_id: view.room_id, confirmed: true };
+  const account = String(snapshot.account.user_id);
+  const viewerName = viewerContext.user_name || t('访客');
+  if ((action === 'mute' || action === 'unmute') && (!view.can_moderate || typeof view.muted !== 'boolean')) return;
+  if ((action === 'appoint' || action === 'dismiss') && (!view.can_manage_admins || typeof view.is_admin !== 'boolean')) return;
+  if ((action === 'blacklist' || action === 'unblacklist') && (!view.can_blacklist || typeof view.blacklisted !== 'boolean')) return;
+  const host = document.querySelector('#viewer-moderation');
+  if (action === 'blacklist' && !view.blacklisted && host) {
+    if (host.dataset.blockArmed !== user_id || host.dataset.blockArmAccount !== account) {
+      host.dataset.blockArmed = user_id;
+      host.dataset.blockArmAccount = account;
+      updateViewerModeration();
+      host.querySelector('[data-action="viewer.moderation.blacklist"]')?.focus({ preventScroll: true });
+      return;
+    }
+    delete host.dataset.blockArmed;
+    delete host.dataset.blockArmAccount;
+  }
+  if (action === 'mute') payload.hours = Number(document.querySelector('#viewer-mute-hours')?.value ?? 1);
+  viewerModerationBusy = true;
+  updateViewerModeration();
+  let applied = false;
+  try { applied = !!await command(`bili.moderation.${action}`, payload, { quiet: true, accept: moderationResponseGuard() }); }
+  finally {
+    viewerModerationBusy = false;
+    updateViewerModeration();
+    if (viewerModerationTarget() && (viewerModerationTarget() !== user_id || String(snapshot.account?.user_id || '') !== account)) void refreshViewerModeration().catch(() => updateViewerModeration());
+  }
+  if (applied && broadcastEnabled() && viewerModerationTarget() === user_id && String(snapshot.account?.user_id || '') === account && String(snapshot.moderation?.room_id || '') === String(payload.room_id)) {
+    if (action === 'mute') {
+      const duration = t({ 0: '本场', 1: '1 小时', 24: '24 小时', 168: '7 天', '-1': '永久' }[payload.hours] || '本场');
+      showToast(ui`已禁言 ${viewerName} · ${duration}`, false, () => undoLakeMute({ account, user_id, room_id: payload.room_id }));
+    } else if (action === 'appoint') showToast(ui`已任命 ${viewerName} 为房管`);
+    else showToast(t({ unmute: '已解除禁言', blacklist: '已加入直播间黑名单', unblacklist: '已解除直播间拉黑', dismiss: '已撤销房管' }[action]));
+  }
+}
+
+async function undoLakeMute(context) {
+  const sameRoom = next => broadcastEnabled() && !snapshot.network_disabled && String(snapshot.account?.user_id || '') === context.account && String(snapshot.broadcast?.room?.room_id || '') === String(context.room_id) && next?.preferences?.broadcast_console && String(next.account?.user_id || '') === context.account && String(next.moderation?.user_id || '') === context.user_id && String(next.moderation?.room_id || '') === String(context.room_id);
+  if (!broadcastEnabled() || snapshot.network_disabled || viewerModerationBusy || String(snapshot.account?.user_id || '') !== context.account || String(snapshot.broadcast?.room?.room_id || '') !== String(context.room_id)) return;
+  viewerModerationBusy = true;
+  updateViewerModeration();
+  try {
+    const refreshed = await command('bili.moderation.refresh', { user_id: context.user_id }, { quiet: true, accept: sameRoom });
+    if (!refreshed || !refreshed.moderation?.can_moderate || refreshed.moderation.muted !== true) return;
+    const restored = await command('bili.moderation.unmute', { user_id: context.user_id, room_id: context.room_id, confirmed: true }, { quiet: true, accept: sameRoom });
+    if (restored) showToast(t('已解除禁言'));
+  } finally {
+    viewerModerationBusy = false; updateViewerModeration();
+    if (viewerContext && viewerModerationTarget() !== context.user_id) void refreshViewerModeration().catch(() => updateViewerModeration());
+  }
+}
+
+function moderationResponseGuard() {
+  const account = String(snapshot.account?.user_id || '');
+  const roomOf = view => String(view.live?.room_id || view.setup?.room_id || '');
+  const room = roomOf(snapshot);
+  return next => broadcastEnabled() && next?.preferences?.broadcast_console
+    && String(snapshot.account?.user_id || '') === account && String(next.account?.user_id || '') === account
+    && roomOf(snapshot) === room && roomOf(next) === room;
 }
 
 async function closeViewerDrawer() {
@@ -977,6 +1673,136 @@ async function closeViewerDrawer() {
   renderViewerDrawer();
   feedSignature = '';
   if (step === 'main') { liveRenderSignature = ''; updateLive(); }
+  if (audienceReturn) { audienceReturn = false; openAudience(); }
+}
+
+// The byline follows the room's broadcast status, separately from reception.
+// Its displayed rank count excludes our account only when its UID is in the list.
+function audienceView() {
+  const live = snapshot.live || {};
+  const audience = live.audience || {};
+  const active = !!(audience.active && live.running && !snapshot.network_disabled);
+  const count = audienceDisplayCount(snapshot);
+  return { audience, active, count };
+}
+
+function updateAudience() {
+  const control = document.querySelector('#audience-count');
+  if (!control) return;
+  const { audience, active, count } = audienceView();
+  control.hidden = !active || count === '0';
+  const faces = active ? audienceUsers(snapshot).filter(user => !user.mystery).slice(0, 3) : [];
+  const pending = active && count == null && !!audience.loading && !faces.length;
+  const facesMarkup = pending ? '<span class="audience-face ghost"></span>'.repeat(3) : faces.map(user => `<span class="audience-face">${viewerAvatar(user)}</span>`).join('');
+  const markup = `${facesMarkup ? `<span class="audience-faces${pending ? ' pending' : ''}" aria-hidden="true">${facesMarkup}</span>` : ''}<span class="audience-now"><b>${esc(count ?? '—')}</b>${esc(t('人在看'))}</span>`;
+  patchMarkup(control, markup);
+  const label = `${count ?? '—'} ${t('人在看')}`;
+  if (control.getAttribute('aria-label') !== label) control.setAttribute('aria-label', label);
+  control.title = t('查看在看的观众');
+  const dialog = document.querySelector('#audience-dialog');
+  if (dialog?.open) { renderAudience(); placeAudience(); }
+}
+
+function placeAudience() {
+  const dialog = document.querySelector('#audience-dialog');
+  const anchor = document.querySelector('#audience-count');
+  if (!dialog || !anchor || anchor.hidden) return;
+  dialog.style.setProperty('--audience-top', `${Math.min(190, Math.max(52, window.innerHeight - 200))}px`);
+  dialog.style.setProperty('--audience-left', `${Math.max(12, Math.min(92, window.innerWidth - 362))}px`);
+}
+
+function openAudience(pinned = true) {
+  const dialog = document.querySelector('#audience-dialog');
+  if (!dialog) return;
+  closeVoicePanel(); closeQueuePanel();
+  clearTimeout(audienceCloseTimer);
+  dialog.classList.remove('closing');
+  audienceSignature = '';
+  renderAudience();
+  placeAudience();
+  audiencePinned = pinned;
+  if (!dialog.open) {
+    const focus = document.activeElement;
+    dialog.show();
+    if (!pinned) focus?.focus({ preventScroll: true });
+  }
+  document.querySelector('#audience-count')?.setAttribute('aria-expanded', 'true');
+  updateLakePopScrim();
+  maybeLoadMoreAudience();
+}
+
+function closeAudience(restoreFocus = true) {
+  audienceReturn = false;
+  audiencePinned = false;
+  const dialog = document.querySelector('#audience-dialog');
+  if (!dialog?.open) return;
+  document.querySelector('#audience-count')?.setAttribute('aria-expanded', 'false');
+  clearTimeout(audienceCloseTimer);
+  dialog.classList.remove('closing');
+  dialog.close();
+  updateLakePopScrim();
+  if (restoreFocus) document.querySelector('#audience-count')?.focus();
+}
+
+function audienceRow(user, index) {
+  const key = `rank:${index}`;
+  audienceEntries.set(key, user);
+  const rank = Number(user.rank);
+  const podium = rank >= 1 && rank <= 3 ? ` podium-${rank}` : '';
+  const guard = [null, t('总督'), t('提督'), t('舰长')][user.guard_level];
+  const tag = guard || user.medal_name || '';
+  const details = [validUid(user.user_id) ? `UID ${user.user_id}` : '', guard,
+    user.medal_name ? `${user.medal_name}${user.medal_level ? ` ${user.medal_level}` : ''}` : '',
+    user.score != null && String(user.score) !== '0' ? `${t('贡献值')} ${user.score}` : '',
+  ].filter(Boolean).join(' · ');
+  return `<button type="button" class="audience-user${podium}${user.mystery ? ' mystery' : ''}" data-action="audience.viewer" data-id="${key}"${details ? ` title="${esc(details)}"` : ''}${user.mystery ? ' disabled' : ''}><span class="audience-rank">${esc(user.rank ?? '')}</span>${viewerAvatar(user)}<span class="audience-user-name">${esc(user.user_name || t('访客'))}</span>${tag ? `<span class="audience-tag">${esc(tag)}</span>` : ''}</button>`;
+}
+
+function renderAudience() {
+  const dialog = document.querySelector('#audience-dialog');
+  if (!dialog) return;
+  if (!dialog.querySelector('#audience-search')) {
+    dialog.innerHTML = `<header class="audience-head"><h2 id="audience-title" class="sr-only">${esc(t('在看的观众'))}</h2><span class="audience-kicker" aria-hidden="true">WATCHING NOW <span id="audience-clock"></span></span><p class="audience-total"><strong id="audience-total"></strong><span>${esc(t('人在看'))}</span></p></header><input id="audience-search" type="search" maxlength="100" autocomplete="off" spellcheck="false" aria-label="${esc(t('搜索用户名或 UID'))}" hidden><p id="audience-status" class="audience-status" role="status"></p><div id="audience-scroll" class="audience-scroll"><div id="audience-list" class="audience-list" role="list" aria-labelledby="audience-title"></div></div><div id="audience-tail" class="audience-tail"></div>`;
+    dialog.querySelector('#audience-search').value = audienceQuery;
+    dialog.querySelector('#audience-search').addEventListener('input', event => { audienceQuery = event.target.value; audienceSignature = ''; renderAudience(); });
+    dialog.querySelector('#audience-scroll').addEventListener('scroll', () => maybeLoadMoreAudience(), { passive: true });
+  }
+  const { audience, active, count } = audienceView();
+  const users = audienceUsers(snapshot, audienceQuery);
+  const signature = JSON.stringify([audience, active, count, audienceQuery, users, getLanguage()]);
+  if (signature === audienceSignature) return;
+  audienceSignature = signature;
+  dialog.dataset.state = !active || audience.live_status !== 1 ? 'off' : audience.error ? 'error' : 'live';
+  dialog.querySelector('#audience-total').textContent = count ?? '—';
+  dialog.querySelector('#audience-clock').textContent = active && audience.updated_at_ms ? `· ${clockLabel(audience.updated_at_ms)}` : '';
+  const status = dialog.querySelector('#audience-status');
+  const note = !active ? t('请先连接直播间') : audience.error ? `${t('观众数据获取失败')}${audience.updated_at_ms ? ` · ${t('显示上次获取的名单')}` : ''} · ${localizeDiagnostic(audience.error)}` : audience.live_status === 0 ? t('未开播') : audience.live_status === 2 ? t('轮播中') : audience.live_status !== 1 ? t('正在获取直播状态…') : '';
+  status.textContent = note;
+  status.hidden = !note;
+  const list = dialog.querySelector('#audience-list');
+  list.setAttribute('aria-busy', String(!!audience.loading));
+  audienceEntries.clear();
+  const searching = !!audienceQuery.trim();
+  const markup = users.map(audienceRow).join('') || `<p class="audience-empty">${esc(searching ? t('没有匹配的用户') : audience.loading ? t('正在获取观众数据…') : active ? t('暂时没有公开的在线观众') : t('请先连接直播间'))}</p>`;
+  const scroll = dialog.querySelector('#audience-scroll');
+  const position = scroll.scrollTop;
+  patchMarkup(list, markup);
+  scroll.scrollTop = position;
+  const tail = !searching && active && audience.has_more ? `<span class="audience-loader${audience.loading ? ' busy' : ''}" aria-hidden="true"><i></i><i></i><i></i></span>` : `<small>${esc(audience.limit_reached ? t('仅显示前 1000 位') : t('B站只公开部分在线观众'))}</small>`;
+  patchMarkup(dialog.querySelector('#audience-tail'), tail);
+  if ((audience.page || 0) <= 1 && (audience.users || []).length < audienceMoreAt) audienceMoreAt = 0;
+  maybeLoadMoreAudience();
+}
+
+// Later pages arrive as the list nears its end; there is no button to press.
+function maybeLoadMoreAudience() {
+  const scroll = document.querySelector('#audience-scroll');
+  const { audience, active } = audienceView();
+  const loaded = (audience.users || []).length;
+  if (!scroll || !scroll.clientHeight || !document.querySelector('#audience-dialog')?.open || !active || audience.loading || !audience.has_more || audienceQuery.trim() || loaded <= audienceMoreAt) return;
+  if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 180) return;
+  audienceMoreAt = loaded;
+  void command('live.audience.more', {}, { quiet: true }).catch(() => { audienceMoreAt = 0; });
 }
 
 function scheduleViewerAlias(value) {
@@ -1004,8 +1830,7 @@ async function bindViewerVoice(presetId) {
   } else {
     await command('bindings.save', { id: record?.id || '', binding: { platform: 'bilibili', user_id: hasUid ? numericId(event.user_id) : null, user_name: hasUid ? null : event.user_name, legacy_user_name: record?.binding.legacy_user_name || null, preset_id: presetId, enabled: true } }, { quiet: true });
   }
-  const voices = document.querySelector('#viewer-voices');
-  if (voices && viewerContext) patchMarkup(voices, viewerChipsHtml(viewerContext));
+  updateViewerVoices(viewerContext);
 }
 
 function updateLive() {
@@ -1013,9 +1838,14 @@ function updateLive() {
   if (settingsDialog.open) return;
   const scroll = document.querySelector('#chat-scroll');
   if (!scroll || !snapshot) return;
+  updateChatCompose();
   updateOnAir();
+  updateAudience();
+  updateThemeControl();
+  updateLakeClock();
   const notice = updateFallbackStatus(snapshot.queue || {});
-  const renderSignature = JSON.stringify([snapshot.live, snapshot.queue, snapshot.setup, snapshot.account, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, notice, viewerOpenIdentity]);
+  const renderSignature = JSON.stringify([snapshot.live, snapshot.queue, snapshot.setup, snapshot.account, snapshot.broadcast, snapshot.preferences?.broadcast_console, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, notice, viewerOpenIdentity]);
+  if (viewerContext) updateViewerModeration();
   if (liveRenderSignature === renderSignature) return;
   liveRenderSignature = renderSignature;
   const live = snapshot.live || {};
@@ -1028,6 +1858,9 @@ function updateLive() {
   const kicker = document.querySelector('#masthead-kicker');
   if (kicker && kicker.title !== connection.caption) kicker.title = connection.caption;
   const masthead = mastheadView(snapshot);
+  const ownRoom = broadcastEnabled() && snapshot.broadcast?.room;
+  const lakeTitle = document.querySelector('#lake-title');
+  if (lakeTitle) { lakeTitle.disabled = !ownRoom; lakeTitle.title = ownRoom ? t('修改直播标题和分区') : masthead.name; }
   const mastName = document.querySelector('#masthead-name');
   if (mastName && mastName.textContent !== masthead.name) { mastName.textContent = masthead.name; mastName.title = masthead.name; }
   const mastSuffix = document.querySelector('#masthead-suffix');
@@ -1040,7 +1873,10 @@ function updateLive() {
   if (errorLabel.textContent !== error) errorLabel.textContent = error;
   const events = normalizedEvents(snapshot);
   const keys = eventKeys(events);
-  renderFeed(events, keys);
+  renderLakeHistory(events, keys);
+  renderLakeTranscript(events, keys);
+  // Transcript resolves the ended-session state used by this control.
+  updateOnAir();
   const emptyNode = document.querySelector('#chat-empty');
   emptyNode.hidden = events.length > 0;
   const emptySignature = `${connection.caption}:${room}:${getLanguage()}`;
@@ -1080,10 +1916,11 @@ function updateLive() {
   const voicePanel = document.querySelector('#tts-menu');
   if (voicePanel && !voicePanel.hidden) renderVoicePanel();
   if (viewerContext) {
-    const voices = document.querySelector('#viewer-voices');
-    if (voices) patchMarkup(voices, viewerChipsHtml(viewerContext));
+    updateViewerSaid(viewerContext);
+    updateViewerVoices(viewerContext);
   }
   updateVolumeControls();
+  updateLakePopScrim();
 }
 
 function updateVolumeControls() {
@@ -1105,15 +1942,19 @@ function updateVolumeControls() {
     control.classList?.toggle('on', muted);
     if (control.dataset.muted !== String(muted)) {
       control.dataset.muted = String(muted);
-      control.innerHTML = icon(muted ? 'muted' : 'audio');
+      control.innerHTML = lakeVolumeIcon(muted);
     }
   }
 }
 
-const tabs = [['room', 'navRoom', '直播间'], ['voices', 'navVoice', '声音'], ['rules', 'navRules', '播报内容'], ['assets', 'navSounds', '音效'], ['broadcast', 'navBroadcast', '开播'], ['overlay', 'navOverlay', 'OBS 叠加层'], ['general', 'navGeneral', '通用'], ['data', 'navAbout', '数据与关于']];
-// Older entry points still name the pages that were merged into 通用 and 数据与关于.
-const legacyTabs = { audio: 'general', appearance: 'general', about: 'data' };
+const tabs = [['room', 'navRoom', '直播间'], ['voices', 'navVoice', '声音'], ['rules', 'navRules', '播报内容'], ['assets', 'navSounds', '音效'], ['live', 'navBroadcast', 'OBS 与开播'], ['general', 'navGeneral', '通用'], ['data', 'navAbout', '数据与关于']];
+// Older entry points still name the pages that were merged into 通用, 数据与关于 and OBS 与开播.
+const legacyTabs = { audio: 'general', appearance: 'general', about: 'data', broadcast: 'live', overlay: 'live' };
 const settingsTabId = id => legacyTabs[id] || (tabs.some(([tab]) => tab === id) ? id : 'voices');
+// 开播台 and 叠加层 share the OBS 与开播 page; the old tab IDs open their panel.
+const livePanels = ['broadcast', 'overlay'];
+let livePanel = 'broadcast';
+const chooseLivePanel = id => { if (livePanels.includes(id)) livePanel = id; };
 const serviceProviders = ['doubao', 'dots', 'gpt_sovits', 'fish_audio'];
 const providerTimeout = { doubao: 30, dots: 30, gpt_sovits: 30 };
 const providerEndpoint = { dots: 'http://127.0.0.1:9881', gpt_sovits: 'http://127.0.0.1:9880' };
@@ -1240,7 +2081,7 @@ function collectAutosave(form) {
   const id = form.dataset.id || '';
   if (type === 'room-uid') {
     if (!validUid(value('uid'))) throw new Error(t('请输入有效的主播 UID'));
-    return { action: 'onboarding.anonymous', payload: { uid: value('uid') } };
+    throw new Error(t('请扫码登录哔哩哔哩后接收弹幕'));
   }
   if (type === 'gift-merge') {
     const gift_merge = { enabled: checked('enabled'), initial_seconds: number('initial_seconds'), increment_seconds: number('increment_seconds'), maximum_seconds: number('maximum_seconds') };
@@ -1297,11 +2138,19 @@ function collectAutosave(form) {
   if (type === 'overlay') {
     const current = snapshot.overlay?.settings;
     if (!current) throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
-    if (!value('title')) throw new Error(t('请填写叠加层标题'));
-    const settings = { ...current, enabled: checked('enabled'), style: value('style'), corner: value('corner'), scale: number('scale'), vignette: number('vignette'), title: value('title'), tagline: value('tagline'), show_danmaku: checked('show_danmaku'), show_gift: checked('show_gift'), show_super_chat: checked('show_super_chat'), show_guard: checked('show_guard'), names: value('names'), merge_duplicates: checked('merge_duplicates'), linger_seconds: number('linger_seconds') };
+    const settings = { ...current, enabled: checked('enabled'), style: value('style'), corner: value('corner'), scale: number('scale'), vignette: number('vignette'), title: current.title, tagline: value('tagline'), show_danmaku: checked('show_danmaku'), show_gift: checked('show_gift'), show_super_chat: checked('show_super_chat'), show_guard: checked('show_guard'), names: value('names'), merge_duplicates: checked('merge_duplicates'), linger_seconds: number('linger_seconds') };
     if (!Number.isInteger(settings.linger_seconds) || settings.linger_seconds < 3 || settings.linger_seconds > 120) throw new Error(t('停留时间需在 3 到 120 秒之间'));
     return { action: 'overlay.save', payload: { settings } };
   }
+  // Each OBS form sends only its own fields; Rust keeps the rest as saved.
+  if (type === 'obs') {
+    const host = value('host');
+    const port = number('port');
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/.test(host) || host.includes('..')) throw new Error(t('请填写 OBS 所在电脑的地址，例如 127.0.0.1'));
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(t('端口需在 1 到 65535 之间'));
+    return { action: 'obs.save', payload: { settings: { host, port, executable: value('executable') || null } } };
+  }
+  if (type === 'obs-link') return { action: 'obs.save', payload: { settings: { enabled: checked('enabled'), auto_launch: checked('auto_launch') } } };
   throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
 }
 
@@ -1388,7 +2237,6 @@ function mountAutosaves() {
       },
       save: async ({ action, payload }) => {
         if (form.dataset.form === 'service-local') return saveLocalDirectory(payload.provider, payload.directory);
-        if (form.dataset.form === 'room-uid' && qrProvider) await cancelQr();
         return command(action, payload, { quiet: true, silent: true });
       },
       onSaved: async (result, envelope) => {
@@ -1411,21 +2259,6 @@ function mountAutosaves() {
           record.touched = false; record.invalid = ''; formDrafts.delete(record.key); formDrafts.delete(oldKey);
           try { record.baseline = JSON.stringify(collectAutosave(form)); record.lastScheduled = record.baseline; } catch { /* May become invalid only after a concurrent edit. */ }
           showAutoState(form);
-          if (form.dataset.form === 'room-uid' && settingsDialog.open && settingsTab === 'room') {
-            // The room page also contains an independent gift merge autosave.
-            // Flush it before replacing the page, which would cancel its timer.
-            const siblings = [...autosaves.entries()].filter(([otherForm]) => otherForm !== form);
-            const results = await Promise.allSettled(siblings
-              .filter(([, other]) => other.touched && !other.invalid)
-              .map(([, other]) => other.queue.flush()));
-            const siblingDraft = siblings.some(([otherForm, other]) => autosaves.get(otherForm) !== other || other.touched || other.queue.dirty);
-            const composing = [...settingsDialog.querySelectorAll('input,textarea')].some(input => composingInputs.has(input));
-            if (results.every(result => result.status === 'fulfilled') && !siblingDraft && !composing
-              && record.revision === envelope.revision && autosaves.get(form) === record && settingsDialog.open && settingsTab === 'room') {
-              editor = null;
-              renderSettings();
-            }
-          }
         } else if (record.touched) { copyFormDraft(form, record); if (oldKey !== record.key) formDrafts.delete(oldKey); }
       },
       onError: error => { showAutoState(form, errorMessage(error), 'error'); record.touched = true; copyFormDraft(form, record); },
@@ -1457,7 +2290,7 @@ function scheduleAutosave(form, immediate = false, deferUid = false, composing =
   if (signature === record.baseline && !record.queue.saving) {
     record.queue.cancel(); record.touched = false; formDrafts.delete(record.key); showAutoState(form); return;
   }
-  if (composing || (form.dataset.form === 'room-uid' && deferUid)) {
+  if (composing || deferUid) {
     record.queue.cancel();
     record.lastScheduled = '';
     showAutoState(form);
@@ -1500,7 +2333,7 @@ function renderSettings() {
   closeSelect();
   unmountAutosaves();
   settingsDirty = false;
-  settingsDialog.innerHTML = ui`<div class="settings-shell"><header class="settings-heading" data-tauri-drag-region><button type="button" class="settings-back" data-action="settings.close">${icon('back')}<span>返回直播</span></button><span class="settings-heading-space" data-tauri-drag-region></span>${iconButton('moon', t('切换深浅色'), 'theme.toggle')}<span class="titlebar-divider" aria-hidden="true"></span>${windowControls()}</header><div id="settings-error" class="settings-status" role="alert" hidden></div><div class="settings-body"><label class="settings-category-label" for="settings-category"><span class="sr-only">设置分类</span><select id="settings-category" aria-label="设置分类">${tabs.map(([id, , title]) => option(id, t(title), settingsTab)).join('')}</select></label><nav class="settings-nav" aria-label="设置分类"><h2 id="settings-title" class="settings-nav-title">设置</h2><span class="settings-nav-ink" aria-hidden="true"></span>${tabs.map(([id, glyph, title]) => `<button type="button" data-action="settings.tab" data-id="${id}"${settingsTab === id ? ' aria-current="page"' : ''}>${icon(glyph)}${t(title)}${id === 'overlay' || id === 'broadcast' ? `<span class="settings-nav-badge">${esc(t('实验'))}</span>` : ''}</button>`).join('')}</nav><section class="settings-content" id="settings-content" tabindex="-1">${editor ? `<div class="editor-navigation">${button(aliasReturnContext && editor?.type === 'alias' ? t('返回主界面') : `${t('返回')} ${t(tabs.find(([id]) => id === settingsTab)?.[2] || '设置')}`, 'editor.cancel', { class: 'small quiet', icon: 'back' })}</div>` : ''}${renderSettingsPage()}</section></div></div>`;
+  settingsDialog.innerHTML = ui`<div class="settings-shell"><header class="settings-heading" data-tauri-drag-region><button type="button" class="settings-back" data-action="settings.close">${icon('back')}<span>返回直播</span></button><span class="settings-heading-space" data-tauri-drag-region></span>${iconButton('moon', t('切换深浅色'), 'theme.toggle')}<span class="titlebar-divider" aria-hidden="true"></span>${windowControls()}</header><div id="settings-error" class="settings-status" role="alert" hidden></div><div class="settings-body"><label class="settings-category-label" for="settings-category"><span class="sr-only">设置分类</span><select id="settings-category" aria-label="设置分类">${tabs.map(([id, , title]) => option(id, t(title), settingsTab)).join('')}</select></label><nav class="settings-nav" aria-label="设置分类"><h2 id="settings-title" class="settings-nav-title">设置</h2><span class="settings-nav-ink" aria-hidden="true"></span>${tabs.map(([id, glyph, title]) => `<button type="button" data-action="settings.tab" data-id="${id}"${settingsTab === id ? ' aria-current="page"' : ''}>${icon(glyph)}${t(title)}${id === 'live' ? `<span class="settings-nav-badge">${esc(t('实验'))}</span>` : ''}</button>`).join('')}</nav><section class="settings-content" id="settings-content" tabindex="-1">${editor ? `<div class="editor-navigation">${button(aliasReturnContext && editor?.type === 'alias' ? t('返回主界面') : `${t('返回')} ${t(tabs.find(([id]) => id === settingsTab)?.[2] || '设置')}`, 'editor.cancel', { class: 'small quiet', icon: 'back' })}</div>` : ''}${renderSettingsPage()}</section></div></div>`;
   settleSettingsMotion();
   mountAutosaves();
   if (editor?.type === 'preset') hideLegacyVoiceFields();
@@ -1567,8 +2400,7 @@ function renderSettingsPage() {
   if (settingsTab === 'voices') return renderVoicesSettings();
   if (settingsTab === 'rules') return renderRulesSettings();
   if (settingsTab === 'assets') return renderAssetsSettings();
-  if (settingsTab === 'broadcast') return renderBroadcastSettings();
-  if (settingsTab === 'overlay') return renderOverlaySettings();
+  if (settingsTab === 'live') return renderLiveSettings();
   if (settingsTab === 'general') {
     const reset = ui`<section class="s-section">${sLabel(t('初次设置'))}<div class="s-card"><div class="s-row"><span class="s-text"><span>重新打开引导</span><small>重新走一遍扫码、直播间和豆包设置。已有声音和规则仍会保留。</small></span>${button(t('重新打开'), 'onboarding.reset', { class: 'small' })}</div></div></section>`;
     return `<div class="s-page">${heading(t('通用'))}${renderAppearanceSettings()}${renderAudioSettings()}${reset}</div>`;
@@ -1580,9 +2412,7 @@ function renderRoomSettings() {
   const loggedIn = !!snapshot.account?.user_id;
   const expired = snapshot.live?.state === 'session_expired';
   const scanning = editor?.type === 'qr' && editor.provider === 'bilibili';
-  const anonymous = snapshot.setup?.mode === 'anonymous';
   const needsRoom = qrNeedsRoomFallback(snapshot);
-  const showUid = needsRoom || (!scanning && (!loggedIn || anonymous || editor?.type === 'anonymous-room'));
   const room = snapshot.setup?.room_id || snapshot.live_settings?.room_id;
   const identity = headerIdentity(snapshot);
   const name = loggedIn ? identity.name : t('未登录');
@@ -1595,16 +2425,9 @@ function renderRoomSettings() {
   const hero = scanning
     ? `<section class="s-hero s-qr-hero">${qrMarkup('bilibili', true)}<div class="actions">${button(t('取消扫码'), 'editor.cancel', { class: 'small' })}</div></section>`
     : ui`<section class="s-hero s-account"><span class="s-hero-glow" aria-hidden="true"></span>${avatar}<div class="s-account-text"><strong>${esc(name)}</strong><span class="${expired ? 's-bad' : ''}">哔哩哔哩账号 · ${esc(state)}</span>${note ? `<small>${esc(note)}</small>` : ''}</div><div class="s-hero-actions">${heroActions}</div></section>`;
-  const uidMode = showUid;
-  const seg = loggedIn && !needsRoom && !scanning
-    ? ui`<div class="s-seg" role="group" aria-label="接收目标"><button type="button"${uidMode ? ' data-action="bili.use_account"' : ' class="on"'} aria-pressed="${!uidMode}">我的直播间</button><button type="button"${uidMode ? ' class="on"' : ' data-action="room.anonymous"'} aria-pressed="${uidMode}">主播 UID</button></div>`
-    : '';
-  const roomRow = ui`<div class="s-row"><span class="s-text"><span>直播间</span></span><span class="s-num">${room ? esc(room) : '—'}</span></div>`;
-  const uidId = `field-${++fieldSequence}`;
-  const uidRow = ui`<div class="s-row"><label class="s-text" for="${uidId}"><span>主播 UID</span><small>填写主播个人主页中的 UID，输入完成后自动查找直播间。</small></label><input id="${uidId}" class="s-input s-num-input" name="uid" value="${esc(anonymous ? snapshot.setup?.uid || '' : '')}" ${t('inputmode="numeric" pattern="[1-9][0-9]{0,19}" maxlength="20" required placeholder="输入主播 UID"')}></div>`;
-  const card = showUid ? `<form data-form="room-uid" class="s-card">${uidRow}${roomRow}${autoStatus()}</form>` : `<div class="s-card">${roomRow}</div>`;
-  const targetNote = needsRoom ? t('未找到本账号直播间，可以通过主播 UID 接收弹幕。') : '';
-  return `<div class="s-page">${heading(t('直播间'))}${hero}${sSection(t('接收目标'), seg + card, '', targetNote)}${sSection(t('礼物合并'), renderGiftMerge(), '', t('断开直播间后可更改。礼物先按播报规则过滤，再合并数量。'))}</div>`;
+  const card = ui`<div class="s-card"><div class="s-row"><span class="s-text"><span>直播间</span></span><span class="s-num">${room ? esc(room) : '—'}</span></div></div>`;
+  const targetNote = needsRoom ? t('未找到本账号直播间，请先在 B站开通直播间后重新扫码') : '';
+  return `<div class="s-page">${heading(t('直播间'))}${hero}${sSection(t('我的直播间'), card, '', targetNote)}${sSection(t('礼物合并'), renderGiftMerge(), '', t('断开直播间后可更改。礼物先按播报规则过滤，再合并数量。'))}</div>`;
 }
 
 // ---- 开播 (experimental) ----
@@ -1615,13 +2438,98 @@ let broadcastRefreshAt = 0;
 let broadcastRefreshAccount = '';
 let broadcastRefreshError = '';
 let broadcastRefreshing = false;
+let broadcastRefreshSequence = 0;
+let broadcastObservedAccount = '';
 let onAirPanelMode = '';
 let onAirClockTimer = null;
 let onAirSignature = '';
+let onAirBitrate = null;
+let onAirBitrateBusy = false;
+let onAirBitrateError = '';
+let onAirBitrateSequence = 0;
+let settingsBitrateExpanded = false;
+const onAirDrafts = new Map();
+
+async function readOnAirBitrate() {
+  const sequence = ++onAirBitrateSequence;
+  onAirBitrateBusy = true;
+  onAirBitrateError = '';
+  renderOnAirPanel();
+  renderSettingsBitrate();
+  try {
+    const next = await command('obs.bitrate.get', {}, { quiet: true, silent: true });
+    if (sequence === onAirBitrateSequence) onAirBitrate = next.result;
+  } catch (error) {
+    if (sequence === onAirBitrateSequence) { onAirBitrate = null; onAirBitrateError = errorMessage(error); }
+  } finally {
+    if (sequence === onAirBitrateSequence) { onAirBitrateBusy = false; renderOnAirPanel(); renderSettingsBitrate(); }
+  }
+}
+
+function onAirDetailsFields() {
+  const view = onAirBitrate;
+  const canEdit = !!view?.editable && !onAirBitrateBusy;
+  const note = onAirBitrateError ? localizeDiagnostic(onAirBitrateError) : onAirBitrateBusy ? t('正在读取 OBS 码率…') : view?.reason ? localizeDiagnostic(view.reason) : t('保存到 OBS 当前配置文件，下次开播生效。');
+  const bitrate = `<form data-form="onair-bitrate" class="onair-info" novalidate><div class="onair-field"><label for="onair-bitrate">${esc(t('OBS 视频码率'))}</label><span class="onair-input onair-bitrate-input"><input id="onair-bitrate" name="bitrate_kbps" type="number" min="100" max="100000" step="1" required value="${esc(view?.bitrate_kbps ?? '')}"${canEdit ? '' : ' disabled'}><span>Kbps</span></span><small class="onair-note" role="status">${esc(note)}</small></div><div class="onair-panel-foot"><button type="button" class="onair-text-button" data-action="onair.bitrate.refresh"${onAirBitrateBusy ? ' disabled' : ''}>${esc(t('刷新'))}</button><button type="submit" class="onair-save"${canEdit ? '' : ' disabled'}>${esc(t('保存码率'))}</button></div></form>`;
+  return bitrate;
+}
+
+function renderSettingsBitrate() {
+  const host = settingsDialog.open ? settingsDialog.querySelector('#settings-obs-bitrate') : null;
+  if (!host || !settingsBitrateExpanded) return;
+  host.hidden = false;
+  const current = host.querySelector('form[data-form="onair-bitrate"]');
+  const dirty = current?.dataset.dirty === 'true';
+  const value = dirty ? current.elements.bitrate_kbps.value : null;
+  const focused = current?.contains(document.activeElement) && document.activeElement?.name;
+  const markup = onAirDetailsFields();
+  if (markupCache.get(host) === markup) return;
+  patchMarkup(host, markup);
+  const form = host.querySelector('form');
+  if (dirty) { form.elements.bitrate_kbps.value = value; form.dataset.dirty = 'true'; }
+  if (focused) form.elements[focused]?.focus({ preventScroll: true });
+}
+
+async function saveOnAirForm(form) {
+  if (!form.reportValidity()) return;
+  if (form.dataset.form === 'onair-bitrate') {
+    const sequence = ++onAirBitrateSequence;
+    const bitrate_kbps = Number(form.elements.bitrate_kbps.value);
+    if (!Number.isInteger(bitrate_kbps) || bitrate_kbps < 100 || bitrate_kbps > 100000) throw new Error(t('码率需在 100 到 100000 Kbps 之间'));
+    const next = await command('obs.bitrate.set', { bitrate_kbps }, { quiet: true });
+    if (sequence === onAirBitrateSequence) onAirBitrate = next.result;
+    showToast(t('OBS 码率已保存'));
+  }
+  delete form.dataset.dirty;
+  onAirDrafts.delete(form.dataset.form);
+  document.querySelector(`#onair-panel form[data-form="${form.dataset.form}"]`)?.removeAttribute('data-dirty');
+  const panel = document.querySelector('#onair-panel');
+  if (panel) panel.dataset.signature = '';
+  renderOnAirPanel();
+  renderSettingsBitrate();
+}
 
 const broadcastEnabled = () => !!snapshot?.preferences?.broadcast_console;
 const broadcastAccount = () => String(snapshot?.account?.user_id || '');
 const broadcastLive = room => room?.live_status === 1;
+
+function syncBroadcastAccount() {
+  const account = broadcastAccount();
+  if (broadcastObservedAccount !== account) {
+    broadcastObservedAccount = account;
+    ++broadcastRefreshSequence;
+    broadcastRefreshAt = 0;
+    broadcastRefreshAccount = '';
+    broadcastRefreshError = '';
+    broadcastRefreshing = false;
+    if (onAirPanelMode) closeOnAirPanel();
+    else { onAirDrafts.clear(); ++onAirBitrateSequence; onAirBitrateBusy = false; }
+    onAirBitrate = null;
+    onAirBitrateError = '';
+    settingsBitrateExpanded = false;
+  }
+  return account;
+}
 
 function broadcastAreaPath(view = snapshot.broadcast || {}, room = view.room) {
   if (!room) return '';
@@ -1655,24 +2563,33 @@ const onAirClock = room => broadcastLive(room) && room.live_since ? `<span class
 
 // Reading the own room is read-only; it happens only after the person turned the console on.
 async function refreshBroadcast(force = false) {
-  const account = broadcastAccount();
+  const account = syncBroadcastAccount();
   if (!broadcastEnabled() || !account || snapshot.network_disabled || broadcastBusy || broadcastRefreshing || snapshot.broadcast?.busy) return;
-  const visible = (step === 'main' && !settingsDialog.open) || (settingsDialog.open && settingsTab === 'broadcast');
+  const visible = (step === 'main' && !settingsDialog.open) || (settingsDialog.open && settingsTab === 'live' && livePanel === 'broadcast');
   if (!visible || !uiIsActive(nativeActive, windowFocused, document.hidden)) return;
   const due = force || broadcastRefreshAccount !== account || Date.now() - broadcastRefreshAt > BROADCAST_REFRESH_MS;
   if (!due) return;
+  const sequence = ++broadcastRefreshSequence;
   broadcastRefreshing = true;
   broadcastRefreshAt = Date.now();
   broadcastRefreshAccount = account;
   updateBroadcastViews();
   try {
-    await command('bili.broadcast.refresh', {}, { quiet: true, silent: true });
+    // Background reads must not suspend snapshot polling, or a login/logout
+    // while this read waits cannot invalidate the previous account's reply.
+    const next = await invoke('dispatch', { action: 'bili.broadcast.refresh', payload: {} });
+    if (sequence !== broadcastRefreshSequence || broadcastAccount() !== account || !broadcastEnabled()) return;
+    if (String(next.account?.user_id || '') !== account) return;
+    if (Number.isSafeInteger(next.config_revision) && Number.isSafeInteger(snapshot.config_revision) && next.config_revision < snapshot.config_revision) return;
+    acceptSnapshot(next);
     broadcastRefreshError = '';
   } catch (error) {
-    if (broadcastAccount() === account) broadcastRefreshError = errorMessage(error);
+    if (sequence === broadcastRefreshSequence && broadcastAccount() === account) broadcastRefreshError = errorMessage(error);
   } finally {
-    broadcastRefreshing = false;
-    updateBroadcastViews();
+    if (sequence === broadcastRefreshSequence) {
+      broadcastRefreshing = false;
+      updateBroadcastViews();
+    }
   }
 }
 
@@ -1694,6 +2611,10 @@ function hidePushCredentials(root = document) {
 async function runBroadcastAction(action, payload = {}) {
   if (broadcastBusy) return;
   broadcastBusy = true;
+  // An earlier room read may already have finished on the server while its
+  // reply is still in transit. Explicit operations supersede that old result.
+  ++broadcastRefreshSequence;
+  broadcastRefreshing = false;
   const scopes = [...document.querySelectorAll('[data-broadcast-scope]')];
   const controls = scopes.flatMap(scope => [...scope.querySelectorAll('button, input, select')]).map(node => [node, node.disabled]);
   controls.forEach(([node]) => { node.disabled = true; });
@@ -1719,12 +2640,14 @@ function broadcastFormValues(form) {
 
 async function saveBroadcastForm(form) {
   if (!form?.reportValidity() || broadcastBusy) return false;
+  const inMainPanel = !!form.closest('#onair-panel');
   const { title, area_id } = broadcastFormValues(form);
   await runBroadcastAction('update', { confirmed: true, title, area_id });
   delete form.dataset.dirty;
-  if (form.closest('#onair-panel')) closeOnAirPanel();
+  onAirDrafts.delete('broadcast-room');
+  if (inMainPanel) closeOnAirPanel();
   updateBroadcastViews();
-  showToast(t('直播标题与分区已更新'));
+  showToast(t(inMainPanel ? '直播标题已保存到 B站' : '直播标题与分区已更新'));
   return true;
 }
 
@@ -1736,22 +2659,29 @@ async function startBroadcast() {
   if (!room) return;
   const form = document.querySelector('[data-broadcast-scope] form[data-form="broadcast-room"][data-dirty]');
   if (form && !await saveBroadcastForm(form)) return;
-  await runBroadcastAction('start', { confirmed: true, area_id: snapshot.broadcast.room.area_id });
+  const next = await runBroadcastAction('start', { confirmed: true, area_id: snapshot.broadcast.room.area_id });
   if (snapshot.broadcast?.face_image) {
     if (step === 'main' && !settingsDialog.open) openOnAirPanel('face');
-    showToast(t('请先扫码完成人脸验证'));
+    else showToast(t('请先扫码完成人脸验证'));
     return;
   }
-  if (step === 'main' && !settingsDialog.open) openOnAirPanel('push');
-  showToast(t('已开播，请在 OBS 中开始推流'));
+  // With the OBS link on, Rust already handed the push target to OBS; the panel is only a fallback.
+  const obs = next?.result?.obs;
+  if (obs?.outcome === 'started' || obs?.outcome === 'starting') { showToast(t(obs.outcome === 'started' ? '已开播，OBS 已开始推流' : '已开播，OBS 正在开始推流')); return; }
+  if (obs?.outcome === 'already_streaming') { showToast(t('已开播。OBS 原本就在推流，没有改动它的推流设置')); return; }
+  closeOnAirPanel();
+  if (obs?.error) showToast(`${t('已开播，但 OBS 没能自动推流，请检查「设置 → OBS 与开播」：')}${errorMessage(obs.error)}`, true);
+  else showToast(t('已开播，请在 OBS 中开始推流'));
 }
 
+// No confirmation: ending is one click. With the OBS link on, Rust stops OBS before closing the room.
 async function stopBroadcast() {
   closeOnAirPanel();
-  if (!await confirmAction(t('下播？'), t('请先在 OBS 中停止推流。下播只关闭 B站直播间，弹幕接收和播报会继续。'), t('下播'))) return;
-  await runBroadcastAction('stop', { confirmed: true });
+  const next = await runBroadcastAction('stop', { confirmed: true });
   hidePushCredentials();
-  showToast(t('已下播'));
+  const obs = next?.result?.obs;
+  if (obs?.error) { showToast(`${t('已下播，但 OBS 没能停止推流，请在 OBS 里手动停止：')}${errorMessage(obs.error)}`, true); return; }
+  showToast(t(obs?.outcome === 'stopped' ? '已下播，OBS 已停止推流' : obs?.outcome === 'stopping' ? '已下播，OBS 正在停止推流' : '已下播'));
 }
 
 async function revealOrCopyCredentials(action, target) {
@@ -1788,6 +2718,13 @@ function broadcastInfoFields(view, room) {
   return ui`<div class="onair-field"><label for="${id}">直播标题</label><span class="onair-input"><input id="${id}" name="title" value="${esc(room.title)}" maxlength="40" required autocomplete="off" spellcheck="false"><output class="onair-count" data-title-count>${length}/40</output></span></div><div class="onair-areas"><label class="onair-field"><span>分区</span><select name="parent_area_id" aria-label="${esc(t('直播分区'))}">${areas.map(item => option(item.id, item.name, parent?.id)).join('')}</select></label><label class="onair-field"><span>子分区</span><select name="area_id" aria-label="${esc(t('直播子分区'))}" required>${children.map(child => option(child.id, child.name, room.area_id)).join('')}</select></label></div>`;
 }
 
+function lakeBroadcastInfoFields(view, room) {
+  const areas = view.areas || [];
+  const parent = areas.find(item => item.children.some(child => child.id === room.area_id)) || areas.find(item => item.id === room.parent_area_id) || areas[0];
+  const id = `broadcast-title-${++broadcastFieldSequence}`;
+  return `<div class="onair-field"><label class="sr-only" for="${id}">${esc(t('直播标题'))}</label><span class="onair-input"><input id="${id}" name="title" value="${esc(room.title)}" maxlength="40" required autocomplete="off" spellcheck="false"><output class="onair-count" data-title-count><span data-count-number>${Array.from(room.title || '').length}</span><i> / 40</i></output></span></div><div class="onair-areas"><span>${esc(t('分区'))}</span><select name="parent_area_id" aria-label="${esc(t('直播分区'))}">${areas.map(item => option(item.id, item.name, parent?.id)).join('')}</select><span class="lake-area-slash">/</span><select name="area_id" aria-label="${esc(t('直播子分区'))}" required>${(parent?.children || []).map(child => option(child.id, child.name, room.area_id)).join('')}</select></div>`;
+}
+
 function broadcastPushRows(view, room) {
   if (!view.has_stream_key) {
     const live = broadcastLive(room);
@@ -1817,7 +2754,7 @@ function updateOnAir() {
   const shell = document.querySelector('#live-shell');
   const view = snapshot.broadcast || {};
   const room = view.room;
-  const account = broadcastAccount();
+  const account = syncBroadcastAccount();
   shell?.classList.toggle('onair-mode', enabled);
   shell?.classList.toggle('on-air', enabled && !!account && broadcastLive(room));
   if (!enabled) {
@@ -1826,7 +2763,20 @@ function updateOnAir() {
     return;
   }
   void refreshBroadcast();
-  const signature = JSON.stringify([account, view, broadcastBusy, broadcastRefreshing, broadcastRefreshError, getLanguage(), !!snapshot.network_disabled]);
+  const area = broadcastAreaPath(view, room);
+  // Keep existing room controls while the background read starts/finishes.
+  // Only data visible in this header belongs to its DOM signature.
+  const faceWaiting = onAirPanelMode === 'face' && !!view.face_image;
+  const pendingStart = !broadcastLive(room) && (broadcastBusy || !!view.busy);
+  const signature = JSON.stringify([account, room && [room.room_id, room.title, room.live_status, room.live_since], area, view.face_image, faceWaiting, pendingStart, lakeEnded, getLanguage(), !!snapshot.network_disabled, !room && [broadcastRefreshing, broadcastRefreshError]]);
+  const syncActions = () => {
+    const busy = !room || broadcastBusy || !!view.busy || faceWaiting;
+    for (const button of host.querySelectorAll('.onair-go')) {
+      button.classList.toggle('working', busy);
+      button.disabled = busy || !!snapshot.network_disabled;
+    }
+  };
+  syncActions();
   if (signature === onAirSignature && !host.hidden) return;
   onAirSignature = signature;
   host.hidden = false;
@@ -1842,14 +2792,13 @@ function updateOnAir() {
     copy = `${kicker('OFF AIR')}<span class="onair-title static${failed ? ' error' : ' loading'}">${esc(failed ? t('读取开播状态失败') : t('正在读取开播状态…'))}</span>${failed ? `<span class="onair-area" title="${esc(broadcastRefreshError)}">${esc(broadcastRefreshError)}</span>` : ''}`;
     actions = failed ? onAirSideButton(t('重试'), 'broadcast.refresh', 'refresh') : onAirGoButton(room, { ...view, busy: true });
   } else {
-    const state = live ? 'ON AIR' : room.live_status === 2 ? 'REPLAY' : 'OFF AIR';
-    const area = broadcastAreaPath(view, room);
-    copy = ui`${kicker(state, onAirClock(room))}<button type="button" class="onair-title" data-action="onair.info" title="修改直播标题和分区"><span>${esc(room.title)}</span>${icon('edit')}</button>${area ? `<span class="onair-area">${esc(area)}</span>` : ''}`;
-    const push = live || view.has_stream_key ? `<button type="button" class="onair-key${view.has_stream_key ? ' ready' : ''}" data-action="onair.push" aria-haspopup="dialog" aria-expanded="${onAirPanelMode === 'push'}" title="${esc(t('推流到 OBS'))}" aria-label="${esc(t('推流到 OBS'))}">${icon('key')}</button>` : '';
-    // While face verification waits, the panel carries the "continue" action next to its QR.
-    actions = push + onAirGoButton(room, { ...view, face_image: onAirPanelMode === 'face' ? null : view.face_image });
+    const state = live ? 'ON AIR' : faceWaiting || broadcastBusy || view.busy ? 'GOING LIVE' : lakeEnded ? 'WRAPPED' : room.live_status === 2 ? 'REPLAY' : 'OFF AIR';
+    copy = `${kicker(state, onAirClock(room))}`;
+    // The sky keeps the reference's disabled waiting indicator; the QR carries the real retry action.
+    actions = faceWaiting ? `<button type="button" class="onair-go working" disabled><i aria-hidden="true"></i><span>${esc(t('等待验证'))}</span></button>` : lakeEnded && !live ? `<button type="button" class="onair-go live" data-action="lake.prepare">${esc(t('回到准备'))}</button>` : onAirGoButton(room, view, !live && (broadcastBusy || view.busy) ? t('打开直播间') : '');
   }
   host.innerHTML = `<div class="onair-copy">${copy}</div><div class="onair-actions">${actions}</div>`;
+  syncActions();
   host.dataset.state = !account ? 'signed-out' : !room ? 'loading' : live ? 'live' : 'off';
   startOnAirClocks();
   if (onAirPanelMode) renderOnAirPanel();
@@ -1861,74 +2810,119 @@ function renderOnAirPanel() {
   const view = snapshot.broadcast || {};
   const room = view.room;
   if (!panel || !room) return;
-  // A form someone is editing, or credentials on show, must not be replaced underneath them.
-  if (panel.querySelector('form[data-dirty]') || panel.querySelector('[data-push-key][type="text"]')) return;
-  const signature = JSON.stringify([onAirPanelMode, view, getLanguage()]);
+  const content = onAirPanelMode === 'details'
+    ? [onAirBitrate, onAirBitrateBusy, onAirBitrateError]
+    : onAirPanelMode === 'info' ? [room.title, room.parent_area_id, room.area_id, view.areas]
+      : [view.face_image, room.live_status, view.busy, broadcastBusy];
+  const signature = JSON.stringify([onAirPanelMode, content, getLanguage()]);
   if (panel.dataset.signature === signature && !panel.hidden) return;
+  const active = panel.contains(document.activeElement) ? document.activeElement : null;
+  const focus = active ? { id: active.id, name: active.name, start: active.selectionStart, end: active.selectionEnd } : null;
+  for (const form of panel.querySelectorAll('form[data-dirty]')) {
+    onAirDrafts.set(form.dataset.form, Object.fromEntries([...form.elements].filter(field => field.name).map(field => [field.name, field.value])));
+  }
   panel.dataset.signature = signature;
   const head = (title, note = '') => `<header class="onair-panel-head"><div><strong>${esc(title)}</strong>${note ? `<small>${esc(note)}</small>` : ''}</div><button type="button" class="onair-close" data-action="onair.close" aria-label="${esc(t('关闭'))}" title="${esc(t('关闭'))}">${icon('close')}</button></header>`;
   if (onAirPanelMode === 'info') {
-    panel.innerHTML = `${head(t('直播信息'), t('保存后立刻在 B站生效'))}<form data-form="broadcast-room" class="onair-info" novalidate>${broadcastInfoFields(view, room)}<div class="onair-panel-foot"><button type="button" class="onair-text-button" data-action="onair.close">${esc(t('取消'))}</button><button type="submit" class="onair-save">${esc(t('保存到 B站'))}</button></div></form>`;
-    mountSelects(panel);
+    panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="broadcast-room" class="onair-info lake-title-form" novalidate><span class="lake-edit-kicker">TONIGHT’S TITLE<em>— ${esc(t('B站直播间'))}</em></span>${lakeBroadcastInfoFields(view, room)}<div class="onair-panel-foot"><button type="submit" class="onair-save">${esc(t('保存'))}</button></div></form>`;
   } else if (onAirPanelMode === 'face' && view.face_image) {
-    panel.innerHTML = `${head(t('人脸验证'))}${broadcastFace(view)}<div class="onair-panel-foot">${onAirGoButton(room, view, t('继续开播'))}</div>`;
-  } else {
-    panel.innerHTML = `${head(t('推流到 OBS'), broadcastLive(room) ? t('直播间已打开，等待 OBS 推流') : '')}<div class="onair-push">${broadcastPushRows(view, room)}</div>`;
+    panel.innerHTML = `<span class="lake-face-kicker">FACE CHECK</span><h3>${esc(t('开播前需要验证本人'))}</h3><div class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></div><p class="lake-face-note">${esc(t('用哔哩哔哩 App 扫码完成人脸验证，'))}<br>${esc(t('再回来点继续。'))}</p><div class="onair-panel-foot">${onAirGoButton(room, view, t('继续开播'))}</div>`;
+  } else if (onAirPanelMode === 'details') {
+    panel.innerHTML = `${head(t('直播详情'))}${onAirDetailsFields()}`;
   }
   panel.dataset.mode = onAirPanelMode;
+  for (const form of panel.querySelectorAll('form')) {
+    const draft = onAirDrafts.get(form.dataset.form);
+    if (!draft) continue;
+    if (form.dataset.form === 'broadcast-room') {
+      const parent = view.areas?.find(area => String(area.id) === draft.parent_area_id);
+      if (parent) form.elements.area_id.innerHTML = parent.children.map(child => option(child.id, child.name, draft.area_id)).join('');
+    }
+    for (const [name, value] of Object.entries(draft)) if (form.elements[name]) form.elements[name].value = value;
+    const counter = form.querySelector('[data-title-count]');
+    if (counter) {
+      const digits = counter.querySelector('[data-count-number]');
+      if (digits) digits.textContent = String(Array.from(form.elements.title.value).length);
+      else counter.textContent = `${Array.from(form.elements.title.value.trim()).length}/40`;
+    }
+    form.dataset.dirty = 'true';
+  }
+  mountSelects(panel);
+  if (focus?.id) {
+    const field = (focus.name && panel.querySelector(`[name="${focus.name}"]`)) || panel.querySelector(`#${focus.id}`);
+    field?.focus({ preventScroll: true });
+    if (focus.start != null && field?.setSelectionRange) field.setSelectionRange(focus.start, focus.end);
+  }
 }
 
 function openOnAirPanel(mode) {
   const panel = document.querySelector('#onair-panel');
   if (!panel || !snapshot.broadcast?.room) return;
   closeVoicePanel(); closeQueuePanel();
-  if (!panel.hidden && onAirPanelMode === mode) { closeOnAirPanel(); return; }
+  if (!panel.hidden && onAirPanelMode === mode) return handleAction('onair.close', '', null);
   if (!panel.hidden) hidePushCredentials(panel);
   onAirPanelMode = mode;
   panel.dataset.signature = '';
   renderOnAirPanel();
   panel.hidden = false;
-  document.querySelector('[data-action="onair.push"]')?.setAttribute('aria-expanded', String(mode === 'push'));
+  document.querySelector('#live-shell')?.classList.toggle('lake-editing', mode === 'info');
+  document.querySelector('[data-action="onair.details"]')?.setAttribute('aria-expanded', String(mode === 'details'));
   if (mode === 'info') panel.querySelector('input[name="title"]')?.focus({ preventScroll: true });
+  if (mode === 'details') { onAirBitrate = null; void readOnAirBitrate(); }
+  if (mode === 'face') { renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); updateOnAir(); }
 }
 
 function closeOnAirPanel(focus = false) {
   const panel = document.querySelector('#onair-panel');
+  const wasFace = onAirPanelMode === 'face';
   onAirPanelMode = '';
-  if (!panel || panel.hidden) return;
+  document.querySelector('#live-shell')?.classList.remove('lake-editing');
+  ++onAirBitrateSequence;
+  onAirBitrateBusy = false;
+  onAirDrafts.clear();
+  if (!panel || panel.hidden) { updateLakePopScrim(); return; }
   closeSelect();
   hidePushCredentials(panel);
-  leaveGhost(panel, 220);
   panel.hidden = true;
+  updateLakePopScrim();
   panel.innerHTML = '';
-  panel.dataset.signature = '';
-  document.querySelector('[data-action="onair.push"]')?.setAttribute('aria-expanded', 'false');
+  if (panel.dataset) panel.dataset.signature = '';
+  document.querySelector('[data-action="onair.details"]')?.setAttribute('aria-expanded', 'false');
   if (focus) document.querySelector('#onair .onair-go')?.focus();
+  if (wasFace) { renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); updateOnAir(); }
 }
 
 // Settings page -----------------------------------------------------------------------------
-function renderBroadcastSettings() {
+// The 开播台 panel of OBS 与开播. Its body follows the room state; the OBS link form is
+// rendered with the page so autosave owns it.
+function renderBroadcastPanel() {
   const enabled = broadcastEnabled();
   const id = `field-${++fieldSequence}`;
-  return ui`<div class="s-page s-onair" data-broadcast-scope="settings"><div class="s-page-head"><div class="s-ovl-head"><div class="s-ovl-title-row">${heading(t('开播'))}<span class="s-ovl-badge">实验性</span></div><p class="s-ovl-lede">在弹幕姬里开播、下播，随时改标题和分区。画面和声音仍由 OBS 推流。</p></div><label class="s-ovl-enable" for="${id}"><span>启用</span><input id="${id}" class="s-switch" type="checkbox" role="switch" data-broadcast-enable${enabled ? ' checked' : ''}></label></div><div class="s-onair-body" data-broadcast-body></div></div>`;
+  return ui`<div class="s-live-panel-body" data-broadcast-scope="settings"><div class="s-live-head"><div class="s-live-head-text"><h3>开播台</h3></div><label class="s-ovl-enable" for="${id}"><span>启用</span><input id="${id}" class="s-switch" type="checkbox" role="switch" data-broadcast-enable${enabled ? ' checked' : ''}></label></div><div class="s-onair-body" data-broadcast-body></div><div class="s-onair-body" data-obs-link-body${enabled ? '' : ' hidden'}>${renderObsLinkSection()}</div></div>`;
 }
 
 function broadcastPreview() {
   const sample = ui`<div class="s-onair-preview" aria-hidden="true"><div class="s-onair-stage"><div class="s-onair-mast"><span class="s-onair-mini-kicker"><i></i>LIVE</span><strong>主播的直播间</strong><i class="s-onair-mini-rule"></i></div><div class="onair s-onair-mini" data-state="live"><div class="onair-copy"><span class="onair-kicker"><i class="onair-dot"></i><span>ON AIR</span><span class="onair-clock">01:24:10</span></span><span class="onair-title static"><span>今晚一起听歌</span></span><span class="onair-area">娱乐 · 视频唱见</span></div><div class="onair-actions"><span class="onair-key ready">${icon('key')}</span><span class="onair-go live"><i></i><span>下播</span></span></div></div><div class="s-onair-lines"><i></i><i></i><i></i></div></div></div>`;
-  const points = ui`<ul class="s-onair-points"><li><strong>一键开播、下播</strong><span>主界面右上角出现开播台，直播时显示已开播时长。</span></li><li><strong>随时改标题和分区</strong><span>点标题即可修改，保存后立刻在 B站生效。</span></li><li><strong>推流码一键复制</strong><span>开播后直接复制到 OBS，不用再打开直播姬。</span></li></ul>`;
+  const points = ui`<ul class="s-onair-points"><li><strong>一键开播、下播</strong><span>主界面右上角出现开播台，直播时显示已开播时长。</span></li><li><strong>随时改标题和分区</strong><span>点标题即可修改，保存后立刻在 B站生效。</span></li><li><strong>弹幕发送与用户管理</strong><span>在主界面发送弹幕和表情，点头像管理禁言、直播黑名单和房管。</span></li></ul>`;
   return `${sample}${points}`;
 }
 
 function updateBroadcastSettings() {
+  updateObsSettings();
+  const account = syncBroadcastAccount();
   const body = settingsDialog.open ? settingsDialog.querySelector('[data-broadcast-body]') : null;
   if (!body) return;
   void refreshBroadcast();
   const enabled = broadcastEnabled();
-  const account = broadcastAccount();
   const view = snapshot.broadcast || {};
   const toggle = settingsDialog.querySelector('[data-broadcast-enable]');
   if (toggle && !toggle.disabled && toggle.checked !== enabled) toggle.checked = enabled;
-  const signature = JSON.stringify([enabled, account, view, broadcastRefreshing, broadcastRefreshError, getLanguage(), !!snapshot.network_disabled]);
+  const busy = broadcastBusy || !!view.busy;
+  for (const button of body.querySelectorAll('.onair-go')) {
+    button.classList.toggle('working', busy);
+    button.disabled = busy || !!snapshot.network_disabled;
+  }
+  const signature = JSON.stringify([enabled, account, view.room, view.areas, view.has_stream_key, view.face_image, !view.room && [broadcastRefreshing, broadcastRefreshError], getLanguage(), !!snapshot.network_disabled]);
   const changedAccount = body.dataset.account !== account;
   if (!changedAccount && (broadcastBusy || body.querySelector('form[data-dirty]') || body.querySelector('[data-push-key][type="text"]'))) return;
   if (body.dataset.signature === signature) return;
@@ -1951,16 +2945,232 @@ function updateBroadcastSettings() {
   const hero = ui`<section class="s-hero s-onair-hero" data-state="${live ? 'live' : 'off'}"><span class="s-hero-glow" aria-hidden="true"></span><div class="s-onair-state"><span class="onair-kicker"><i class="onair-dot" aria-hidden="true"></i><span>${live ? 'ON AIR' : room.live_status === 2 ? 'REPLAY' : 'OFF AIR'}</span></span><strong>${esc(stateText)}${live && room.live_since ? `<span class="s-onair-clock" data-onair-since="${esc(room.live_since)}">${onAirElapsed(room.live_since)}</span>` : ''}</strong><small>房间 <span class="s-num">${esc(room.room_id)}</span>${area ? ` · ${esc(area)}` : ''}</small></div><div class="s-onair-hero-actions"><span class="s-onair-tools">${iconButton('refresh', t('刷新开播状态'), 'broadcast.refresh')}${iconButton('external', t('打开直播间'), 'external.open', 'bili_broadcast_room')}</span>${onAirGoButton(room, view)}</div></section>`;
   const info = ui`<section class="s-section">${sLabel(t('直播信息'), `<span class="s-label-note">${esc(t('保存后立刻在 B站生效'))}</span>`)}<form data-form="broadcast-room" class="s-card s-onair-info" novalidate>${broadcastInfoFields(view, room)}<div class="s-onair-info-foot"><small>${esc(t('开播时如有未保存的修改，会先保存再开播。'))}</small><button type="submit" class="button small">${esc(t('保存到 B站'))}</button></div></form></section>`;
   const face = view.face_image ? `<section class="s-section">${sLabel(t('人脸验证'))}<div class="s-card s-onair-face-card">${broadcastFace(view)}</div></section>` : '';
-  const push = ui`<section class="s-section">${sLabel(t('推流到 OBS'))}<div class="s-card onair-push s-onair-push">${broadcastPushRows(view, room)}</div></section>`;
+  const push = ui`<section class="s-section">${sLabel(t('推流到 OBS'), button(t('OBS 视频码率'), 'settings.bitrate', { class: 'small quiet' }))}<div class="s-card onair-push s-onair-push">${broadcastPushRows(view, room)}</div><div id="settings-obs-bitrate" class="s-card s-onair-info"${settingsBitrateExpanded ? '' : ' hidden'}></div></section>`;
   const note = `<p class="s-note">${esc(t('开播只打开 B站直播间；画面和声音由 OBS 推送。退出弹幕姬不会自动下播。启用期间，弹幕姬约每分钟读取一次自己房间的开播状态。'))}</p>`;
   body.innerHTML = `${hero}${face}${info}${push}${note}`;
+  renderSettingsBitrate();
   mountSelects(body);
   startOnAirClocks();
 }
 
+// ---- OBS 与开播 (experimental) ----
+// One page for both OBS features. Rust owns the obs-websocket connection, the DPAPI-protected
+// password and starting OBS; the page edits choices, submits a new password once and shows the
+// OBS reachability and browser-source readiness are separate. Only the visible,
+// active OBS settings page periodically reads reachability; it never saves a form.
+let obsBusy = '';
+let obsDetailsOpen = null;
+let obsRefreshing = false;
+let obsRefreshAt = 0;
+let obsRefreshKey = '';
+let obsRefreshTimer = null;
+const OBS_REFRESH_MS = 15000;
+
+const obsConnectionKey = () => JSON.stringify([snapshot?.obs?.settings?.host, snapshot?.obs?.settings?.port, snapshot?.obs?.has_password]);
+const obsPageActive = () => !disposed && !!snapshot && !snapshot.network_disabled && settingsDialog.open && settingsTab === 'live' && !editor && !!settingsDialog.querySelector('[data-obs-root]') && uiIsActive(nativeActive, windowFocused, document.hidden);
+
+function acceptObsObservation(next, key) {
+  if (disposed || key !== obsConnectionKey() || !next?.obs) return false;
+  if (Number.isSafeInteger(next.config_revision) && Number.isSafeInteger(snapshot.config_revision) && next.config_revision < snapshot.config_revision) return false;
+  acceptSnapshot(next);
+  return true;
+}
+
+function scheduleObsRefresh() {
+  if (obsRefreshTimer || !obsPageActive()) return;
+  obsRefreshTimer = setTimeout(() => {
+    obsRefreshTimer = null;
+    void refreshObsStatus();
+  }, OBS_REFRESH_MS);
+}
+
+async function refreshObsStatus() {
+  if (!obsPageActive() || obsBusy || obsRefreshing) return;
+  const key = obsConnectionKey();
+  if (key === obsRefreshKey && Date.now() - obsRefreshAt < OBS_REFRESH_MS) { scheduleObsRefresh(); return; }
+  obsRefreshKey = key;
+  obsRefreshAt = Date.now();
+  obsRefreshing = true;
+  updateObsSettings();
+  try {
+    const next = await invoke('dispatch', { action: 'obs.refresh', payload: {} });
+    if (!acceptObsObservation(next, key)) return;
+    if (obsPageActive() && !obsBusy && snapshot.obs?.status?.state === 'ok' && snapshot.overlay?.running && !['syncing', 'ready', 'updated', 'paused'].includes(snapshot.obs?.status?.overlay_sync?.state)) {
+      // Rebind only an existing managed source after OBS becomes available.
+      // Creating/adding/enabling a source remains the explicit Add to OBS action.
+      const synced = await invoke('dispatch', { action: 'obs.overlay.sync', payload: { automatic: true } });
+      acceptObsObservation(synced, key);
+    }
+  } catch {
+    // Rust records the readable failure in its snapshot. Automatic checks do not
+    // interrupt editing or create repeated toast/alert messages.
+    try {
+      const next = await invoke('snapshot', { configRevision: snapshot?.config_revision });
+      acceptObsObservation(next, key);
+    } catch { /* The next bounded observation can retry. */ }
+  } finally {
+    obsRefreshing = false;
+    updateObsSettings();
+    updateOverlayStatus();
+    scheduleObsRefresh();
+  }
+}
+
+function renderLiveSettings() {
+  const panel = id => `<div class="s-live-panel" data-live-panel="${id}" role="tabpanel" aria-labelledby="live-tab-${id}"${livePanel === id ? '' : ' hidden'}>${id === 'broadcast' ? renderBroadcastPanel() : renderOverlayPanel()}</div>`;
+  return ui`<div class="s-page s-live"><div class="s-page-head"><div class="s-ovl-head"><div class="s-ovl-title-row">${heading(t('OBS 与开播'))}<span class="s-ovl-badge">实验性</span></div></div></div>${renderObsConnection()}<div class="s-live-tabs" role="tablist" aria-label="${esc(t('OBS 功能'))}">${liveTab('broadcast')}${liveTab('overlay')}</div>${panel('broadcast')}${panel('overlay')}</div>`;
+}
+
+function liveTabState(id) {
+  if (id === 'broadcast') {
+    if (!broadcastEnabled()) return { tone: 'idle', text: t('未启用') };
+    const room = snapshot.broadcast?.room;
+    if (broadcastLive(room)) return { tone: 'live', text: t('直播中') };
+    return { tone: 'ready', text: snapshot.obs?.settings?.enabled ? t('已启用 · 同步控制 OBS') : t('已启用') };
+  }
+  const view = snapshot.overlay || {};
+  if (!view.settings?.enabled) return { tone: 'idle', text: t('未启用') };
+  if (view.error) return { tone: 'error', text: t('地址不可用') };
+  if (snapshot.obs?.status?.overlay_sync?.state === 'error' && !overlayObsClientCount()) return { tone: 'error', text: t('来源同步失败') };
+  return overlayObsClientCount() ? { tone: 'ready', text: t('OBS 正在显示') } : { tone: 'pending', text: t('等待 OBS 显示') };
+}
+
+function liveTab(id) {
+  const state = liveTabState(id);
+  const name = id === 'broadcast' ? t('开播台') : t('叠加层');
+  const note = id === 'broadcast' ? t('开播、下播、标题与推流') : t('弹幕画进直播画面');
+  return `<button type="button" class="s-live-tab" id="live-tab-${id}" role="tab" data-action="live.panel" data-id="${id}" aria-selected="${livePanel === id}"><span class="s-live-tab-icon" aria-hidden="true">${icon(id === 'broadcast' ? 'navBroadcast' : 'navOverlay')}</span><span class="s-live-tab-text"><strong>${esc(name)}</strong><small>${esc(note)}</small></span><span class="s-live-tab-state" data-live-state="${id}"><span class="service-light ${state.tone}" aria-hidden="true"></span><span>${esc(state.text)}</span></span></button>`;
+}
+
+function updateLiveTabs() {
+  const page = settingsDialog.open ? settingsDialog.querySelector('.s-live') : null;
+  if (!page) return;
+  for (const id of livePanels) {
+    const node = page.querySelector(`[data-live-state="${id}"]`);
+    if (!node) continue;
+    const state = liveTabState(id);
+    const light = node.querySelector('.service-light');
+    if (light && light.className !== `service-light ${state.tone}`) light.className = `service-light ${state.tone}`;
+    const text = node.querySelector('span:last-child');
+    if (text && text.textContent !== state.text) text.textContent = state.text;
+  }
+}
+
+function obsStatusView(view = snapshot.obs || {}) {
+  const status = view.status || {};
+  const address = `${view.settings?.host || '127.0.0.1'}:${view.settings?.port || 4455}`;
+  if (obsBusy === 'launch') return { tone: 'pending', text: t('正在启动 OBS…'), detail: t('等 OBS 打开 WebSocket，最多约 45 秒') };
+  if (obsBusy) return { tone: 'pending', text: t('正在连接 OBS…'), detail: address };
+  if (status.state === 'checking' || (obsRefreshing && (!status.state || status.state === 'idle'))) return { tone: 'pending', text: t('正在检测 OBS…'), detail: address };
+  if (status.state === 'error') return { tone: 'error', text: t('没能连上 OBS'), detail: errorMessage(status.message || '') };
+  if (status.state === 'ok') {
+    const stream = status.streaming === true ? t('正在推流') : status.streaming === false ? t('未在推流') : '';
+    return { tone: 'ready', text: status.obs_version ? ui`已连接 OBS ${status.obs_version}` : t('已连接 OBS'), detail: [address, stream].filter(Boolean).join(' · ') };
+  }
+  return { tone: 'idle', text: t('尚未检测 OBS'), detail: address };
+}
+
+const obsPasswordHint = view => view.has_password ? t('已加密保存在本机。输入新密码可替换。') : t('OBS 开启了“身份验证”时填写；在 OBS 的“显示连接信息”里可以看到。');
+const obsProgramHint = view => view.settings?.executable ? t('已手动选择。点“自动查找”恢复默认。') : view.detected ? t('已自动找到。Steam 版或便携版可以手动选择 obs64.exe。') : t('没有找到 OBS。请选择 OBS 安装目录 bin\\64bit 下的 obs64.exe。');
+
+// Shared OBS connection: status line on top, connection details folded underneath.
+function renderObsConnection(view = snapshot.obs || {}) {
+  const s = view.settings || { host: '127.0.0.1', port: 4455 };
+  const status = obsStatusView(view);
+  const hostId = `field-${++fieldSequence}`;
+  const portId = `field-${++fieldSequence}`;
+  const passwordId = `field-${++fieldSequence}`;
+  const open = obsDetailsOpen ?? view.status?.state !== 'ok';
+  const program = pathField('executable', t('OBS 程序'), s.executable || '', 'obs.pick_executable', view.detected ? ui`自动：${view.detected}` : t('点击选择 obs64.exe'), obsProgramHint(view));
+  const details = ui`<form data-form="obs" class="s-obs-form" novalidate><div class="s-row s-wrap"><label class="s-text" for="${hostId}"><span>OBS 地址</span><small>OBS 和弹幕姬在同一台电脑时保持 127.0.0.1。</small></label><input id="${hostId}" class="s-input" name="host" value="${esc(s.host)}" required maxlength="253" spellcheck="false" autocomplete="off"></div><div class="s-row s-wrap"><label class="s-text" for="${portId}"><span>WebSocket 端口</span><small>OBS 默认是 4455。</small></label><input id="${portId}" class="s-input s-num-input s-obs-port" name="port" value="${esc(s.port)}" type="number" min="1" max="65535" step="1" required></div><div class="s-row s-wrap s-obs-program" data-obs-program>${program}<span class="s-row-actions"><button type="button" class="button small quiet" data-action="obs.auto_detect"${s.executable ? '' : ' hidden'}>${esc(t('自动查找'))}</button></span></div>${autoStatus()}</form><form data-form="obs-password" class="s-obs-form" novalidate><div class="s-row s-wrap"><label class="s-text" for="${passwordId}"><span>WebSocket 密码</span><small data-obs-password-hint>${esc(obsPasswordHint(view))}</small></label><span class="s-row-actions"><input id="${passwordId}" class="s-input" name="password" type="password" autocomplete="new-password" maxlength="256" spellcheck="false" placeholder="${view.has_password ? '••••••••' : esc(t('未设置'))}"><button type="submit" class="button small">${esc(t('保存密码'))}</button><button type="button" class="button small quiet" data-action="obs.password.clear"${view.has_password ? '' : ' hidden'}>${esc(t('清除'))}</button></span></div></form><p class="s-obs-help">${esc(t('在 OBS 中打开“工具 → WebSocket 服务器设置”，勾选“开启 WebSocket 服务器”，端口和密码与这里一致（需要 OBS 28 或更高版本）。'))}</p>`;
+  // Starting OBS is offered only while it is not known to be connected, and only for this computer.
+  const launch = `<button type="button" class="button small" data-action="obs.launch"${view.local === false || status.tone === 'ready' ? ' hidden' : ''}${obsBusy ? ' disabled' : ''}>${icon('play')}${esc(t('启动 OBS'))}</button>`;
+  const test = `<button type="button" class="button small" data-action="obs.test"${obsBusy ? ' disabled' : ''}>${icon('refresh')}${esc(t('测试连接'))}</button>`;
+  return ui`<section class="s-section">${sLabel(t('OBS 连接'))}<div class="s-card s-obs-card" data-obs-root data-tone="${status.tone}"><div class="s-obs-status" data-obs-status><span class="s-obs-mark" aria-hidden="true"><span class="service-light ${status.tone}"></span></span><span class="s-obs-copy"><strong data-obs-status-text>${esc(status.text)}</strong><small data-obs-status-detail>${esc(status.detail)}</small></span><span class="s-row-actions">${launch}${test}</span></div><details class="s-obs-more" data-obs-more${open ? ' open' : ''}><summary><span>连接设置</span>${icon('arrow')}</summary>${details}</details></div></section>`;
+}
+
+// 开播台's own OBS choices: drive OBS on go-live/end, and start it first if needed.
+function renderObsLinkSection(view = snapshot.obs || {}) {
+  const s = view.settings || { enabled: false, auto_launch: true };
+  const launchNote = view.local === false ? t('OBS 设在其他电脑上，无法自动启动。') : '';
+  return ui`<section class="s-section">${sLabel(t('OBS 联动'))}<form data-form="obs-link" class="s-card s-obs-link" novalidate>${sSwitch('enabled', t('开播、下播时同步控制 OBS'), s.enabled, t('开播后自动把推流码填进 OBS 并开始推流；下播时先停止 OBS 推流，再关闭直播间。'))}${sSwitch('auto_launch', t('OBS 没开时自动启动'), s.auto_launch !== false, launchNote)}${autoStatus()}</form><p class="s-note">${esc(t('开播会把 OBS 当前配置的推流服务改为“自定义”，填入 B站服务器和推流码；OBS 已经在推流时不会改动。'))}</p></section>`;
+}
+
+// Snapshots only touch visibility, hints, buttons and status text, never typed values.
+function updateObsSettings() {
+  if (!settingsDialog.open) return;
+  const view = snapshot.obs || {};
+  const link = settingsDialog.querySelector('[data-obs-link-body]');
+  if (link) {
+    link.hidden = !broadcastEnabled();
+    const autoLaunch = link.querySelector('input[name="auto_launch"]');
+    if (autoLaunch) autoLaunch.disabled = view.local === false;
+  }
+  const root = settingsDialog.querySelector('[data-obs-root]');
+  if (root) {
+    const status = obsStatusView(view);
+    root.dataset.tone = status.tone;
+    const light = root.querySelector('.s-obs-mark .service-light');
+    if (light) light.className = `service-light ${status.tone}`;
+    for (const [selector, value] of [['[data-obs-status-text]', status.text], ['[data-obs-status-detail]', status.detail], ['[data-obs-password-hint]', obsPasswordHint(view)]]) {
+      const node = root.querySelector(selector);
+      if (node && node.textContent !== value) node.textContent = value;
+    }
+    const programHint = root.querySelector('[data-obs-program] .hint');
+    if (programHint && programHint.textContent !== obsProgramHint(view)) programHint.textContent = obsProgramHint(view);
+    const clear = root.querySelector('[data-action="obs.password.clear"]');
+    if (clear) clear.hidden = !view.has_password;
+    const input = root.querySelector('form[data-form="obs-password"] input[name="password"]');
+    if (input) input.placeholder = view.has_password ? '••••••••' : t('未设置');
+    const launch = root.querySelector('[data-action="obs.launch"]');
+    if (launch) launch.hidden = view.local === false || status.tone === 'ready';
+    for (const node of root.querySelectorAll('[data-action="obs.test"], [data-action="obs.launch"]')) node.disabled = !!obsBusy;
+  }
+  updateLiveTabs();
+  void refreshObsStatus();
+}
+
+async function flushObsForm() {
+  const form = settingsDialog.querySelector('form[data-form="obs"]');
+  const record = form && autosaves.get(form);
+  if (record?.touched) { scheduleAutosave(form, true); await record.queue.flush(); }
+}
+
+// Explicit OBS actions share one busy flag so the status line tells one story.
+async function runObs(kind, action, payload = {}) {
+  if (obsBusy) return null;
+  obsBusy = kind;
+  updateObsSettings();
+  updateOverlayStatus();
+  try {
+    await flushObsForm();
+    return (await command(action, payload, { quiet: true, silent: true }))?.result || {};
+  } catch (error) {
+    showToast(errorMessage(error), true);
+    return null;
+  } finally { obsRefreshKey = obsConnectionKey(); obsRefreshAt = Date.now(); obsBusy = ''; updateObsSettings(); updateOverlayStatus(); }
+}
+
+async function testObs() {
+  const found = await runObs('test', 'obs.test');
+  if (found) showToast(ui`OBS 连接正常 · ` + (found.streaming ? t('正在推流') : t('未在推流')));
+}
+
+async function launchObs() {
+  const found = await runObs('launch', 'obs.launch');
+  if (found) showToast(found.launched ? t('OBS 已启动并连上') : t('OBS 已经在运行，连接正常'));
+}
+
+async function addOverlayToObs() {
+  const placed = await runObs('overlay', 'obs.overlay.add');
+  if (!placed) return;
+  const where = `“${placed.scene}” · ${placed.width} × ${placed.height}`;
+  showToast(placed.created ? ui`已添加到 OBS · ${where}` : placed.added_to_scene ? ui`已放进当前场景 · ${where}` : ui`OBS 里的叠加层已更新 · ${where}`);
+}
+
 function renderGiftMerge() {
   const merge = snapshot.live_settings?.gift_merge || { enabled: false, initial_seconds: 1.5, increment_seconds: .5, maximum_seconds: 5 };
-  return `<form data-form="gift-merge" class="s-card s-merge">${sSwitch('enabled', t('合并连续赠送的礼物'), merge.enabled, t('合并同一观众连续赠送的同种礼物'))}<div class="s-row s-grid3">${field('initial_seconds', t('初始等待（秒）'), merge.initial_seconds, 'type="number" min="0.1" max="30" step="0.1" required')}${field('increment_seconds', t('每次延长（秒）'), merge.increment_seconds, 'type="number" min="0" max="30" step="0.1" required')}${field('maximum_seconds', t('最长等待（秒）'), merge.maximum_seconds, 'type="number" min="0.1" max="60" step="0.1" required')}</div>${autoStatus()}</form>`;
+  return `<form data-form="gift-merge" class="s-card s-merge">${sSwitch('enabled', t('合并连续赠送的礼物'), merge.enabled)}<div class="s-row s-grid3">${field('initial_seconds', t('初始等待（秒）'), merge.initial_seconds, 'type="number" min="0.1" max="30" step="0.1" required')}${field('increment_seconds', t('每次延长（秒）'), merge.increment_seconds, 'type="number" min="0" max="30" step="0.1" required')}${field('maximum_seconds', t('最长等待（秒）'), merge.maximum_seconds, 'type="number" min="0.1" max="60" step="0.1" required')}</div>${autoStatus()}</form>`;
 }
 
 function renderVoiceChoices(presets, preferred) {
@@ -2069,13 +3279,17 @@ async function saveVoiceAuditionChoice(form) {
 }
 
 async function settleVoiceAuditionChoice() {
+  const pending = voiceAuditionDefaultSave;
   try {
-    await voiceAuditionDefaultSave;
+    await pending;
     return true;
   } catch {
     return false;
   } finally {
-    voiceAuditionRevision++;
+    if (voiceAuditionDefaultSave === pending) {
+      voiceAuditionDefaultSave = Promise.resolve();
+      voiceAuditionRevision++;
+    }
   }
 }
 
@@ -2092,7 +3306,7 @@ function renderVoiceManagement(presets, preferred, bodyOnly = false) {
   const presetRow = preset => ui`<div class="s-row"><span class="s-text"><span>${esc(presetLabel(preset))}${preferred?.id === preset.id ? t('<span class="s-tag">正在使用</span>') : ''}</span><small>${esc(providerLabel(preset.provider))} · ${esc(displayNumber(preset.speed))} 倍速</small></span><span class="s-row-actions">${iconButton('edit', ui`编辑 ${presetLabel(preset)}`, 'preset.edit', preset.id)}${iconButton('trash', ui`删除 ${presetLabel(preset)}`, 'preset.delete', preset.id)}</span></div>`;
   const otherPresets = presets.filter(preset => preset.provider !== selectedProvider);
   const otherVoices = otherPresets.length ? ui`<details class="s-details"><summary>其他服务的音色 · ${otherPresets.length}</summary><div class="s-card">${otherPresets.map(presetRow).join('')}</div></details>` : '';
-  const body = `<div class="s-card">${managedPresets.length ? managedPresets.map(presetRow).join('') : `<div class="s-row s-empty-row">${esc(t('还没有音色，点击「添加音色」开始设置。'))}</div>`}</div>${otherVoices}`;
+  const body = `<div class="s-card">${managedPresets.length ? managedPresets.map(presetRow).join('') : `<div class="s-row s-empty-row">${esc(t('还没有音色。'))}</div>`}</div>${otherVoices}`;
   const extra = ui`<span class="s-caption">${esc(providerLabel(selectedProvider))} · ${managedPresets.length} 个音色</span>`;
   return bodyOnly ? sLabel(t('音色管理'), extra) + body : sSection(t('音色管理'), body, extra, '', 'voice-management');
 }
@@ -2220,7 +3434,7 @@ function renderReferenceEditor(provider, preset, pair) {
   const profile = saved?.profile || {};
   const audioLabel = saved?.profile?.audio_path ? t('已记住音频原路径；移动或删除原文件后需要重新选择。') : t('直接使用原文件，不复制音频。');
   const gptFields = provider === 'gpt_sovits' ? `<div class="field-grid">${select('reference_language', t('参考语言'), languageOptions(profile.reference_language || 'auto'))}${select('text_language', t('文本语言'), languageOptions(profile.text_language || 'auto'))}</div>${check('text_free', t('无参考文本模式'), profile.text_free || false)}` : '';
-  return `<section id="reference-editor" class="reference-editor">${heading(t('参考音频'), t('选择一段角色录音，并填写录音中的台词。'))}<p class="quiet-note">${esc(audioLabel)}</p><form data-form="reference">${pathField('audio_path', t('参考音频'), profile.audio_path || '', 'reference.pick_audio', t('点击选择参考音频'), t('支持 WAV、MP3、FLAC、OGG 或 M4A'))}${textArea('reference_text', t('参考文本'), profile.reference_text ?? preset.sovits?.reference_text ?? '', 'maxlength="8192"', t('填写参考音频中实际说出的文字。'))}${gptFields}<div class="form-footer">${saveButton(t('保存参考设置'))}</div></form>${role ? '' : t('<p class="quiet-note">先填写角色名称或选择角色模型。</p>')}</section>`;
+  return `<section id="reference-editor" class="reference-editor">${heading(t('参考音频'))}<p class="quiet-note">${esc(audioLabel)}</p><form data-form="reference">${pathField('audio_path', t('参考音频'), profile.audio_path || '', 'reference.pick_audio', t('点击选择参考音频'), t('支持 WAV、MP3、FLAC、OGG 或 M4A'))}${textArea('reference_text', t('参考文本'), profile.reference_text ?? preset.sovits?.reference_text ?? '', 'maxlength="8192"', t('填写参考音频中实际说出的文字。'))}${gptFields}<div class="form-footer">${saveButton(t('保存参考设置'))}</div></form>${role ? '' : t('<p class="quiet-note">先填写角色名称或选择角色模型。</p>')}</section>`;
 }
 
 function renderDotsPresetEditor(id, preset, connection) {
@@ -2231,18 +3445,18 @@ function renderDotsPresetEditor(id, preset, connection) {
   const hint = legacy
     ? t('此旧音色尚未记录原文件路径，仍可沿用服务内文件名；选择原文件后会改用新路径。')
     : t('使用原文件，不复制音频。原文件移动或删除后需重新选择。');
-  return `${heading(id ? t('编辑 dots 音色') : t('添加 dots 音色'), t('选择一段录音作为参考声音。'))}<form data-form="dots-preset" data-id="${esc(id || '')}" data-connection-id="${esc(connection.id)}">${field('name', t('音色名称'), preset.name || '', t('required maxlength="100" placeholder="例如：日常播报"'))}${pathField('audio_path', t('参考音频'), profile.audio_path || '', 'reference.pick_audio', t('点击选择参考音频'), hint)}${textArea('reference_text', t('参考文本（可选）'), profile.reference_text || '', 'maxlength="8192"', t('可填写参考音频中说出的文字。'))}<div class="field-grid">${field('speed', t('语速'), preset.speed ?? 1, 'type="number" min="0.5" max="2" step="0.05" required')}${field('volume', t('音色音量'), preset.volume ?? 1, 'type="number" min="0" max="2" step="0.05" required')}</div><div class="form-footer">${saveButton(t('保存音色'))}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
+  return `${heading(id ? t('编辑 dots 音色') : t('添加 dots 音色'))}<form data-form="dots-preset" data-id="${esc(id || '')}" data-connection-id="${esc(connection.id)}">${field('name', t('音色名称'), preset.name || '', t('required maxlength="100" placeholder="例如：日常播报"'))}${pathField('audio_path', t('参考音频'), profile.audio_path || '', 'reference.pick_audio', t('点击选择参考音频'), hint)}${textArea('reference_text', t('参考文本（可选）'), profile.reference_text || '', 'maxlength="8192"', t('可填写参考音频中说出的文字。'))}<div class="field-grid">${field('speed', t('语速'), preset.speed ?? 1, 'type="number" min="0.5" max="2" step="0.05" required')}${field('volume', t('音色音量'), preset.volume ?? 1, 'type="number" min="0" max="2" step="0.05" required')}</div><div class="form-footer">${saveButton(t('保存音色'))}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
 }
 
 function renderFishPresetEditor(id, preset, connection) {
   const back = button(t('返回'), 'editor.cancel', { class: 'quiet' });
-  if (!id) return `${heading(t('收藏 Fish 音色'), t('粘贴官网音色页面链接或 32 位音色 ID，填写名称后保存。'))}<form data-form="fish-voice" data-connection-id="${esc(connection.id)}">${field('id_or_url', t('音色页面链接或 ID'), '', t('required autocomplete="off" placeholder="https://fish.audio/m/… 或 32 位 ID"'))}<div class="actions">${button(t('查找官方名称'), 'fish.voice.lookup', { class: 'small quiet' })}</div><p class="quiet-note" data-fish-lookup-result role="status" hidden></p>${field('name', t('收藏名称'), '', 'maxlength="100"', t('可自行命名；留空会先读取官方名称。'))}<div class="form-footer">${saveButton(t('收藏音色'))}${back}</div></form>`;
+  if (!id) return `${heading(t('收藏 Fish 音色'))}<form data-form="fish-voice" data-connection-id="${esc(connection.id)}">${field('id_or_url', t('音色页面链接或 ID'), '', t('required autocomplete="off" placeholder="https://fish.audio/m/… 或 32 位 ID"'))}<div class="actions">${button(t('查找官方名称'), 'fish.voice.lookup', { class: 'small quiet' })}</div><p class="quiet-note" data-fish-lookup-result role="status" hidden></p>${field('name', t('收藏名称'), '', 'maxlength="100"', t('可自行命名；留空会先读取官方名称。'))}<div class="form-footer">${saveButton(t('收藏音色'))}${back}</div></form>`;
   return `${heading(t('编辑 Fish 音色'))}<form data-form="fish-preset" data-id="${esc(id)}" data-connection-id="${esc(connection.id)}">${field('name', t('音色名称'), preset.name, 'required maxlength="100"')}<div class="field-grid">${field('speed', t('语速'), preset.speed, 'type="number" min="0.5" max="2" step="0.05" required')}${field('volume', t('音色音量'), preset.volume, 'type="number" min="0" max="2" step="0.05" required')}</div><div class="form-footer">${autoStatus()}${button(t('试听此音色'), 'fish.audition', { id, class: 'quiet' })}${back}</div></form>`;
 }
 
 function renderPresetEditor(id) {
   if (!id && !editor?.connectionId) {
-    return `${heading(t('添加音色'), t('选择语音服务。'))}<div class="row-list">${snapshot.connections.map(connection => `<div class="setting-row"><div class="row-text"><div class="row-title">${esc(providerLabel(connection.settings.provider))}</div><div class="row-description">${esc(connection.name || providerLabel(connection.settings.provider))}</div></div><div class="row-actions">${button(t('选择'), 'preset.choose_service', { id: connection.id, class: 'small' })}</div></div>`).join('')}</div><div class="actions">${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div>`;
+    return `${heading(t('添加音色'))}<div class="row-list">${snapshot.connections.map(connection => `<div class="setting-row"><div class="row-text"><div class="row-title">${esc(providerLabel(connection.settings.provider))}</div><div class="row-description">${esc(connection.name || providerLabel(connection.settings.provider))}</div></div><div class="row-actions">${button(t('选择'), 'preset.choose_service', { id: connection.id, class: 'small' })}</div></div>`).join('')}</div><div class="actions">${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div>`;
   }
   const first = snapshot.connections.find(item => item.id === editor?.connectionId) || snapshot.connections[0];
   const preset = snapshot.presets.find(item => item.id === id) || { id: '', connection_id: first?.id, provider: first?.settings.provider, voice_id: '', sovits: null };
@@ -2283,28 +3497,40 @@ function applyModelPairToForm(save = true) {
   if (section) section.outerHTML = renderReferenceEditor('gpt_sovits', preset, pair);
 }
 
+let voiceEditorLoadRevision = 0;
 async function loadVoiceEditorData(connectionId) {
+  const revision = ++voiceEditorLoadRevision;
+  const openedEditor = editor;
+  const selectedConnection = editor?.connectionId;
+  const opened = settingsDialog.open;
+  const tab = settingsTab;
+  const current = () => revision === voiceEditorLoadRevision && editor === openedEditor
+    && editor?.connectionId === selectedConnection && settingsDialog.open === opened && settingsTab === tab
+    && !settingsDialog.querySelector('[data-form="reference"][data-dirty]')?.dataset?.dirty;
   modelScan = { pairs: [], issues: [] };
   referenceProfiles = [];
   const connection = snapshot.connections.find(item => item.id === connectionId);
-  if (!connection || !['dots', 'gpt_sovits'].includes(connection.settings.provider)) return;
+  if (!connection || !['dots', 'gpt_sovits'].includes(connection.settings.provider)) return true;
   const profiles = await command('references.list', { connection_id: connectionId }, { quiet: true });
+  if (!current()) return false;
   referenceProfiles = Array.isArray(profiles.result) ? profiles.result : [];
   if (connection.settings.provider === 'gpt_sovits') {
     const directory = snapshot.local_services?.gpt_sovits?.directory;
     if (directory) {
       try {
         const scan = await command('models.scan', { path: directory }, { quiet: true, silent: true });
+        if (!current()) return false;
         modelScan = scan.result || modelScan;
-      } catch (error) { modelScan.error = errorMessage(error); }
+      } catch (error) { if (!current()) return false; modelScan.error = errorMessage(error); }
     }
   }
+  return current();
 }
 
 function renderBindingEditor(id) {
   const record = snapshot.bindings.find(item => item.id === id);
   const binding = record?.binding || { user_id: editor?.userId || '', user_name: editor?.userName || '', preset_id: snapshot.presets[0]?.id, enabled: true };
-  return ui`${heading(id ? t('编辑观众声音') : t('指定观众声音'), t('填写观众用户名即可指定声音；也可以填写 UID 精确识别。'))}<form data-form="binding" data-id="${esc(id || '')}">${record?.binding.legacy_user_name ? ui`<p class="notice">旧配置用户名：${esc(record.binding.legacy_user_name)}。请确认后手动填写用户名或 UID。</p>` : ''}${field('user_name', t('观众用户名'), binding.user_name || '', t('maxlength="100" placeholder="输入观众当前用户名"'))}${field('user_id', t('观众 UID（选填）'), binding.user_id || '', t('inputmode="numeric" pattern="[1-9][0-9]*" placeholder="有 UID 时建议填写"'))}${select('preset_id', t('声音预设'), snapshot.presets.map(preset => option(preset.id, presetLabel(preset), binding.preset_id)).join(''))}<p class="quiet-note">按用户名精确匹配，同名账号会共用声音；填写 UID 时优先按 UID 匹配。</p>${check('enabled', t('启用此绑定'), binding.enabled)}<div class="form-footer">${autoStatus()}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
+  return ui`${heading(id ? t('编辑观众声音') : t('指定观众声音'))}<form data-form="binding" data-id="${esc(id || '')}">${record?.binding.legacy_user_name ? ui`<p class="notice">旧配置用户名：${esc(record.binding.legacy_user_name)}。请确认后手动填写用户名或 UID。</p>` : ''}${field('user_name', t('观众用户名'), binding.user_name || '', t('maxlength="100" placeholder="输入观众当前用户名"'))}${field('user_id', t('观众 UID（选填）'), binding.user_id || '', 'inputmode="numeric" pattern="[1-9][0-9]*"')}${select('preset_id', t('声音预设'), snapshot.presets.map(preset => option(preset.id, presetLabel(preset), binding.preset_id)).join(''))}<p class="quiet-note">按用户名精确匹配，同名账号会共用声音；填写 UID 时优先按 UID 匹配。</p>${check('enabled', t('启用此绑定'), binding.enabled)}<div class="form-footer">${autoStatus()}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
 }
 
 function renderAliasEditor() {
@@ -2359,7 +3585,7 @@ function renderAssetsSettings() {
   const assetRow = item => ui`<div class="s-row"><span class="s-text"><span>${esc(item.name)}</span><small>${Math.round(item.bytes / 1024)} KB · ${sounds.filter(rule => rule.asset_id === item.id).length} 条关键词规则引用</small></span><span class="s-row-actions">${button(t('替换'), 'asset.replace', { id: item.id, class: 'small' })}${iconButton('trash', ui`删除 ${item.name}`, 'asset.delete', item.id)}</span></div>`;
   const library = `<div class="s-card">${snapshot.assets.length ? snapshot.assets.map(assetRow).join('') : `<div class="s-row s-empty-row">${esc(t('还没有音效素材，先导入一段音频。'))}</div>`}</div>`;
   const importForm = ui`<form data-form="asset" data-id="${esc(asset?.id || '')}" class="s-card s-import"><div class="s-import-title">${asset ? ui`替换「${esc(asset.name)}」` : t('导入音频')}</div><div class="s-import-fields">${asset ? '' : field('name', t('素材名称'), '', 'required')}${field('path', t('音频文件完整路径'), '', t('required placeholder="例如：E:\\Audio\\hello.wav"'), t('支持 WAV、MP3 等常用音频；文件会复制到当前应用的数据目录。'))}</div><div class="form-footer">${saveButton(asset ? t('替换音频') : t('导入素材'))}${asset ? button(t('取消替换'), 'editor.cancel', { class: 'quiet' }) : ''}</div></form>`;
-  return `<div class="s-page"><div class="s-page-head">${heading(t('关键词音效'))}${add}</div><form data-form="sound-words" class="s-sound-form">${dictionaryRows('sounds', sounds)}${autoStatus()}</form><p class="s-note">${esc(t('弹幕包含触发词时会播放对应音效。'))}</p>${sSection(t('音效素材'), library + importForm)}</div>`;
+  return `<div class="s-page"><div class="s-page-head">${heading(t('关键词音效'))}${add}</div><form data-form="sound-words" class="s-sound-form">${dictionaryRows('sounds', sounds)}${autoStatus()}</form>${sSection(t('音效素材'), library + importForm)}</div>`;
 }
 
 // ---------- OBS overlay (experimental) ----------
@@ -2377,20 +3603,41 @@ function overlayPreviewSize() {
   return client ? { width: client.width, height: client.height, note: t('来自 OBS') } : { width: 1920, height: 1080, note: t('连上 OBS 后按实际画布显示') };
 }
 
+function overlayObsClientCount() {
+  const view = snapshot.overlay || {};
+  return Number.isSafeInteger(view.obs_clients) && view.obs_clients >= 0 ? view.obs_clients : (view.clients || []).length;
+}
+
 function overlayStatus() {
   const view = snapshot.overlay || {};
   const clients = view.clients || [];
   if (!view.settings?.enabled) return { tone: 'idle', text: t('未启用 · 打开右上角的开关后，OBS 才能显示叠加层') };
   if (view.error) return { tone: 'error', text: errorMessage(view.error) };
   if (!view.running) return { tone: 'pending', text: t('正在启动…') };
-  if (!clients.length) return { tone: 'pending', text: t('等待 OBS 连接 · 在 OBS 中添加浏览器来源并粘贴地址') };
+  if (!overlayObsClientCount()) {
+    const binding = overlayBindingStatus();
+    if (binding) return binding;
+    if (snapshot.obs?.status?.state === 'error') return { tone: 'error', text: errorMessage(snapshot.obs.status.message || '') };
+    return { tone: 'pending', text: t('等待 OBS 连接 · 在 OBS 中添加浏览器来源并粘贴地址') };
+  }
   const [first] = clients;
-  return { tone: 'ready', text: ui`OBS 已连接 · ${first.width} × ${first.height}` + (clients.length > 1 ? ui` · ${clients.length} 个画面` : '') };
+  return { tone: 'ready', text: (first ? ui`OBS 已连接 · ${first.width} × ${first.height}` : t('OBS 已连接')) + (overlayObsClientCount() > 1 ? ui` · ${overlayObsClientCount()} 个画面` : '') };
 }
 
-function renderOverlaySettings() {
+function overlayBindingStatus() {
+  if (!snapshot.overlay?.settings?.enabled || !snapshot.overlay?.running) return null;
+  const sync = snapshot.obs?.status?.overlay_sync || {};
+  if (sync.state === 'syncing') return { tone: 'pending', text: t('正在同步 OBS 来源地址…') };
+  if (sync.state === 'error') return { tone: 'error', text: errorMessage(sync.message || '') };
+  if (sync.state === 'missing') return { tone: 'pending', text: t('OBS 中还没有叠加层来源，请点“添加到 OBS”。') };
+  if (sync.state === 'paused') return { tone: 'pending', text: errorMessage(sync.message || '') };
+  if (sync.state === 'ready' || sync.state === 'updated') return { tone: overlayObsClientCount() ? 'ready' : 'pending', text: overlayObsClientCount() ? t('OBS 来源地址已同步') : t('OBS 来源地址已同步 · 等待画面连接，请确认场景和来源可见。') };
+  return null;
+}
+
+function renderOverlayPanel() {
   const view = snapshot.overlay;
-  if (!view?.settings) return `<div class="s-page">${heading(t('OBS 叠加层'))}${empty(t('桌面连接不可用。'))}</div>`;
+  if (!view?.settings) return empty(t('桌面连接不可用。'));
   const s = view.settings;
   const radio = (name, value, label, current) => `<label><input type="radio" name="${name}" value="${value}"${current === value ? ' checked' : ''}><span>${esc(label)}</span></label>`;
   const backdrop = (value, label) => `<button type="button" class="s-ovl-swatch ${value}" data-action="overlay.preview" data-id="backdrop=${value}" aria-pressed="${overlayPreview.backdrop === value}" aria-label="${esc(label)}" title="${esc(label)}"></button>`;
@@ -2410,12 +3657,12 @@ function renderOverlaySettings() {
 <div class="ovp-list"><div class="ovp-item spot"><span class="ovp-av"><i class="ovp-ring"></i><i class="ovp-face"></i></span><span class="ovp-text"><span class="ovp-lit">${esc(t('这一波要是没闪现就寄了，主播反应好快'))}</span></span><span class="ovp-prog"><i class="ovp-fill"></i><i class="ovp-comet"></i></span></div><div class="ovp-item"><span class="ovp-av"><i class="ovp-face two"></i></span><span class="ovp-text">${esc(t('晚上好呀，今天也来听你读弹幕'))}</span></div></div></div></div>
 </div>
 <div class="s-ovl-under"><div class="s-ovl-backdrops" role="group" aria-label="${esc(t('预览背景'))}">${backdrop('dark', t('深色背景'))}${backdrop('light', t('亮色背景'))}${backdrop('clear', t('透明背景'))}</div><span class="s-ovl-size" data-ovp-size></span><span class="s-ovl-tests" title="${esc(t('发一条测试内容到 OBS 里的叠加层'))}">${button(t('测试弹幕'), 'overlay.test', { id: 'danmaku', class: 'small', icon: 'play' })}${button(t('测试醒目留言'), 'overlay.test', { id: 'super_chat', class: 'small' })}</span></div></div>`;
-  const address = ui`<div class="s-card"><div class="s-row s-wrap s-ovl-address"><span class="s-text"><span>叠加层地址</span><small class="s-ovl-url" data-overlay-url></small></span><span class="s-row-actions">${button(t('复制地址'), 'overlay.copy', { class: 'small primary', icon: 'check' })}${button(t('重新生成'), 'overlay.token.reset', { class: 'small', icon: 'refresh' })}</span></div><div class="s-row s-ovl-status" data-overlay-status><span class="service-light idle"></span><span data-overlay-status-text></span></div><div class="s-row"><span class="s-text"><small>在 OBS 里添加“浏览器”来源，粘贴地址，宽和高填 OBS 的画布分辨率（设置 → 视频 → 基础分辨率）。叠加层按画面大小自动缩放，1080p、2K、4K、16:10 和带鱼屏都能直接用。</small></span></div></div>`;
+  const address = ui`<div class="s-card"><div class="s-row s-wrap s-ovl-address"><span class="s-text"><span>叠加层地址</span><small class="s-ovl-url" data-overlay-url></small></span><span class="s-row-actions">${button(t('添加到 OBS'), 'overlay.obs_add', { class: 'small primary', icon: 'plus' })}${button(t('复制地址'), 'overlay.copy', { class: 'small', icon: 'check' })}${button(t('重新生成'), 'overlay.token.reset', { class: 'small quiet', icon: 'refresh' })}</span></div><div class="s-row s-ovl-status" data-overlay-status><span class="service-light idle"></span><span class="s-text"><span data-overlay-status-text></span><small data-overlay-binding-detail hidden></small></span></div><div class="s-row"><span class="s-text"><small>会在 OBS 当前场景放一个“弹幕姬叠加层”浏览器来源，再点一次只更新它。手动添加时，宽高填画布分辨率。</small></span></div></div>`;
   const look = ui`<div class="s-ovl-styles" role="radiogroup" aria-label="${esc(t('样式'))}">${styleCard('card', t('一体卡'), 'one card', t('刊头和弹幕收进一张玻璃卡片，读完的弹幕变成小行。'))}${styleCard('spine', t('光脊'), 'spine', t('一条发光的竖线串起刊头和弹幕，没有底板，最轻。'))}</div><div class="s-card"><div class="s-row s-wrap"><span class="s-text"><span id="overlay-corner-label">位置</span></span><div class="s-seg" role="radiogroup" aria-labelledby="overlay-corner-label">${radio('corner', 'top_left', t('左上'), s.corner)}${radio('corner', 'top_right', t('右上'), s.corner)}${radio('corner', 'bottom_left', t('左下'), s.corner)}${radio('corner', 'bottom_right', t('右下'), s.corner)}</div></div>${range('scale', t('大小'), s.scale, .5, 2, .05)}${range('vignette', t('暗角深浅'), s.vignette, 0, 1, .05, t('在亮的游戏画面上调深一些，文字更清楚。'))}</div>`;
-  const masthead = ui`<div class="s-card">${textRow('title', t('标题'), s.title, 'maxlength="12" required', t('最多 12 个字，例如“今晚的弹幕”。'))}${textRow('tagline', t('副标题'), s.tagline, `maxlength="48" placeholder="${esc(overlayDefaultTagline)}"`, t('冷场时显示。建议写英文，留空用默认的一句。'))}</div>`;
-  const content = ui`<div class="s-card">${sSwitch('show_danmaku', t('弹幕'), s.show_danmaku)}${sSwitch('show_gift', t('礼物'), s.show_gift)}${sSwitch('show_super_chat', t('醒目留言'), s.show_super_chat, t('单独显示在画面上方正中。'))}${sSwitch('show_guard', t('大航海'), s.show_guard)}<div class="s-row s-wrap"><span class="s-text"><span id="overlay-names-label">观众名字</span><small>看直播和录播的观众只需要看到内容，默认只在礼物和醒目留言旁显示名字。</small></span><div class="s-seg" role="radiogroup" aria-labelledby="overlay-names-label">${radio('names', 'none', t('不显示'), s.names)}${radio('names', 'special', t('仅礼物与醒目留言'), s.names)}${radio('names', 'all', t('全部'), s.names)}</div></div>${sSwitch('merge_duplicates', t('合并重复弹幕'), s.merge_duplicates, t('同样的话连着出现时显示为“×N”。'))}<div class="s-row"><label class="s-text" for="${lingerId}"><span>停留时间</span><small>没有在朗读的弹幕显示多久后淡出。</small></label><span class="s-amount"><input id="${lingerId}" name="linger_seconds" type="number" min="3" max="120" step="1" required value="${esc(s.linger_seconds)}"><span>秒</span></span></div></div>`;
+  const masthead = ui`<div class="s-card">${textRow('tagline', t('副标题'), s.tagline, `maxlength="48" placeholder="${esc(overlayDefaultTagline)}"`, t('冷场时显示。建议写英文，留空用默认的一句。'))}</div>`;
+  const content = ui`<div class="s-card">${sSwitch('show_danmaku', t('弹幕'), s.show_danmaku)}${sSwitch('show_gift', t('礼物'), s.show_gift)}${sSwitch('show_super_chat', t('醒目留言'), s.show_super_chat, t('单独显示在画面上方正中。'))}${sSwitch('show_guard', t('大航海'), s.show_guard)}<div class="s-row s-wrap"><span class="s-text"><span id="overlay-names-label">观众名字</span></span><div class="s-seg" role="radiogroup" aria-labelledby="overlay-names-label">${radio('names', 'none', t('不显示'), s.names)}${radio('names', 'special', t('仅礼物与醒目留言'), s.names)}${radio('names', 'all', t('全部'), s.names)}</div></div>${sSwitch('merge_duplicates', t('合并重复弹幕'), s.merge_duplicates, t('同样的话连着出现时显示为“×N”。'))}<div class="s-row"><label class="s-text" for="${lingerId}"><span>停留时间</span><small>没有在朗读的弹幕显示多久后淡出。</small></label><span class="s-amount"><input id="${lingerId}" name="linger_seconds" type="number" min="3" max="120" step="1" required value="${esc(s.linger_seconds)}"><span>秒</span></span></div></div>`;
   const enabledId = `field-${++fieldSequence}`;
-  return ui`<form data-form="overlay" class="s-page s-ovl" novalidate><div class="s-page-head"><div class="s-ovl-head"><div class="s-ovl-title-row">${heading(t('OBS 叠加层'))}<span class="s-ovl-badge">实验性</span></div><p class="s-ovl-lede">把弹幕和正在朗读的内容画进直播画面，看录播的观众也能看到。</p></div><label class="s-ovl-enable" for="${enabledId}"><span>启用</span><input id="${enabledId}" class="s-switch" type="checkbox" role="switch" name="enabled"${s.enabled ? ' checked' : ''}></label></div>${preview}${sSection(t('添加到 OBS'), address, `<span class="s-label-note">${esc(t('地址只在本机可用，重新生成会让旧地址失效'))}</span>`)}${sSection(t('样式'), look)}${sSection(t('刊头文字'), masthead)}${sSection(t('显示内容'), content)}${autoStatus()}</form>`;
+  return ui`<form data-form="overlay" class="s-live-panel-body s-ovl" novalidate><div class="s-live-head"><div class="s-live-head-text"><h3>叠加层</h3></div><label class="s-ovl-enable" for="${enabledId}"><span>启用</span><input id="${enabledId}" class="s-switch" type="checkbox" role="switch" name="enabled"${s.enabled ? ' checked' : ''}></label></div>${preview}${sSection(t('添加到 OBS'), address, `<span class="s-label-note">${esc(t('地址只在本机可用，重新生成会让旧地址失效'))}</span>`)}${sSection(t('样式'), look)}${sSection(t('刊头文字'), masthead)}${sSection(t('显示内容'), content)}${autoStatus()}</form>`;
 }
 
 // Connection state changes while the page is open; only the status parts are rewritten.
@@ -2429,11 +3676,19 @@ function updateOverlayStatus() {
   if (light && light.className !== lightClass) light.className = lightClass;
   const text = page.querySelector('[data-overlay-status-text]');
   if (text && text.textContent !== status.text) text.textContent = status.text;
+  const detail = page.querySelector('[data-overlay-binding-detail]');
+  if (detail) {
+    const binding = overlayBindingStatus();
+    detail.hidden = !binding || binding.text === status.text;
+    detail.classList.toggle('field-error', binding?.tone === 'error');
+    if (detail.textContent !== (binding?.text || '')) detail.textContent = binding?.text || '';
+  }
   const url = page.querySelector('[data-overlay-url]');
   const masked = view.settings?.enabled ? overlayMaskedUrl(view.url, view.settings?.token) : t('启用后生成本机地址');
   if (url && url.textContent !== masked) url.textContent = masked;
   for (const node of page.querySelectorAll('[data-action="overlay.copy"]')) node.disabled = !view.settings?.enabled || !view.settings?.token;
-  for (const node of page.querySelectorAll('[data-action="overlay.test"]')) node.disabled = !view.running;
+  for (const node of page.querySelectorAll('[data-action="overlay.test"], [data-action="overlay.obs_add"]')) node.disabled = !view.running || (node.dataset.action === 'overlay.obs_add' && obsBusy);
+  updateLiveTabs();
   updateOverlayPreview();
 }
 
@@ -2511,9 +3766,9 @@ async function changeLanguage(language) {
 function renderDataSettings() {
   const panel = migrationPreview ? 'import' : dataPanel;
   const tab = (id, label) => `<button type="button" class="button${panel === id ? ' active' : ''}" data-action="data.panel" data-id="${id}" aria-expanded="${panel === id}">${esc(label)}</button>`;
-  const exportForm = ui`<form data-form="export" class="s-card s-import"><div class="s-import-title">导出配置</div>${field('path', t('保存为'), '', t('required placeholder="例如：E:\\Backups\\danmakuvoice.json"'), t('保存到一个新文件；导出不包含登录凭据、音效文件和聊天记录。'))}<div class="form-footer">${saveButton(t('导出无凭据配置'))}</div></form>`;
+  const exportForm = ui`<form data-form="export" class="s-card s-import"><div class="s-import-title">导出配置</div>${field('path', t('保存为'), '', t('required placeholder="例如：E:\\Backups\\danmakuvoice.json"'), t('不包含登录凭据、音效文件和聊天记录。'))}<div class="form-footer">${saveButton(t('导出配置'))}</div></form>`;
   const importForm = ui`<form data-form="migration-preview" class="s-card s-import"><div class="s-import-title">从旧版导入</div>${field('path', t('旧 config.json 的完整路径'), '', 'required', t('先读取预览，再由你选择要导入的内容。不会自动导入账号凭据。'))}<div class="form-footer">${saveButton(t('读取导入预览'))}</div></form>`;
-  return ui`<section class="s-section">${sLabel(t('数据与迁移'))}<div class="s-button-row">${tab('import', t('导入旧配置'))}${tab('export', t('导出配置'))}${button(t('清除应用数据'), 'data.clear', { class: 'danger' })}</div>${panel === 'export' ? exportForm : panel === 'import' ? importForm : ''}<div id="migration-preview">${migrationPreview ? renderMigrationPreview() : ''}</div><div id="operation-result" class="form-result"></div><p class="s-note">导出的配置不包含登录凭据。清除应用数据会删除本机保存的账号、语音服务凭据、设置、音效和备份，然后重新开始设置。</p></section>`;
+  return ui`<section class="s-section">${sLabel(t('数据与迁移'))}<div class="s-button-row">${tab('import', t('导入旧配置'))}${tab('export', t('导出配置'))}${button(t('清除应用数据'), 'data.clear', { class: 'danger' })}</div>${panel === 'export' ? exportForm : panel === 'import' ? importForm : ''}<div id="migration-preview">${migrationPreview ? renderMigrationPreview() : ''}</div><div id="operation-result" class="form-result"></div><p class="s-note">清除应用数据会删除本机保存的账号、语音服务凭据、设置、音效和备份，然后重新开始设置。</p></section>`;
 }
 
 function renderMigrationPreview() {
@@ -2600,11 +3855,12 @@ async function refreshLocalServices(force = false) {
 
 async function openSettings(tab) {
   if (qrProvider) await cancelQr();
-  if (tab) tab = settingsTabId(tab);
+  if (tab) { chooseLivePanel(tab); tab = settingsTabId(tab); }
   if (tab && tab !== settingsTab) { tabEditors.set(settingsTab, editor); settingsTab = tab; editor = tabEditors.get(tab) || null; renderSettings(); }
   else if (!settingsDialog.open || !settingsDialog.querySelector('.settings-shell')) renderSettings();
   settingsDialog.showModal();
   placeSettingsInk();
+  updateObsSettings();
   void refreshLocalServices(true);
 }
 
@@ -2655,6 +3911,12 @@ async function saveLocalDirectory(provider, directory) {
 }
 
 async function handleAction(action, id, target) {
+  if (action === 'toast.undo') {
+    const undo = toastUndo; toastUndo = null; clearTimeout(toastTimer);
+    document.querySelector('#toast').hidden = true;
+    if (undo) await undo();
+    return;
+  }
   if (action === 'speech.toggle') {
     const enabled = !!(snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled);
     await command('preferences.save', { preferences: { tts_enabled: !enabled } }, { quiet: true });
@@ -2682,7 +3944,7 @@ async function handleAction(action, id, target) {
     finally { updateBusy = false; if (settingsDialog.open && settingsTab === 'data') renderSettings(); }
     return;
   }
-  if (settingsDialog.open && !['settings.close', 'settings.tab', 'editor.cancel', 'autosave.retry', 'autosave.discard', 'draft.discard', 'overlay.preview', 'overlay.copy'].includes(action) && !action.startsWith('dictionary.')) {
+  if (settingsDialog.open && !['settings.close', 'settings.tab', 'editor.cancel', 'autosave.retry', 'autosave.discard', 'draft.discard', 'overlay.preview', 'overlay.copy', 'live.panel', 'obs.auto_detect'].includes(action) && !action.startsWith('dictionary.')) {
     const replacesSettings = ['room.anonymous', 'bili.use_account', 'bili.logout', 'bili.begin', 'doubao.begin', 'fish.restore_builtin', 'service.configure', 'service.prefer', 'service.add_preset', 'voice-audition.add', 'preset.choose_service', 'preset.default', 'preset.clear-default', 'asset.replace', 'models.refresh', 'onboarding.reset', 'migration.cancel'].includes(action)
       || /^(preset|binding)\.(new|edit|delete)$/.test(action) || action === 'asset.delete';
     if (!await (replacesSettings ? allowLeaveSettings() : flushAutosaves())) return;
@@ -2693,6 +3955,7 @@ async function handleAction(action, id, target) {
     if (!menu.hidden) { closeVoicePanel(); return; }
     document.querySelector('#queue-panel')?.setAttribute('hidden', '');
     voiceBrowse = snapshot.presets?.find(item => item.id === snapshot.rules?.default_preset_id)?.provider || 'doubao';
+    menu.classList.remove('from-orb');
     renderVoicePanel();
     menu.hidden = false;
     target?.setAttribute('aria-expanded', 'true');
@@ -2703,8 +3966,10 @@ async function handleAction(action, id, target) {
   if (action === 'voice.pick') {
     const preset = snapshot.presets.find(item => item.id === id);
     if (!preset) return;
+    if (preset.id === snapshot.rules?.default_preset_id) return;
     if (preset.provider === 'doubao' && !doubaoConnection(preset)?.has_credential) { closeVoicePanel(); return guideDoubaoLogin(preset.id); }
     await command('presets.default', { id: preset.id }, { quiet: true });
+    showToast(getLanguage() === 'en' ? `Future chat will use “${presetLabel(preset)}”.` : `之后的弹幕用「${presetLabel(preset)}」朗读`);
     renderVoicePanel();
     return;
   }
@@ -2726,8 +3991,31 @@ async function handleAction(action, id, target) {
   if (action === 'theme.toggle') {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     revealTheme(next, target);
+    updateThemeControl(); updateLakeClock();
     await command('preferences.save', { preferences: { appearance: next } }, { quiet: true });
     for (const choice of settingsDialog.querySelectorAll('input[name="appearance"]')) choice.checked = choice.value === next;
+    return;
+  }
+  if (action === 'lake.prepare') { lakeEnded = false; lakeTranscriptSignature = ''; onAirSignature = ''; updateLive(); return; }
+  if (action === 'volume.toggle') {
+    const panel = document.querySelector('#tts-menu');
+    if (!panel) return;
+    const open = panel.hidden;
+    closeVoicePanel(); closeQueuePanel();
+    panel.classList.add('from-orb');
+    if (open) renderVoicePanel();
+    panel.hidden = !open;
+    for (const trigger of document.querySelectorAll('[data-action="volume.toggle"]')) { trigger.setAttribute('aria-expanded', String(open)); trigger.setAttribute('aria-controls', 'tts-menu'); }
+    return;
+  }
+  if (action === 'history.open') {
+    closeLakeSound(); closeVoicePanel(); closeQueuePanel();
+    const dialog = document.querySelector('#lake-history-dialog');
+    if (!dialog.open) dialog.showModal();
+    const events = normalizedEvents(snapshot);
+    renderLakeHistory(events, eventKeys(events));
+    const scroll = document.querySelector('#chat-scroll');
+    setScrollTop(scroll, 0);
     return;
   }
   if (action === 'tts.select') {
@@ -2738,7 +4026,7 @@ async function handleAction(action, id, target) {
       if (id === 'doubao') {
         const connection = doubaoConnection();
         await openViewerSettings('voices', { type: 'preset', id: '', connectionId: connection.id, makePreferred: true });
-        await loadVoiceEditorData(connection.id);
+        if (!await loadVoiceEditorData(connection.id)) return;
         renderSettings();
         return;
       }
@@ -2747,21 +4035,55 @@ async function handleAction(action, id, target) {
     await command('presets.default', { id: preset.id }, { success: ui`已切换到 ${providerLabel(id)}` });
     return;
   }
-  if (action === 'viewer.open') {
-    const item = feedEvents.get(id);
+  if (action === 'audience.open') {
+    const dialog = document.querySelector('#audience-dialog');
+    if (dialog?.open && audiencePinned) { closeAudience(); return; }
+    audienceReturn = false; await closeViewerDrawer(); closeVoicePanel(); chatEmoticonsOpen = false; updateChatCompose(); openAudience(); return;
+  }
+  if (action === 'lake.pop.close') {
+    closeVoicePanel(); closeAudience(false); chatEmoticonsOpen = false; updateChatCompose();
+    if (onAirPanelMode === 'info') closeOnAirPanel();
+    updateLakePopScrim(); return;
+  }
+  if (action === 'audience.close') return closeAudience();
+  if (action === 'viewer.open' || action === 'audience.viewer') {
+    const item = action === 'audience.viewer' ? audienceEntries.get(id) : feedEvents.get(id);
     if (!item) return;
     closeVoicePanel();
     document.querySelector('#queue-panel')?.setAttribute('hidden', '');
     await flushViewerAlias();
+    if (action === 'audience.viewer') { closeAudience(false); audienceReturn = false; }
+    else audienceReturn = false;
     viewerContext = item;
+    document.querySelector('#lake-history-dialog')?.close();
+    closeLakeSound();
     viewerOpenIdentity = viewerIdentity(item);
     renderViewerDrawer();
+    void refreshViewerModeration().catch(() => updateViewerModeration());
     feedSignature = '';
     liveRenderSignature = '';
     updateLive();
     return;
   }
   if (action === 'viewer.close') return closeViewerDrawer();
+  if (action === 'viewer.at') {
+    if (!viewerContext || !snapshot.account?.user_id || snapshot.network_disabled) return;
+    const name = String(viewerContext.user_name || '').trim();
+    if (!name) return;
+    await flushViewerAlias();
+    const limit = snapshot.chat_send?.message_limit || 20;
+    chatMessageDraft = (`@${name} ${chatMessageDraft}`).slice(0, limit);
+    await closeViewerDrawer();
+    updateChatCompose();
+    const input = document.querySelector('#chat-message');
+    if (input) { input.value = chatMessageDraft; input.focus({ preventScroll: true }); }
+    return;
+  }
+  if (action === 'chat.emoticons') { chatEmoticonsOpen = !chatEmoticonsOpen; updateChatCompose(); if (chatEmoticonsOpen) return refreshChatEmoticons(); return; }
+  if (action === 'chat.emoticon.pack') return selectChatEmoticonPack(Number(id), true);
+  if (action === 'chat.emoticon.send') return sendChatMessage(id);
+  if (action === 'viewer.moderation.refresh') return refreshViewerModeration();
+  if (action.startsWith('viewer.moderation.')) return moderateViewer(action.slice('viewer.moderation.'.length));
   if (action === 'viewer.bind') return bindViewerVoice(id || '');
   if (action === 'viewer.audition') {
     const event = viewerContext;
@@ -2774,7 +4096,7 @@ async function handleAction(action, id, target) {
   }
   if (action === 'viewer.manage') {
     await flushViewerAlias();
-    viewerContext = null; viewerOpenIdentity = ''; renderViewerDrawer();
+    viewerContext = null; viewerOpenIdentity = ''; audienceReturn = false; renderViewerDrawer();
     return openSettings('voices');
   }
   if (action === 'viewer.voice' || action === 'viewer.alias') {
@@ -2811,16 +4133,61 @@ async function handleAction(action, id, target) {
     if (form) delete form.dataset.dirty;
     return runBroadcastAction('refresh');
   }
+  if (action === 'live.panel') {
+    if (!livePanels.includes(id) || id === livePanel) return;
+    livePanel = id;
+    for (const tab of settingsDialog.querySelectorAll('[data-action="live.panel"]')) tab.setAttribute('aria-selected', String(tab.dataset.id === id));
+    for (const panel of settingsDialog.querySelectorAll('[data-live-panel]')) panel.hidden = panel.dataset.livePanel !== id;
+    if (id === 'broadcast') void refreshBroadcast();
+    else { updateOverlayStatus(); updateOverlayPreview(); }
+    return;
+  }
+  if (action === 'obs.test') return testObs();
+  if (action === 'obs.launch') return launchObs();
+  if (action === 'overlay.obs_add') return addOverlayToObs();
+  if (action === 'obs.pick_executable' || action === 'obs.auto_detect') {
+    const input = target.closest('form')?.elements.executable;
+    if (!input) return;
+    let path = '';
+    if (action === 'obs.pick_executable') {
+      const pick = window.__TAURI__?.dialog?.open;
+      if (!pick) throw new Error(t('文件选择器不可用，请重新打开应用。'));
+      path = await pick({ multiple: false, title: t('选择 obs64.exe'), filters: [{ name: 'OBS Studio', extensions: ['exe'] }] });
+      if (typeof path !== 'string') return;
+      if (!/(^|[\\/])obs64\.exe$/i.test(path)) throw new Error(t('请选择 OBS 的 obs64.exe'));
+      setPickedPath(input, path);
+    } else {
+      input.value = '';
+      const label = input.closest('.path-field')?.querySelector('[data-path-value]');
+      const detected = snapshot.obs?.detected;
+      if (label) { label.textContent = detected ? ui`自动：${detected}` : t('点击选择 obs64.exe'); label.classList.add('placeholder'); }
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    const form = input.closest('form');
+    form.querySelector('[data-action="obs.auto_detect"]')?.toggleAttribute('hidden', !input.value);
+    await flushObsForm();
+    return;
+  }
+  if (action === 'obs.password.clear') {
+    await command('obs.password', { password: '' }, { success: t('已清除 OBS 密码') });
+    return;
+  }
   if (action === 'broadcast.start') return startBroadcast();
   if (action === 'broadcast.stop') return stopBroadcast();
   if (action === 'broadcast.hide') { hidePushCredentials(target.closest('[data-broadcast-scope]') || document); return; }
   if (action === 'broadcast.forget') { hidePushCredentials(); return runBroadcastAction('forget'); }
   if (action === 'broadcast.reveal' || action.startsWith('broadcast.copy.')) return revealOrCopyCredentials(action, target);
   if (action === 'onair.info') return openOnAirPanel('info');
-  if (action === 'onair.push') return openOnAirPanel('push');
+  if (action === 'onair.details') return openOnAirPanel('details');
+  if (action === 'settings.bitrate') {
+    settingsBitrateExpanded = true;
+    renderSettingsBitrate();
+    return readOnAirBitrate();
+  }
+  if (action === 'onair.bitrate.refresh') return readOnAirBitrate();
   if (action === 'onair.close') {
     const form = document.querySelector('#onair-panel form[data-dirty]');
-    if (form && !await confirmAction(t('放弃未保存的直播信息？'), t('关闭后，尚未保存的标题和分区修改会丢失。'), t('放弃修改'))) return;
+    if (form && onAirPanelMode === 'details' && !await confirmAction(t('放弃未保存的直播详情？'), t('关闭后，尚未保存的码率修改会丢失。'), t('放弃修改'))) return;
     closeOnAirPanel(true); return;
   }
   if (action === 'overlay.preview') {
@@ -2838,8 +4205,15 @@ async function handleAction(action, id, target) {
   }
   if (action === 'overlay.token.reset') {
     if (!await confirmAction(t('重新生成叠加层地址？'), t('旧地址会立即失效，OBS 里的浏览器来源需要换成新地址。'), t('重新生成'))) return;
-    await command('overlay.token.reset', {}, { success: t('已生成新地址，记得更新 OBS 里的地址') });
+    await command('overlay.token.reset', {}, { quiet: true });
     updateOverlayStatus();
+    // Connection status can be untested after restart; existing-source repair
+    // must not depend on a previous manual Test Connection result.
+    let synced = false;
+    if (snapshot.overlay?.running) {
+      try { synced = !!(await command('obs.overlay.sync', {}, { quiet: true, silent: true }))?.result?.found; } catch { /* The independent source status retains the readable error. */ }
+    }
+    showToast(synced ? t('已生成新地址，OBS 里的叠加层已同步更新') : t('已生成新地址，记得更新 OBS 里的地址'));
     return;
   }
   if (action === 'overlay.test') {
@@ -2852,16 +4226,16 @@ async function handleAction(action, id, target) {
     tabEditors.delete(settingsTab);
     tabEditors.delete(settingsTabId(id));
     aliasReturnContext = null;
+    chooseLivePanel(id);
     settingsTab = settingsTabId(id); editor = null; renderSettings();
     void refreshLocalServices(true);
     document.querySelector('#settings-content').focus({ preventScroll: true }); return;
   }
-  if (action === 'setup.start') return setStep('connect');
+  if (action === 'setup.start') return setStep('login');
   if (action === 'setup.qr') return setStep('login');
-  if (action === 'setup.uid') { await cancelQr(); return setStep('uid'); }
   if (action === 'setup.back') {
     await cancelQr();
-    const previous = { connect: 'welcome', login: 'connect', uid: 'connect', tts: 'connect', doubaoQr: 'tts', ready: 'tts' };
+    const previous = { connect: 'welcome', login: 'welcome', tts: 'login', doubaoQr: 'tts', ready: 'tts' };
     return setStep(previous[step] || 'welcome');
   }
   if (action === 'setup.doubao') { setStep('doubaoQr'); return startQr('doubao'); }
@@ -2882,7 +4256,7 @@ async function handleAction(action, id, target) {
     return;
   }
   if (action === 'data.panel') { dataPanel = dataPanel === id ? null : id; if (!dataPanel) migrationPreview = null; renderSettings(); return; }
-  if (action === 'room.anonymous') { editor = { type: 'anonymous-room' }; renderSettings(); return; }
+  if (action === 'room.anonymous' || action === 'setup.uid') throw new Error(t('请扫码登录哔哩哔哩后接收弹幕'));
   if (action === 'bili.use_account') { await command(action, {}, { success: t('已切换到你的直播间') }); editor = null; renderSettings(); return; }
   if (action === 'bili.logout') { if (await confirmAction(t('退出哔哩哔哩账号？'), t('将清除本机保存的账号凭据。'))) { await command(action, { confirmed: true }); renderSettings(); } return; }
   if (action === 'fish.open_keys' || action === 'fish.open_discovery') {
@@ -2928,7 +4302,7 @@ async function handleAction(action, id, target) {
       editor = { type: 'service', provider, makePreferred: true };
     } else {
       editor = { type: 'preset', id: '', connectionId: connection.id, makePreferred: true };
-      await loadVoiceEditorData(connection.id);
+      if (!await loadVoiceEditorData(connection.id)) return;
     }
     renderSettings();
     return;
@@ -2947,7 +4321,7 @@ async function handleAction(action, id, target) {
     if (preset) { await command('presets.default', { id: preset.id }, { success: ui`${providerLabel(id)} 已设为首选` }); updateVoiceSettings(); updateServiceIndicators(); return; }
     const connection = serviceConnection(id);
     editor = connection ? { type: 'preset', id: '', connectionId: connection.id, makePreferred: true } : { type: 'service', provider: id, makePreferred: true };
-    if (connection) await loadVoiceEditorData(connection.id);
+    if (connection) if (!await loadVoiceEditorData(connection.id)) return;
     renderSettings();
     showToast(connection ? t('先添加音色，保存后会设为首选') : t('先连接服务，再添加首选音色'));
     return;
@@ -2962,7 +4336,7 @@ async function handleAction(action, id, target) {
       return;
     }
     editor = { type: 'preset', id: '', connectionId: connection.id, makePreferred: !!editor?.makePreferred || !snapshot.rules?.default_preset_id };
-    await loadVoiceEditorData(connection.id);
+    if (!await loadVoiceEditorData(connection.id)) return;
     renderSettings(); return;
   }
   if (action === 'models.refresh') {
@@ -2970,7 +4344,7 @@ async function handleAction(action, id, target) {
     const connectionId = settingsDialog.querySelector('[data-form="preset"]')?.elements.connection_id?.value;
     if (!connectionId) throw new Error(t('请先选择 GPT-SoVITS 服务。'));
     editor.modelIndex = undefined;
-    await loadVoiceEditorData(connectionId);
+    if (!await loadVoiceEditorData(connectionId)) return;
     renderSettings(); return;
   }
   if (action === 'reference.pick_audio') {
@@ -3026,7 +4400,7 @@ async function handleAction(action, id, target) {
         showToast(t('请先连接 Fish Audio 账号'));
         return;
       }
-      if (connectionId) await loadVoiceEditorData(connectionId);
+      if (connectionId) if (!await loadVoiceEditorData(connectionId)) return;
     }
     renderSettings(); return;
   }
@@ -3040,7 +4414,7 @@ async function handleAction(action, id, target) {
       return;
     }
     editor.connectionId = connection.id;
-    await loadVoiceEditorData(connection.id);
+    if (!await loadVoiceEditorData(connection.id)) return;
     renderSettings(); return;
   }
   if (/^(preset|binding|asset)\.delete$/.test(action)) {
@@ -3095,16 +4469,30 @@ function eventFromForm(data) {
   return { room_id: snapshot.setup?.room_id || 1, user_id: uid ? numericId(uid) : null, user_name: String(data.get('user_name')), kind: String(data.get('kind')), message: String(data.get('message') || ''), gift_name: String(data.get('gift_name') || ''), quantity: Number(data.get('quantity') || 1), price_yuan: Number(data.get('price_yuan') || 0), coin_type: String(data.get('coin_type') || 'gold'), guard_name: String(data.get('guard_name') || ''), platform_event_id: null, observed_at_ms: 0 };
 }
 
+function manualVoiceFormValues(form) {
+  const data = new FormData(form);
+  return JSON.stringify(['name', 'audio_path', 'reference_text', 'reference_language', 'text_language', 'speed', 'volume']
+    .map(key => data.get(key)).concat(data.has('text_free')));
+}
+
 async function saveDotsPresetForm(form) {
   const inFlight = dotsSaves.get(form);
   if (inFlight) return inFlight;
-  const operation = saveDotsPresetFormInner(form);
+  const openedEditor = editor;
+  const operation = (async () => {
+    let savedId;
+    do { savedId = await saveDotsPresetFormInner(form); }
+    while (form.dataset.dirty && editor === openedEditor && form.isConnected !== false);
+    return savedId;
+  })();
   dotsSaves.set(form, operation);
   try { return await operation; }
   finally { dotsSaves.delete(form); }
 }
 
 async function saveDotsPresetFormInner(form) {
+  const openedEditor = editor;
+  const submitted = manualVoiceFormValues(form);
   if (!form.checkValidity()) { form.reportValidity(); throw new Error(t('请填好音色名称、参考音频、语速和音量。')); }
   const data = new FormData(form);
   const name = String(data.get('name') || '').trim();
@@ -3133,23 +4521,42 @@ async function saveDotsPresetFormInner(form) {
   if (!savedId) throw new Error(t('无法确认音色编号；请重新打开声音设置核对。'));
   if (!id) {
     form.dataset.id = savedId;
-    editor.id = savedId;
+    if (openedEditor) openedEditor.id = savedId;
   }
-  if (profile) {
+  if (profile && editor === openedEditor) {
     referenceProfiles = referenceProfiles.filter(item => item.profile?.role?.kind !== 'dots' || item.profile.role.role !== voiceId);
     referenceProfiles.push({ profile });
   }
-  if (editor?.makePreferred && !profile) {
+  if (openedEditor?.makePreferred && !profile) {
     await command('presets.default', { id: savedId }, { quiet: true, silent: true });
   }
-  if (editor) editor.makePreferred = false;
+  if (openedEditor) openedEditor.makePreferred = false;
+  if (manualVoiceFormValues(form) !== submitted) {
+    formDrafts.delete(oldKey);
+    copyFormDraft(form, { key: dotsDraftKey(form), editor: openedEditor, tab: 'voices' });
+    return savedId;
+  }
   delete form.dataset.dirty;
   formDrafts.delete(oldKey);
   formDrafts.delete(dotsDraftKey(form));
   return savedId;
 }
 
+const referenceSaves = new WeakMap();
 async function saveReferenceForm(form) {
+  if (referenceSaves.has(form)) return referenceSaves.get(form);
+  const openedEditor = editor;
+  const operation = (async () => {
+    do { await saveReferenceFormInner(form); }
+    while (form.dataset.dirty && editor === openedEditor && form.isConnected !== false);
+  })();
+  referenceSaves.set(form, operation);
+  try { await operation; } finally { referenceSaves.delete(form); }
+}
+
+async function saveReferenceFormInner(form) {
+  const submitted = manualVoiceFormValues(form);
+  const openedEditor = editor;
   const data = new FormData(form);
   const value = key => String(data.get(key) ?? '').trim();
   const checked = key => data.has(key);
@@ -3170,36 +4577,40 @@ async function saveReferenceForm(form) {
   if (provider === 'gpt_sovits' && !checked('text_free') && !value('reference_text')) throw new Error(t('请填写参考音频原文，或开启无参考文本模式。'));
   const profile = { connection_id, role, audio_path: path, reference_text: value('reference_text'), reference_language: provider === 'gpt_sovits' ? value('reference_language') : '', text_language: provider === 'gpt_sovits' ? value('text_language') : '', text_free: provider === 'gpt_sovits' && checked('text_free') };
   await command('references.save', { profile }, { quiet: true, silent: true });
-  if (editor?.makePreferred) {
+  if (openedEditor?.makePreferred) {
     const id = presetForm.dataset.id;
     if (!id) throw new Error(t('音色尚未创建成功，请重试。'));
     await command('presets.default', { id }, { quiet: true, silent: true });
-    editor.makePreferred = false;
+    openedEditor.makePreferred = false;
     const record = autosaves.get(presetForm);
     if (record?.editor) record.editor.makePreferred = false;
   }
   const listed = await command('references.list', { connection_id }, { quiet: true });
-  referenceProfiles = Array.isArray(listed.result) ? listed.result : [];
-  delete form.dataset.dirty;
+  if (editor === openedEditor) referenceProfiles = Array.isArray(listed.result) ? listed.result : [];
+  if (manualVoiceFormValues(form) === submitted) delete form.dataset.dirty;
   showToast(t('角色参考设置已保存'));
 }
 
 async function handleForm(form, submitter) {
   const type = form.dataset.form;
+  if (type === 'chat-send') return sendChatMessage();
   if (type === 'broadcast-room') return saveBroadcastForm(form);
+  if (type === 'onair-bitrate') return saveOnAirForm(form);
+  if (type === 'obs-password') {
+    const input = form.elements.password;
+    if (!input.value) throw new Error(t('请输入 OBS WebSocket 密码'));
+    try { await command('obs.password', { password: input.value }, { success: t('OBS 密码已加密保存') }); }
+    finally { input.value = ''; }
+    updateObsSettings();
+    return;
+  }
   const data = new FormData(form);
   const value = key => String(data.get(key) ?? '').trim();
   const number = key => Number(data.get(key));
   const checked = key => data.has(key);
   const id = form.dataset.id || '';
   if (type === 'language') { await changeLanguage(value('language')); return; }
-  if (type === 'anonymous' || type === 'room-uid') {
-    const uid = value('uid');
-    if (!validUid(uid)) throw new Error(t('请输入有效的主播 UID。'));
-    await cancelQr(); await command('onboarding.anonymous', { uid });
-    if (type === 'anonymous') setStep('tts'); else { renderSettings(); showToast(t('直播间已保存')); }
-    return;
-  }
+  if (type === 'anonymous' || type === 'room-uid') throw new Error(t('请扫码登录哔哩哔哩后接收弹幕'));
   if (type === 'voice-audition') {
     const preset = snapshot.presets.find(item => item.id === value('preset_id') && item.provider === form.dataset.provider);
     const text = value('text');
@@ -3259,13 +4670,17 @@ async function handleForm(form, submitter) {
     if (preset.provider === 'gpt_sovits') preset.sovits = { model_selection: value('model_selection'), gpt_weights_path: value('gpt_weights_path') || null, sovits_weights_path: value('sovits_weights_path') || null, reference_text: value('reference_text'), reference_text_free: checked('reference_text_free'), reference_language: value('reference_language'), text_language: value('text_language'), split: value('split'), top_k: number('top_k'), top_p: number('top_p'), temperature: number('temperature'), sample_steps: number('sample_steps'), super_sampling: checked('super_sampling'), fragment_interval_secs: number('fragment_interval_secs') };
     await command('presets.save', { preset }, { success: t('声音预设已保存') }); editor = null;
   } else if (type === 'dots-preset') {
+    const openedEditor = editor;
     await saveDotsPresetForm(form);
+    if (editor !== openedEditor || form.dataset.dirty) return;
     editor = null;
     renderSettings();
     showToast(t('音色已保存'));
     return;
   } else if (type === 'reference') {
+    const openedEditor = editor;
     await saveReferenceForm(form);
+    if (editor !== openedEditor || form.dataset.dirty) return;
     renderSettings();
     return;
   } else if (type === 'binding') {
@@ -3338,45 +4753,60 @@ async function handleForm(form, submitter) {
 }
 
 document.addEventListener('click', async event => {
+  const soundPanel = document.querySelector('#lake-sound-panel');
+  if (soundPanel && !soundPanel.hidden && !soundPanel.contains(event.target) && !event.target.closest('[data-action="volume.toggle"]')) closeLakeSound();
   const ttsMenu = document.querySelector('#tts-menu');
-  if (ttsMenu && !ttsMenu.hidden && !ttsMenu.contains(event.target) && !event.target.closest('[data-action="tts.open"]')) closeVoicePanel();
+  if (ttsMenu && !ttsMenu.hidden && !ttsMenu.contains(event.target) && !event.target.closest('[data-action="tts.open"], [data-action="volume.toggle"]')) closeVoicePanel();
   const queuePanel = document.querySelector('#queue-panel');
   if (queuePanel && !queuePanel.hidden && !queuePanel.contains(event.target) && !event.target.closest('[data-action="queue.toggle"]')) {
     closeQueuePanel();
   }
   const onAirPanel = document.querySelector('#onair-panel');
-  if (onAirPanel && !onAirPanel.hidden && !onAirPanel.contains(event.target) && !event.target.closest('.select-menu, #onair, #confirmation')) {
-    if (!onAirPanel.querySelector('form[data-dirty]')) closeOnAirPanel();
+  if (onAirPanel && !onAirPanel.hidden && !onAirPanel.contains(event.target) && !event.target.closest('.select-menu, #onair, #lake-title, #confirmation')) {
+    if (onAirPanelMode !== 'details' || !onAirPanel.querySelector('form[data-dirty]')) closeOnAirPanel();
   }
   const target = event.target.closest('[data-action]');
-  if (!target || target.disabled) return;
+  if (!target || target.disabled) { updateLakePopScrim(); return; }
   const wasDisabled = target.disabled;
   target.disabled = true;
   try { await handleAction(target.dataset.action, target.dataset.id, target); }
   catch (error) { showError(error); }
   finally {
+    updateLakePopScrim();
     if (target.isConnected) {
       target.disabled = wasDisabled;
       if (['service.start', 'service.stop', 'service.check'].includes(target.dataset.action)) updateServiceIndicators();
+      if (target.dataset.action.startsWith('chat.emoticon')) updateChatCompose();
     }
   }
 });
 
 document.addEventListener('compositionstart', event => {
-  if (event.target.id === 'viewer-alias') composingInputs.add(event.target);
+  if (event.target.id === 'viewer-alias' || event.target.id === 'chat-message') composingInputs.add(event.target);
+  if (event.target.closest?.('#onair-panel[data-mode="info"]')) composingInputs.add(event.target);
 });
 document.addEventListener('compositionend', event => {
+  if (event.target.closest?.('#onair-panel[data-mode="info"]')) composingInputs.delete(event.target);
   if (event.target.id === 'viewer-alias') { composingInputs.delete(event.target); scheduleViewerAlias(event.target.value); }
+  if (event.target.id === 'chat-message') { composingInputs.delete(event.target); chatMessageDraft = event.target.value; }
 });
 
 document.addEventListener('input', event => {
+  if (event.target.id === 'chat-message') { chatMessageDraft = event.target.value; return; }
+  const detailsForm = event.target.closest?.('form[data-form="onair-bitrate"]');
+  if (detailsForm) { detailsForm.dataset.dirty = 'true'; return; }
   const broadcastForm = event.target.closest?.('form[data-form="broadcast-room"]');
   if (broadcastForm) {
     broadcastForm.dataset.dirty = 'true';
     if (event.target.name === 'title') {
       const count = broadcastForm.querySelector('[data-title-count]');
       const length = Array.from(event.target.value.trim()).length;
-      if (count) { count.textContent = `${length}/40`; count.classList.toggle('over', length > 40 || !length); }
+      if (count) {
+        const digits = count.querySelector('[data-count-number]');
+        if (digits) digits.textContent = String(Array.from(event.target.value).length);
+        else count.textContent = `${length}/40`;
+        count.classList.toggle('over', length > 40 || !length);
+      }
     }
     return;
   }
@@ -3406,24 +4836,46 @@ document.addEventListener('mousedown', event => {
 });
 
 document.addEventListener('keydown', event => {
+  if ((event.key === 'Enter' || event.key === ' ') && event.target.matches?.('.chat-hit[role="button"]')) { event.preventDefault(); event.target.click(); return; }
+  if (event.target.closest?.('#onair-panel[data-mode="info"]') && event.key === 'Enter' && (event.isComposing || event.keyCode === 229 || composingInputs.has(event.target))) { event.preventDefault(); return; }
+  if (event.target.closest?.('#onair-panel[data-mode="info"]') && event.key === 'Enter' && !event.target.closest('.select-menu') && !event.isComposing && event.keyCode !== 229 && !composingInputs.has(event.target)) {
+    event.preventDefault();
+    const form = event.target.closest('form[data-form="broadcast-room"]');
+    if (form && !broadcastBusy) void saveBroadcastForm(form).catch(showError);
+    return;
+  }
+  if (event.target.id === 'chat-message' && event.key === 'Enter' && (event.isComposing || event.keyCode === 229 || composingInputs.has(event.target))) { event.preventDefault(); return; }
   if (event.key !== 'Escape' || settingsDialog.open || confirmationDialog.open) return;
+  if (document.querySelector('#audience-dialog')?.open) { event.preventDefault(); closeAudience(); return; }
+  if (chatEmoticonsOpen) { event.preventDefault(); chatEmoticonsOpen = false; updateChatCompose(); updateLakePopScrim(); return; }
+  const soundPanel = document.querySelector('#tts-menu');
+  if (soundPanel && !soundPanel.hidden && soundPanel.classList.contains('from-orb')) { closeLakeSound(); updateLakePopScrim(); document.querySelector('.lake-orb')?.focus(); return; }
   if (viewerContext) { event.preventDefault(); void closeViewerDrawer().catch(showError); return; }
   const ttsMenu = document.querySelector('#tts-menu');
-  if (ttsMenu && !ttsMenu.hidden) { closeVoicePanel(); document.querySelector('#tts-switch')?.focus(); return; }
+  if (ttsMenu && !ttsMenu.hidden) { closeVoicePanel(); updateLakePopScrim(); document.querySelector('#tts-switch')?.focus(); return; }
   const queuePanel = document.querySelector('#queue-panel');
   if (queuePanel && !queuePanel.hidden) { closeQueuePanel(true); return; }
-  if (!document.querySelector('#onair-panel')?.hidden) void handleAction('onair.close').catch(showError);
+  const onAirPanel = document.querySelector('#onair-panel');
+  if (onAirPanel && !onAirPanel.hidden) void handleAction('onair.close').then(updateLakePopScrim).catch(showError);
 });
 
 document.addEventListener('error', event => {
   if (event.target.classList?.contains('avatar-photo') || event.target.classList?.contains('account-photo')) event.target.remove();
-  else if (event.target.classList?.contains('message-emote')) event.target.replaceWith(document.createTextNode(event.target.alt));
+  else if (event.target.classList?.contains('message-emote')) {
+    const fallback = document.createElement('span');
+    fallback.className = `${event.target.className} emote-unavailable`;
+    fallback.setAttribute('role', 'img');
+    fallback.setAttribute('aria-label', event.target.getAttribute('aria-label') || t('表情包'));
+    fallback.innerHTML = chatEmoticonImageFallback();
+    event.target.replaceWith(fallback);
+  }
 }, true);
 
 document.addEventListener('submit', async event => {
   const form = event.target.closest('[data-form]');
   if (!form) return;
   event.preventDefault();
+  if (form.dataset.form === 'chat-send' && composingInputs.has(form.querySelector('#chat-message'))) return;
   if (autoFormTypes.has(form.dataset.form)) {
     scheduleAutosave(form, true);
     try { await autosaves.get(form)?.queue.flush(); } catch { /* Inline status owns this error. */ }
@@ -3435,11 +4887,22 @@ document.addEventListener('submit', async event => {
   if (submitter) submitter.disabled = true;
   try { clearError(); await handleForm(form, submitter); }
   catch (error) { showError(error); }
-  finally { delete form.dataset.busy; form.removeAttribute('aria-busy'); if (submitter?.isConnected) submitter.disabled = false; }
+  finally {
+    delete form.dataset.busy;
+    form.removeAttribute('aria-busy');
+    if (submitter?.isConnected) submitter.disabled = false;
+    if (form.dataset.form === 'chat-send') updateChatCompose();
+  }
 });
 
 settingsDialog.addEventListener('cancel', event => { event.preventDefault(); void closeSettings(); });
 settingsDialog.addEventListener('compositionstart', event => { composingInputs.add(event.target); });
+// Remember the person's own unfolding of the OBS connection details across re-renders.
+// (A details element rendered open also fires "toggle", so only summary clicks count.)
+settingsDialog.addEventListener('click', event => {
+  const details = event.target.closest?.('[data-obs-more] > summary')?.parentElement;
+  if (details) obsDetailsOpen = !details.open;
+});
 settingsDialog.addEventListener('compositionend', event => {
   composingInputs.delete(event.target);
   const form = event.target.closest('[data-form]');
@@ -3529,7 +4992,7 @@ settingsDialog.addEventListener('change', async event => {
       }
       editor.connectionId = connection?.id;
       editor.modelIndex = undefined;
-      try { await loadVoiceEditorData(connection?.id); renderSettings(); } catch (error) { showError(error); }
+      try { if (!await loadVoiceEditorData(connection?.id)) return; renderSettings(); } catch (error) { showError(error); }
       return;
     }
   }
@@ -3546,7 +5009,7 @@ settingsDialog.addEventListener('focusout', event => {
   if (form && autosaves.get(form)?.touched && !composingInputs.has(event.target)) scheduleAutosave(form, true);
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyAppearance);
-window.addEventListener('pagehide', () => { disposed = true; clearFoldingRows(); stopQrPolling(); closeSelect(); clearTimeout(snapshotTimer); clearTimeout(fallbackStatusTimer); });
+window.addEventListener('pagehide', () => { disposed = true; cancelAnimationFrame(lakePresentationFrame); lakePresentationFrame = 0; clearInterval(lakeClockTimer); clearFoldingRows(); stopQrPolling(); closeSelect(); clearTimeout(snapshotTimer); clearTimeout(fallbackStatusTimer); });
 function refreshVisibility() {
   const active = uiIsActive(nativeActive, windowFocused, document.hidden);
   if (active === effectiveActive) return;
@@ -3562,8 +5025,12 @@ function refreshVisibility() {
       renderFeed([...feedEvents.values()], [...feedEvents.keys()]);
     }
   }
-  else if (qrProvider && !qrBusy && !qrFailure && ['waiting', 'scanned'].includes(snapshot?.qr?.status)) scheduleQrPoll(qrProvider, qrGeneration);
+  else {
+    restoreLakePresentation();
+    if (qrProvider && !qrBusy && !qrFailure && ['waiting', 'scanned'].includes(snapshot?.qr?.status)) scheduleQrPoll(qrProvider, qrGeneration);
+  }
 }
+window.addEventListener('resize', () => { if (document.querySelector('#audience-dialog')?.open) placeAudience(); }, { passive: true });
 window.addEventListener('focus', () => { windowFocused = true; refreshVisibility(); });
 window.addEventListener('blur', () => { windowFocused = false; refreshVisibility(); });
 document.addEventListener('visibilitychange', refreshVisibility);

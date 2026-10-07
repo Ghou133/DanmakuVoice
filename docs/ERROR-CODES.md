@@ -59,6 +59,7 @@
 | `DV-S35` | `storage.rs / StorageError::InvalidAuditionText` | 试听文本不能为空、不能超过 2000 字，且不能包含控制字符 |
 | `DV-S36` | `storage.rs / StorageError::DataResetBusy` | 数据已重置，但数据库仍被其他实例占用；请关闭其他实例后重新清除 |
 | `DV-S37` | `storage.rs / StorageError::InvalidOverlaySettings` | OBS 叠加层设置超出范围（标题为空或过长、大小/暗角/停留时间越界、端口或令牌格式不对） |
+| `DV-S38` | `storage.rs / StorageError::InvalidObsSettings`；`broadcast.rs` OBS 联动命令 | OBS 联动设置无效：地址不是主机名/IPv4、端口为 0、密码超过 256 字或含控制字符，或命令载荷不完整 |
 | `DV-K01` | `secrets.rs / SecretError::Empty` | 凭据为空 |
 | `DV-K02` | `secrets.rs / SecretError::TooLarge` | 凭据超过系统加密接口的长度限制 |
 | `DV-K03` | `secrets.rs / SecretError::Protect` | Windows 凭据保护失败：{0} |
@@ -182,6 +183,7 @@
 | `DV-X13` | 程序启动失败 |
 | `DV-X14` | 缺少 WebView2 Runtime |
 | `DV-X17` | OBS 叠加层设置、地址重新生成或测试内容 |
+| `DV-X18` | OBS 联动设置、密码、测试连接、启动 OBS（如 OBS 设在其他电脑）或叠加层添加到 OBS |
 | `DV-U01` | GitHub 更新检查 |
 | `DV-UI01` | 前端校验/操作失败，没有更具体的后端代码 |
 | `DV-UI02` | 桌面 IPC / 界面启动失败，没有更具体的后端代码 |
@@ -207,3 +209,28 @@
 ## B站开播管理补充
 
 `DV-B10` 表示开播管理命令的前置条件或状态问题：尚未扫码登录、未确认操作、没有可用推流信息、请求正在处理中或账号已变更。B站 HTTP/协议/权限错误继续保留 `DV-B03` / `DV-B04` / `DV-B05` / `DV-B09`，不输出原始响应或推流密钥。使用方法见 [BROADCAST.md](BROADCAST.md)。
+
+## OBS 联动（开播台，实验性）
+
+`obs.rs` 通过 obs-websocket 5.x（OBS 28+ 自带）短暂连接 OBS，不订阅事件。可见前台的 OBS 设置页最多每 15 秒只读检测一次；本机叠加层启动或地址变化也可受限修复已有来源。`idle` 表示尚未检测，`ok/error` 为实际连接结果，`status.overlay_sync` 单独报告来源同步。消息不包含 WebSocket 密码或推流码。
+
+| 代码 | 定位 | 含义 |
+|---|---|---|
+| `DV-OB01` | `obs.rs / ObsError::Connect` | 无法连接 OBS：OBS 未打开、未开启 WebSocket 服务器、端口不一致，或该端口不是 obs-websocket；括号内为连接被拒绝/超时/握手失败等原因 |
+| `DV-OB02` | `obs.rs / ObsError::PasswordRequired` | OBS 开启了身份验证，但弹幕姬没有保存密码 |
+| `DV-OB03` | `obs.rs / ObsError::AuthenticationFailed` | OBS 以 4009 关闭连接：密码不正确 |
+| `DV-OB04` | `obs.rs / ObsError::Protocol` | OBS 返回的数据不符合 obs-websocket 5.x（多为 OBS 版本过旧或端口上是其他程序） |
+| `DV-OB05` | `obs.rs / ObsError::Request` | OBS 拒绝了某一步（读取状态、写入推流设置、开始/停止推流）；保留 OBS 的状态码和说明 |
+| `DV-OB06` | `obs.rs / ObsError::Timeout` | 连接 5 秒或单步 8 秒内无响应 |
+| `DV-OB07` | `obs.rs / ObsError::InvalidSettings` | 保存的地址或端口无法组成 `ws://主机:端口` |
+| `DV-OB08` | `obs.rs / ObsError::NotInstalled` | 找不到 OBS 程序：注册表、默认安装目录和 Steam 默认库都没有 `obs64.exe`，或手选的文件已不存在/不叫 `obs64.exe` |
+| `DV-OB09` | `obs.rs / ObsError::Launch` | 启动 `obs64.exe` 失败；保留系统原因（文件不存在、无权限或系统错误号） |
+| `DV-OB10` | `obs.rs / ObsError::NotReady` | 刚启动的 OBS 在等待时间内没有连上 WebSocket：未开启 WebSocket 服务器、端口不一致，或 OBS 正显示安全模式等提示窗口 |
+| `DV-OB11` | `obs.rs / ObsError::Bitrate` | 码率范围无效、当前为高级输出模式、输出模式或配置档在操作中变更，或保存后的读回值不符；保存的是下次开播使用的配置 |
+| `DV-OB12` | `obs.rs / ObsError::OverlayConflict` | 同名来源不是本应用受管的本机浏览器来源，拒绝覆盖 |
+| `DV-OB13` | `obs.rs / ObsError::OverlayRemote` | OBS 在其他电脑上，无法使用弹幕姬的本机 loopback 叠加层地址 |
+| `DV-OB14` | `desktop / OBS_ACTIVITY_CANCELLED` | OBS 设置、密码或叠加层地址在等待中变更，旧请求已取消 |
+
+开播时 OBS 失败不会撤销已打开的直播间：命令成功返回，`result.obs.error` 带上述代码，界面提示检查「设置 → OBS 与开播」，右上角不显示推流码。下播时 OBS 失败也不阻止关闭直播间；若 OBS 已停推但关闭直播间失败，错误以“OBS 已停止推流，但……”开头并保留 B站代码。
+
+直播间用户管理沿用 B站 `DV-B03` / `DV-B04` / `DV-B05` / `DV-B09` 与命令边界 `DV-X01`，保留权限拒绝及平台数值错误码，不记录原始响应、Cookie 或用户名。

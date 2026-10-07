@@ -2,6 +2,12 @@
 //! The engine owns rules, credentials, live packets and the single playback FIFO.
 #[path = "broadcast.rs"]
 mod broadcast;
+#[path = "broadcast_sessions.rs"]
+mod broadcast_sessions;
+#[path = "chat_send.rs"]
+mod chat_send;
+#[path = "moderation.rs"]
+mod moderation;
 use crate::embedded_ffmpeg;
 use crate::local_service::{self, Endpoint, Health, Kind, LocalServices};
 use crate::overlay::{AssetLoader, OverlayHub, OverlayServer};
@@ -16,12 +22,13 @@ use danmakuvoice_engine::{
     },
     migration::{self, LegacyImportOptions},
     model::{EventKind, LiveEvent, Provider, VoiceBinding, VoicePreset},
+    obs::ObsSettings,
     playback::{PlaybackExecutor, PreparedPlayback},
     rules::{RulePreview, RuleSet},
     scheduler::{self, JobOrigin, QueueSnapshot, SchedulerHandle, SpeechJob},
     storage::{
         ConnectionSettings, DataStore, DesktopPreferences, OverlayNames, OverlaySettings,
-        ServiceConnection,
+        OverlayStyle, ServiceConnection, StorageError,
     },
     tts::{
         dobao::{self, DEFAULT_VOICE_ID},
@@ -47,6 +54,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+const ANONYMOUS_DISABLED: &str = "匿名模式已关闭，请先扫码登录 B 站账号";
+
 pub struct LaunchOptions {
     pub data_dir: PathBuf,
     pub disable_network: bool,
@@ -54,12 +63,7 @@ pub struct LaunchOptions {
 
 impl LaunchOptions {
     pub fn default_data_dir() -> Result<PathBuf, String> {
-        std::env::var_os("LOCALAPPDATA")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .map(|path| path.join("DanmakuVoice"))
-            .ok_or_else(|| "无法找到 Windows AppData 目录，请检查用户环境".into())
+        crate::app_data::default_directory()
     }
 
     pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self, String> {
@@ -130,12 +134,18 @@ struct Controller {
     prefs: DesktopPreferences,
     local_services: LocalServices,
     network_disabled: bool,
+    shutdown: CancellationToken,
     status: String,
     status_error: bool,
     bili_user_id: Option<u64>,
     bili_profile: Option<BiliAccountProfile>,
     bili_profile_epoch: u64,
     broadcast: broadcast::BroadcastState,
+    broadcast_session: broadcast_sessions::BroadcastSessionTracker,
+    broadcast_receiver_epoch: u64,
+    broadcast_receiver_started_at: u64,
+    moderation: moderation::ModerationState,
+    chat_send: chat_send::ChatSendState,
     qr: QrView,
     qr_generation: u64,
     qr_cancel: CancellationToken,
@@ -173,18 +183,28 @@ struct Controller {
     migration: Option<(PathBuf, LegacyPreview)>,
     overlay_settings: OverlaySettings,
     overlay_hub: Arc<OverlayHub>,
+    overlay_broadcast_observation: Option<broadcast_sessions::OverlayBroadcastObservation>,
     overlay_server: Option<OverlayServer>,
     overlay_error: Option<String>,
     overlay_assets: Option<AssetLoader>,
+    /// Experimental: drive OBS through obs-websocket on go-live/end.
+    obs_settings: ObsSettings,
+    obs_has_password: bool,
+    /// Detected obs64.exe (registry or default folders), for display only.
+    obs_detected: Option<String>,
+    /// Last measured transport status and separate managed-source sync result.
+    obs_status: Value,
+    obs_activity: broadcast::ObsActivity,
 }
 
-/// Progress of the overlay feed between ticks. Only live results after the
-/// moment a page connected are sent; older chat stays in the app.
+/// Progress of the overlay feed between ticks. It keeps a bounded replay while
+/// the server is enabled, including when OBS temporarily closes its source.
 #[derive(Default)]
 pub struct OverlayCursor {
     controller: usize,
     last: Option<ProcessedLiveEvent>,
     primed: bool,
+    session: u64,
 }
 
 impl Application {
@@ -198,11 +218,17 @@ impl Application {
     }
     pub fn new(data_dir: PathBuf, network_disabled: bool) -> Result<Self, String> {
         let store = DataStore::open(&data_dir).map_err(display)?;
-        let prefs = store.load_desktop_preferences().map_err(display)?;
+        let mut prefs = store.load_desktop_preferences().map_err(display)?;
+        // Keep legacy room/UID choices, but never restore anonymous reception.
+        // This preference expresses the required mode, not a logged-in session.
+        prefs.authenticated = true;
         // A damaged overlay record must not stop the app; it reverts to off.
         let overlay_settings = store.load_overlay_settings().unwrap_or_default();
         let overlay_hub = OverlayHub::new();
         overlay_hub.set_config(overlay_config(&overlay_settings));
+        // Like the overlay, a damaged OBS record reverts to off instead of blocking startup.
+        let obs_settings = store.load_obs_settings().unwrap_or_default();
+        let obs_has_password = store.has_obs_password().unwrap_or(false);
         let bili_session = store.load_bili_session().ok().flatten();
         let bili_user_id = bili_session.as_ref().map(BiliSession::user_id);
         let bili_profile = bili_session
@@ -223,12 +249,18 @@ impl Application {
             prefs,
             local_services,
             network_disabled,
+            shutdown: CancellationToken::new(),
             status: String::new(),
             status_error: false,
             bili_user_id,
             bili_profile,
             bili_profile_epoch: 0,
             broadcast: broadcast::BroadcastState::default(),
+            broadcast_session: broadcast_sessions::BroadcastSessionTracker::default(),
+            broadcast_receiver_epoch: 0,
+            broadcast_receiver_started_at: 0,
+            moderation: moderation::ModerationState::default(),
+            chat_send: chat_send::ChatSendState::default(),
             qr: QrView {
                 status: "idle",
                 ..Default::default()
@@ -266,9 +298,15 @@ impl Application {
             migration: None,
             overlay_settings,
             overlay_hub,
+            overlay_broadcast_observation: None,
             overlay_server: None,
             overlay_error: None,
             overlay_assets: None,
+            obs_settings,
+            obs_has_password,
+            obs_detected: broadcast::detect_obs(),
+            obs_status: json!({"state": "idle"}),
+            obs_activity: broadcast::ObsActivity::default(),
         })));
         app.lock()?.ensure_first_default(None)?;
         app.lock()?.ensure_overlay_token()?;
@@ -306,7 +344,7 @@ impl Application {
     {
         let (epoch, mut session) = {
             let state = self.lock()?;
-            if state.network_disabled {
+            if state.shutdown.is_cancelled() || state.network_disabled {
                 return Ok(());
             }
             let Some(session) = state.store.load_bili_session().map_err(display)? else {
@@ -314,7 +352,12 @@ impl Application {
             };
             (state.bili_profile_epoch, session)
         };
-        let profile = lookup(session.clone()).await?;
+        let shutdown = self.shutdown_token()?;
+        let profile = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Ok(()),
+            result = lookup(session.clone()) => result?,
+        };
         session.set_profile(profile).map_err(display)?;
         let mut state = self.lock()?;
         if state.bili_profile_epoch != epoch || state.bili_user_id != Some(session.user_id()) {
@@ -328,7 +371,11 @@ impl Application {
     }
 
     fn require_network(&self) -> Result<(), String> {
-        if self.lock()?.network_disabled {
+        let state = self.lock()?;
+        if state.shutdown.is_cancelled() {
+            return Err("程序正在退出".into());
+        }
+        if state.network_disabled {
             Err("这是离线测试窗口。请关闭此窗口后直接打开正式程序。".into())
         } else {
             Ok(())
@@ -341,7 +388,8 @@ impl Application {
     /// disconnects clear the pending reconnect in `stop`.
     pub async fn reconcile_default_output(&self) {
         let change_epoch = match self.lock() {
-            Ok(state) => (state.prefs.output == audio::OutputSelection::Default
+            Ok(state) => (!state.shutdown.is_cancelled()
+                && state.prefs.output == audio::OutputSelection::Default
                 && !state.reconfiguring
                 && !state.stopping
                 && !state.connecting
@@ -382,6 +430,9 @@ impl Application {
                 return;
             }
             if let Ok(mut state) = self.lock() {
+                if state.shutdown.is_cancelled() {
+                    return;
+                }
                 state.audio = None;
                 state.scheduler = None;
                 state.devices = devices_json();
@@ -401,7 +452,8 @@ impl Application {
         let resume_epoch = self
             .lock()
             .map(|state| {
-                (state.resume_live_after_default_device_change
+                (!state.shutdown.is_cancelled()
+                    && state.resume_live_after_default_device_change
                     && state.explicit_stop_epoch == state.default_device_resume_epoch
                     && state.prefs.output == audio::OutputSelection::Default
                     && !state.reconfiguring
@@ -425,7 +477,8 @@ impl Application {
         // connection attempts while a device exists but its driver is not
         // yet able to start a CPAL stream.
         if let Ok(mut state) = self.lock() {
-            if state.explicit_stop_epoch != resume_epoch
+            if state.shutdown.is_cancelled()
+                || state.explicit_stop_epoch != resume_epoch
                 || !state.resume_live_after_default_device_change
             {
                 return;
@@ -476,6 +529,9 @@ impl Application {
     /// the overlay starts if the user enabled it earlier.
     pub async fn start_overlay(&self, assets: AssetLoader) {
         if let Ok(mut state) = self.lock() {
+            if state.shutdown.is_cancelled() {
+                return;
+            }
             state.overlay_assets = Some(assets);
         }
         let _ = self.apply_overlay().await;
@@ -508,7 +564,7 @@ impl Application {
         };
         let bound = OverlayServer::bind(port, hub, assets).await;
         let mut state = self.lock()?;
-        if !state.overlay_settings.enabled {
+        if state.shutdown.is_cancelled() || !state.overlay_settings.enabled {
             return Ok(());
         }
         match bound {
@@ -524,6 +580,11 @@ impl Application {
                 }
                 state.overlay_server = Some(server);
                 state.overlay_error = None;
+                // The bound port may differ from the saved one. Repair only an
+                // already managed OBS source after the feed can start.
+                state.invalidate_obs_activity(false);
+                drop(state);
+                self.schedule_existing_obs_overlay();
                 Ok(())
             }
             Err(error) => {
@@ -542,30 +603,73 @@ impl Application {
                 .store
                 .save_overlay_settings(&merged)
                 .map_err(display)?;
+            if state.overlay_settings.enabled != merged.enabled
+                || state.overlay_settings.port != merged.port
+            {
+                state.invalidate_obs_activity(false);
+            }
             state.overlay_hub.set_config(overlay_config(&merged));
             state.overlay_settings = merged;
         }
         self.apply_overlay().await
     }
 
-    /// Feed connected overlay pages. Runs for the app lifetime but does no
-    /// work while the overlay is off or no OBS page is connected.
+    fn save_overlay_title(&self, payload: &Value) -> Result<(), String> {
+        let title = required_str(payload, "title")?.trim();
+        if !(1..=12).contains(&title.chars().count()) {
+            return Err("叠加层主标题须为 1–12 个字".into());
+        }
+        let mut state = self.lock()?;
+        if !state.overlay_settings.enabled {
+            return Err("请先启用 OBS 叠加层".into());
+        }
+        let mut settings = state.overlay_settings.clone();
+        settings.title = title.to_owned();
+        state
+            .store
+            .save_overlay_settings(&settings)
+            .map_err(display)?;
+        state.overlay_hub.set_config(overlay_config(&settings));
+        state.overlay_settings = settings;
+        Ok(())
+    }
+
+    /// Feed pages and independently recover a previously managed OBS source.
+    /// Neither the feed nor recovery depends on a visible settings panel.
     pub async fn run_overlay_feed(&self) {
+        let Ok(shutdown) = self.shutdown_token() else {
+            return;
+        };
         let mut cursor = OverlayCursor::default();
         let mut interval = tokio::time::interval(Duration::from_millis(150));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut recovery = tokio::time::interval(broadcast::OBS_RECOVERY_INTERVAL);
+        recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
-            if self.overlay_tick(&mut cursor).is_err() {
-                return;
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return,
+                _ = interval.tick() => {
+                    if self.overlay_tick(&mut cursor).is_err() { return; }
+                }
+                scheduled = recovery.tick() => self.schedule_obs_overlay_recovery_at(false,scheduled),
             }
         }
     }
 
     pub(crate) fn overlay_tick(&self, cursor: &mut OverlayCursor) -> Result<(), String> {
-        let (hub, settings, live, current, writer, tts, connecting) = {
+        let (
+            hub,
+            settings,
+            live,
+            current,
+            writer,
+            tts,
+            connecting,
+            (mut session, mut replay_after_ms),
+        ) = {
             let state = self.lock()?;
-            if state.overlay_server.is_none() || !state.overlay_hub.has_clients() {
+            if state.overlay_server.is_none() {
                 cursor.primed = false;
                 return Ok(());
             }
@@ -580,6 +684,7 @@ impl Application {
                 state.audio.as_ref().map(|audio| audio.writer.clone()),
                 state.prefs.tts_enabled,
                 state.connecting,
+                state.overlay_hub.replay_boundary(),
             )
         };
         let snapshot = live.as_ref().map(|live| live.snapshot());
@@ -600,28 +705,31 @@ impl Application {
         if key != cursor.controller {
             cursor.controller = key;
             cursor.last = None;
-            if cursor.primed {
-                hub.clear_items();
+            // connect/stop normally clear synchronously. This still covers
+            // other receiver replacements without advancing the session twice.
+            if cursor.primed
+                && cursor.session == session
+                && let Some(boundary) = hub.clear_session_items(session)
+            {
+                (session, replay_after_ms) = boundary;
             }
         }
+        cursor.session = session;
+        let current = overlay_reading_job(current, replay_after_ms);
+        let reading_job = current.as_ref().map(|job| job.id);
         if let Some(snapshot) = &snapshot {
-            let results = &snapshot.recent_results;
-            let start = overlay_feed_start(
-                results,
-                cursor.primed.then_some(cursor.last.as_ref()),
+            publish_overlay_results(
+                &hub,
+                &settings,
+                cursor,
+                &snapshot.recent_results,
                 now_ms(),
-                u64::from(settings.linger_seconds) * 1000,
+                (session, replay_after_ms),
+                reading_job,
             );
-            for result in &results[start..] {
-                if let Some(item) = overlay_item(result, &settings) {
-                    hub.publish_item(item);
-                }
-            }
-            cursor.last = results.last().cloned();
         }
         cursor.primed = true;
         let reading = current
-            .filter(|job| job.origin == JobOrigin::Live)
             .map(|job| {
                 let progress = writer
                     .as_ref()
@@ -636,7 +744,7 @@ impl Application {
                 })
             })
             .unwrap_or(Value::Null);
-        hub.set_reading(reading);
+        hub.set_session_reading(reading, session);
         Ok(())
     }
 
@@ -717,6 +825,7 @@ impl Application {
             .as_ref()
             .map(|live| live.snapshot())
             .unwrap_or_else(|| state.last_live.clone());
+        state.observe_broadcast_received(&live, broadcast_sessions::observed_now())?;
         // Between a speech-mode stop and the restarted session, the stopped
         // session's events are already part of the carried chat.
         let events = if state.live.is_none() && !state.carried_events.is_empty() {
@@ -745,16 +854,28 @@ impl Application {
             "config_revision": state.config_revision,
             "config_unchanged": config_unchanged,
             "onboarding_done":state.prefs.onboarding_done,
-            "setup":{"mode":if state.prefs.authenticated {"account"} else {"anonymous"},"uid":state.prefs.broadcaster_uid,"room_id":room,"tts_enabled":state.prefs.tts_enabled},
+            "setup":{"mode":"account","uid":state.prefs.broadcaster_uid,"room_id":room,"tts_enabled":state.prefs.tts_enabled},
             "account":{"user_id":state.bili_user_id,"name":state.bili_profile.as_ref().map(|p| &p.name),"avatar_url":state.bili_profile.as_ref().and_then(|p| p.avatar_url.as_deref())}, "qr":state.qr,
-            "live":{"running":live.running,"connecting":state.connecting,"room_id":live.room_id.or(room),"state":if state.connecting {"connecting"} else {live_state},"message":live_message,"received":live.received,"events":events,"errors":live.errors,"no_voice":live.no_voice},
+            "live":{"running":live.running,"connecting":state.connecting,"room_id":live.room_id.or(room),"state":if state.connecting {"connecting"} else {live_state},"message":live_message,"received":live.received,"events":events,"errors":live.errors,"no_voice":live.no_voice,"audience":state.live.as_ref().map(|live| live.audience_snapshot()).unwrap_or_default()},
             "queue":queue_json(&queue), "preferences":state.prefs,
+            "received_emotes_error":live.emote_lookup_error,
             "status":{"error":state.status_error || device_lost,"message":status_message},
             "data_dir":state.store.data_dir(),
             "network_disabled":state.network_disabled,
-            "overlay":state.overlay_view()
+            "overlay":state.overlay_view(),
+            "obs":{"settings":state.obs_settings,"has_password":state.obs_has_password,"status":state.obs_view_status(),"detected":state.obs_detected,"local":state.obs_settings.is_local()}
         });
         snapshot["broadcast"] = state.broadcast.view();
+        let own_room = state.broadcast.room.as_ref().map(|room| room.room_id);
+        snapshot["broadcast"]["last_session"] = json!(
+            state
+                .broadcast_session
+                .summary(state.bili_user_id, own_room)
+        );
+        snapshot["broadcast"]["session_active"] =
+            json!(state.broadcast_session.active(state.bili_user_id, own_room));
+        snapshot["moderation"] = state.moderation.view();
+        snapshot["chat_send"] = state.chat_send.view();
         let Value::Object(dynamic) = dynamic else {
             unreachable!("dynamic snapshot is an object")
         };
@@ -770,27 +891,39 @@ impl Application {
     }
 
     pub async fn dispatch(&self, action: &str, payload: Value) -> Result<Value, String> {
-        let observation_only =
-            action == "local_services.check" && bool_field(&payload, "automatic", false);
+        let shutdown = self.shutdown_token()?;
+        if shutdown.is_cancelled() {
+            return Err("程序正在退出".into());
+        }
+        let observation_only = matches!(action, "obs.refresh" | "obs.overlay.sync")
+            || action == "local_services.check" && bool_field(&payload, "automatic", false);
         if matches!(action, "queue.stop" | "live.disconnect") {
             let mut state = self.lock()?;
             state.explicit_stop_epoch = state.explicit_stop_epoch.wrapping_add(1);
         }
-        if matches!(
-            action,
-            "queue.stop"
-                | "live.disconnect"
-                | "live.connect"
-                | "live.save"
-                | "onboarding.anonymous"
-                | "onboarding.finish"
-                | "onboarding.reset"
-                | "bili.use_account"
-                | "bili.logout"
-        ) {
+        let anonymous_reception_requested = matches!(action, "live.connect" | "live.save")
+            && payload.get("authenticated").and_then(Value::as_bool) == Some(false);
+        if !anonymous_reception_requested
+            && matches!(
+                action,
+                "queue.stop"
+                    | "live.disconnect"
+                    | "live.connect"
+                    | "live.save"
+                    | "onboarding.finish"
+                    | "onboarding.reset"
+                    | "bili.use_account"
+                    | "bili.logout"
+            )
+        {
             self.lock()?.carried_events.clear();
         }
-        let result = self.execute(action, payload).await.map_err(|error| {
+        let result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Err("程序正在退出".into()),
+            result = self.execute(action, payload) => result,
+        }
+        .map_err(|error| {
             danmakuvoice_engine::error_codes::tag(
                 error,
                 danmakuvoice_engine::error_codes::command_code(action),
@@ -834,6 +967,12 @@ impl Application {
             return Err("正在应用设置，请稍候".into());
         }
         match action {
+            action if action.starts_with("bili.chat.") => {
+                return self.chat_send_command(action, &payload).await;
+            }
+            action if action.starts_with("bili.moderation.") => {
+                return self.moderation_command(action, &payload).await;
+            }
             action if action.starts_with("bili.broadcast.") => {
                 return self.broadcast_command(action, &payload).await;
             }
@@ -867,7 +1006,7 @@ impl Application {
             }
             "doubao.qr.poll" => self.poll_doubao().await?,
             "bili.qr.cancel" | "doubao.qr.cancel" => self.lock()?.cancel_qr(),
-            "onboarding.anonymous" => self.anonymous(&payload).await?,
+            "onboarding.anonymous" => return Err(ANONYMOUS_DISABLED.into()),
             "onboarding.finish" => {
                 let enabled = bool_field(&payload, "tts_enabled", true);
                 let connect = bool_field(&payload, "connect", true);
@@ -880,7 +1019,7 @@ impl Application {
                         .room_id
                         .is_none()
                     {
-                        return Err("请先扫码或填写主播 UID".into());
+                        return Err("请先扫码登录并设置直播间".into());
                     }
                     if enabled {
                         state.validate_default_voice()?;
@@ -917,6 +1056,17 @@ impl Application {
                     .await?
             }
             "live.disconnect" => self.stop(false).await?,
+            "live.audience.refresh" | "live.audience.more" => {
+                self.require_network()?;
+                let controller = {
+                    let state = self.lock()?;
+                    state.live.clone().ok_or("请先连接直播间")?
+                };
+                controller
+                    .request_audience(action == "live.audience.more")
+                    .await
+                    .map_err(display)?;
+            }
             "queue.stop" => self.stop(true).await?,
             "queue.jump" => {
                 let id = payload
@@ -948,16 +1098,23 @@ impl Application {
             }
             "bili.logout" => {
                 confirmed(&payload)?;
-                self.lock()?.broadcast.invalidate();
+                {
+                    let mut state = self.lock()?;
+                    state.suspend_broadcast_observation(broadcast_sessions::observed_now())?;
+                    state.broadcast.invalidate();
+                    state.moderation.invalidate();
+                    state.chat_send.invalidate();
+                }
                 self.stop(false).await?;
                 let mut state = self.lock()?;
                 state.cancel_qr();
                 state.store.clear_bili_session().map_err(display)?;
                 state.broadcast.invalidate();
+                state.moderation.invalidate();
+                state.chat_send.invalidate();
                 state.bili_user_id = None;
                 state.bili_profile = None;
                 state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
-                state.prefs.authenticated = false;
                 state.save_preferences()?;
             }
             "connections.clear_credential" => {
@@ -974,6 +1131,7 @@ impl Application {
             "audio.test" => self.audition(&payload, true).await?,
             "preferences.save" => self.preferences(&payload).await?,
             "overlay.save" => self.save_overlay(&payload).await?,
+            "overlay.title.save" => self.save_overlay_title(&payload)?,
             "overlay.token.reset" => {
                 let mut state = self.lock()?;
                 let mut settings = state.overlay_settings.clone();
@@ -984,7 +1142,19 @@ impl Application {
                     .map_err(display)?;
                 state.overlay_hub.set_token(&settings.token);
                 state.overlay_settings = settings;
+                state.invalidate_obs_activity(false);
+                drop(state);
+                self.schedule_existing_obs_overlay();
             }
+            "obs.save" => self.save_obs(&payload)?,
+            "obs.password" => self.save_obs_password(&payload)?,
+            "obs.test" => return self.test_obs().await,
+            "obs.refresh" => return self.refresh_obs_status().await,
+            "obs.bitrate.get" => return self.get_obs_bitrate().await,
+            "obs.bitrate.set" => return self.set_obs_bitrate(&payload).await,
+            "obs.launch" => return self.launch_obs().await,
+            "obs.overlay.add" => return self.add_overlay_to_obs(&payload).await,
+            "obs.overlay.sync" => return self.sync_existing_obs_overlay(&payload).await,
             "overlay.test" => {
                 let state = self.lock()?;
                 if state.overlay_server.is_none() {
@@ -1013,6 +1183,9 @@ impl Application {
         let mut state = self.lock()?;
         match action {
             "live.save" => {
+                if payload.get("authenticated").and_then(Value::as_bool) == Some(false) {
+                    return Err(ANONYMOUS_DISABLED.into());
+                }
                 if state.connecting || state.live.as_ref().is_some_and(|l| l.snapshot().running) {
                     return Err("请先断开直播间再更改房间".into());
                 }
@@ -1023,9 +1196,9 @@ impl Application {
                 if let Some(merge) = payload.get("gift_merge") {
                     settings.gift_merge = parse(merge)?;
                 }
+                state.moderation.invalidate();
+                state.chat_send.invalidate();
                 state.store.save_live_settings(&settings).map_err(display)?;
-                state.prefs.authenticated =
-                    bool_field(&payload, "authenticated", state.prefs.authenticated);
                 state.save_preferences()?;
             }
             "connections.save" => {
@@ -1053,26 +1226,26 @@ impl Application {
                 }
                 state
                     .store
-                    .save_connection_with_credential(
-                        &connection,
-                        secret
-                            .as_ref()
-                            .filter(|s| !s.trim().is_empty())
-                            .map(|s| s.as_bytes()),
-                    )
+                    .with_savepoint(|store| {
+                        store.save_connection_with_credential(
+                            &connection,
+                            secret
+                                .as_ref()
+                                .filter(|s| !s.trim().is_empty())
+                                .map(|s| s.as_bytes()),
+                        )?;
+                        if connection.settings.provider() == Provider::Doubao
+                            && store
+                                .connections()?
+                                .iter()
+                                .any(|saved| saved.id == connection.id && saved.has_credential)
+                        {
+                            Controller::ensure_doubao_default_in(store, &connection.id)
+                        } else {
+                            Controller::ensure_first_default_in(store, None)
+                        }
+                    })
                     .map_err(display)?;
-                if connection.settings.provider() == Provider::Doubao
-                    && state
-                        .store
-                        .connections()
-                        .map_err(display)?
-                        .iter()
-                        .any(|saved| saved.id == connection.id && saved.has_credential)
-                {
-                    state.ensure_doubao_default(&connection.id)?;
-                } else {
-                    state.ensure_first_default(None)?;
-                }
                 return Ok(json!({"id":connection.id}));
             }
             "connections.delete" => {
@@ -1101,28 +1274,39 @@ impl Application {
                     preset.voice_id =
                         dobao::normalize_voice_id(&preset.voice_id).map_err(display)?;
                 }
-                state.store.save_preset(&preset).map_err(display)?;
-                state.ensure_first_default(Some(&preset.id))?;
+                state
+                    .store
+                    .with_savepoint(|store| {
+                        store.save_preset(&preset)?;
+                        Controller::ensure_first_default_in(store, Some(&preset.id))
+                    })
+                    .map_err(display)?;
                 return Ok(json!({"id":preset.id}));
             }
             "fish.voice.save" => {
+                let connection_id = required_str(&payload, "connection_id")?;
+                let id_or_url = required_str(&payload, "id_or_url")?;
+                let name = required_str(&payload, "name")?;
                 let preset = state
                     .store
-                    .save_fish_voice(
-                        required_str(&payload, "connection_id")?,
-                        required_str(&payload, "id_or_url")?,
-                        required_str(&payload, "name")?,
-                    )
+                    .with_savepoint(|store| {
+                        let preset = store.save_fish_voice(connection_id, id_or_url, name)?;
+                        Controller::ensure_first_default_in(store, Some(&preset.id))?;
+                        Ok(preset)
+                    })
                     .map_err(display)?;
-                state.ensure_first_default(Some(&preset.id))?;
                 return serde_json::to_value(preset).map_err(display);
             }
             "fish.voices.restore_builtin" => {
+                let connection_id = required_str(&payload, "connection_id")?;
                 let created = state
                     .store
-                    .restore_builtin_fish_voices(required_str(&payload, "connection_id")?)
+                    .with_savepoint(|store| {
+                        let created = store.restore_builtin_fish_voices(connection_id)?;
+                        Controller::ensure_first_default_in(store, None)?;
+                        Ok(created)
+                    })
                     .map_err(display)?;
-                state.ensure_first_default(None)?;
                 return serde_json::to_value(created).map_err(display);
             }
             "fish.settings.get" => {
@@ -1157,13 +1341,15 @@ impl Application {
                 }
                 state
                     .store
-                    .save_dots_voice_with_preference(
-                        &preset,
-                        &profile,
-                        bool_field(&payload, "make_preferred", false),
-                    )
+                    .with_savepoint(|store| {
+                        store.save_dots_voice_with_preference(
+                            &preset,
+                            &profile,
+                            bool_field(&payload, "make_preferred", false),
+                        )?;
+                        Controller::ensure_first_default_in(store, Some(&preset.id))
+                    })
                     .map_err(display)?;
-                state.ensure_first_default(Some(&preset.id))?;
                 return Ok(json!({"id":preset.id}));
             }
             "presets.delete" => {
@@ -1286,9 +1472,11 @@ impl Application {
                 let profile: ReferenceProfile = parse(&payload["profile"])?;
                 state
                     .store
-                    .save_reference_profile(&profile)
+                    .with_savepoint(|store| {
+                        store.save_reference_profile(&profile)?;
+                        Controller::ensure_first_default_in(store, None)
+                    })
                     .map_err(display)?;
-                state.ensure_first_default(None)?;
             }
             "references.list" => {
                 let connection_id = required_str(&payload, "connection_id")?;
@@ -1325,7 +1513,7 @@ impl Application {
             }
             "devices.refresh" => state.devices = devices_json(),
             "startup.set" => {
-                if state.network_disabled {
+                if state.shutdown.is_cancelled() || state.network_disabled {
                     return Err("离线测试窗口不能设置开机启动，请在正式程序中设置".into());
                 }
                 #[cfg(windows)]
@@ -1394,14 +1582,14 @@ impl Application {
                         false,
                     ),
                 };
-                let report = migration::apply_confirmed_legacy_import(
+                let report = migration::apply_confirmed_legacy_import_with_finalize(
                     &mut state.store,
                     &path,
                     &preview,
                     &options,
+                    |store| Controller::ensure_first_default_in(store, None),
                 )
                 .map_err(display)?;
-                state.ensure_first_default(None)?;
                 state.migration = None;
                 return Ok(
                     json!({"backup_path":report.backup_path,"rules_imported":report.rules_imported,"live_settings_imported":report.live_settings_imported,"sounds_imported":report.sounds_imported,"connections_created":report.connections_created,"presets_created":report.presets_created,"pending_bindings_created":report.pending_bindings_created,"excluded":report.excluded}),
@@ -1493,6 +1681,7 @@ impl Controller {
     }
 
     fn save_preferences(&mut self) -> Result<(), String> {
+        self.prefs.authenticated = true;
         self.config_snapshot = None;
         self.store
             .save_desktop_preferences(&self.prefs)
@@ -1610,15 +1799,23 @@ impl Controller {
             "url": format!("http://127.0.0.1:{port}/overlay?token={}", settings.token),
             "error": self.overlay_error,
             "clients": self.overlay_hub.clients(),
+            "obs_clients": self.overlay_hub.obs_health().0,
         })
     }
 
     fn ensure_first_default(&mut self, preferred_id: Option<&str>) -> Result<(), String> {
-        let mut rules = self.store.load_rules().map_err(display)?;
+        Self::ensure_first_default_in(&mut self.store, preferred_id).map_err(display)
+    }
+
+    fn ensure_first_default_in(
+        store: &mut DataStore,
+        preferred_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let mut rules = store.load_rules()?;
         if rules.default_preset_explicitly_cleared {
             return Ok(());
         }
-        let presets = self.store.presets().map_err(display)?;
+        let presets = store.presets()?;
         // A selected preset remains the user's choice even while its service
         // is offline. Only a missing/deleted selection needs repair.
         if let Some(preset) = rules
@@ -1630,7 +1827,7 @@ impl Controller {
                 rules
                     .preferred_presets
                     .insert(preset.provider, preset.id.clone());
-                self.store.save_rules(&rules).map_err(display)?;
+                store.save_rules(&rules)?;
             }
             return Ok(());
         }
@@ -1646,28 +1843,23 @@ impl Controller {
             // A connection alone, or a cloud voice without login, is not a
             // playable first choice. Use the same prepare gate as audition.
             if preset.provider == Provider::Doubao {
-                let has_credential =
-                    self.store
-                        .connections()
-                        .map_err(display)?
-                        .iter()
-                        .any(|connection| {
-                            connection.id == preset.connection_id && connection.has_credential
-                        });
+                let has_credential = store.connections()?.iter().any(|connection| {
+                    connection.id == preset.connection_id && connection.has_credential
+                });
                 if !has_credential {
                     continue;
                 }
                 if device.is_none() {
-                    device = Some(self.store.load_or_create_dobao_device().map_err(display)?);
+                    device = Some(store.load_or_create_dobao_device()?);
                 }
             }
-            let preview = RulePreview::voice_audition(preset.clone(), "试听").map_err(display)?;
-            if PreparedPlayback::from_store(&self.store, &preview, device.as_ref()).is_ok() {
+            let preview = RulePreview::voice_audition(preset.clone(), "试听")?;
+            if PreparedPlayback::from_store(store, &preview, device.as_ref()).is_ok() {
                 rules.default_preset_id = Some(preset.id.clone());
                 rules
                     .preferred_presets
                     .insert(preset.provider, preset.id.clone());
-                self.store.save_rules(&rules).map_err(display)?;
+                store.save_rules(&rules)?;
                 break;
             }
         }
@@ -1676,7 +1868,16 @@ impl Controller {
 
     fn ensure_doubao_default(&mut self, connection_id: &str) -> Result<(), String> {
         self.config_snapshot = None;
-        let presets = self.store.presets().map_err(display)?;
+        self.store
+            .with_savepoint(|store| Self::ensure_doubao_default_in(store, connection_id))
+            .map_err(display)
+    }
+
+    fn ensure_doubao_default_in(
+        store: &mut DataStore,
+        connection_id: &str,
+    ) -> Result<(), StorageError> {
+        let presets = store.presets()?;
         let existing = presets
             .iter()
             .find(|p| p.connection_id == connection_id && p.provider == Provider::Doubao);
@@ -1693,13 +1894,16 @@ impl Controller {
                 volume: 1.0,
                 sovits: None,
             };
-            self.store.save_preset(&preset).map_err(display)?;
+            store.save_preset(&preset)?;
             preset.id
         };
-        self.ensure_first_default(Some(&id))
+        Self::ensure_first_default_in(store, Some(&id))
     }
 
     fn ensure_audio(&mut self) -> Result<SchedulerHandle, String> {
+        if self.shutdown.is_cancelled() {
+            return Err("程序正在退出".into());
+        }
         if self.audio.as_ref().is_some_and(|a| a.writer.disconnected()) {
             return Err("输出设备已断开，请在设置中重新应用设备 [DV-A07]".into());
         }
@@ -1793,7 +1997,7 @@ impl Application {
             _ = cancel.cancelled() => return Ok(()),
             result = lookup(session) => result?,
         };
-        self.commit_room_resolution(generation, &cancel, uid, room, true)
+        self.commit_room_resolution(generation, &cancel, uid, room)
             .await?;
         Ok(())
     }
@@ -1804,11 +2008,20 @@ impl Application {
         cancel: &CancellationToken,
         uid: u64,
         room: u64,
-        authenticated: bool,
     ) -> Result<bool, String> {
         {
             let state = self.lock()?;
             if state.qr_generation != generation || cancel.is_cancelled() {
+                return Ok(false);
+            }
+            if state
+                .store
+                .load_bili_session()
+                .map_err(display)?
+                .as_ref()
+                .map(BiliSession::user_id)
+                != Some(uid)
+            {
                 return Ok(false);
             }
         }
@@ -1818,33 +2031,26 @@ impl Application {
         if state.qr_generation != generation || cancel.is_cancelled() {
             return Ok(false);
         }
+        if state
+            .store
+            .load_bili_session()
+            .map_err(display)?
+            .as_ref()
+            .map(BiliSession::user_id)
+            != Some(uid)
+        {
+            return Ok(false);
+        }
         let mut settings = state.store.load_live_settings().map_err(display)?;
         settings.room_id = Some(room);
+        state.moderation.invalidate();
+        state.chat_send.invalidate();
         state.store.save_live_settings(&settings).map_err(display)?;
         state.prefs.broadcaster_uid = Some(uid);
-        state.prefs.authenticated = authenticated;
         state.save_preferences()?;
         state.status.clear();
         state.status_error = false;
         Ok(true)
-    }
-
-    async fn anonymous(&self, payload: &Value) -> Result<(), String> {
-        let uid = positive_id(&payload["uid"])?;
-        self.require_network()?;
-        let (generation, cancel) = {
-            let mut state = self.lock()?;
-            state.cancel_qr();
-            (state.qr_generation, state.qr_cancel.clone())
-        };
-        let client = QrLoginClient::new().map_err(display)?;
-        let room = tokio::select! {
-            _=cancel.cancelled()=>return Ok(()),
-            result=client.room_id_for_uid(uid,None)=>result.map_err(display)?,
-        };
-        self.commit_room_resolution(generation, &cancel, uid, room, false)
-            .await?;
-        Ok(())
     }
 
     async fn begin_bili(&self) -> Result<(), String> {
@@ -1896,8 +2102,11 @@ impl Application {
                 if state.qr_generation != generation || cancel.is_cancelled() {
                     return Ok(());
                 }
+                state.suspend_broadcast_observation(broadcast_sessions::observed_now())?;
                 state.store.save_bili_session(&session).map_err(display)?;
                 state.broadcast.invalidate();
+                state.moderation.invalidate();
+                state.chat_send.invalidate();
                 state.bili_user_id = Some(session.user_id());
                 state.bili_profile = None;
                 state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
@@ -1913,7 +2122,7 @@ impl Application {
             match room {
                 Ok(room) => {
                     if !self
-                        .commit_room_resolution(generation, &cancel, session.user_id(), room, true)
+                        .commit_room_resolution(generation, &cancel, session.user_id(), room)
                         .await?
                     {
                         return Ok(());
@@ -2143,6 +2352,9 @@ impl Application {
         startup_epoch: Option<u64>,
         expected_stop_epoch: Option<u64>,
     ) -> Result<(), String> {
+        if authenticated == Some(false) {
+            return Err(ANONYMOUS_DISABLED.into());
+        }
         self.require_network()?;
         let gate = self.lock()?.activity_gate.clone();
         let _activity = gate.lock().await;
@@ -2161,10 +2373,19 @@ impl Application {
             }) {
                 return Ok(());
             }
-            if state.connecting || state.stopping || state.reconfiguring || state.audition_starting
+            if state.shutdown.is_cancelled()
+                || state.connecting
+                || state.stopping
+                || state.reconfiguring
+                || state.audition_starting
             {
                 return Err("正在处理上一项操作，请稍候".into());
             }
+            let session = state
+                .store
+                .load_bili_session()
+                .map_err(display)?
+                .ok_or("请先扫码登录 B 站账号")?;
             if state.live.as_ref().is_some_and(|l| l.snapshot().running) {
                 return Ok(());
             }
@@ -2174,34 +2395,12 @@ impl Application {
                 .map_err(display)?
                 .room_id
                 .ok_or("请先设置直播间")?;
-            let authenticated = authenticated.unwrap_or(state.prefs.authenticated);
-            let session = if authenticated {
-                Some(
-                    state
-                        .store
-                        .load_bili_session()
-                        .map_err(display)?
-                        .ok_or("请先扫码登录 B 站")?,
-                )
-            } else {
-                None
-            };
             let (controller, scheduler) = if state.prefs.tts_enabled {
                 state.validate_default_voice()?;
                 let scheduler = state.ensure_audio()?;
-                let device = if state
-                    .store
-                    .presets()
-                    .map_err(display)?
-                    .iter()
-                    .any(|p| p.provider == Provider::Doubao)
-                {
-                    Some(state.store.load_or_create_dobao_device().map_err(display)?)
-                } else {
-                    None
-                };
+                // The engine loads Doubao identity only for an event that uses it.
                 let controller =
-                    LiveController::new(state.store.data_dir(), scheduler.clone(), device)
+                    LiveController::new(state.store.data_dir(), scheduler.clone(), None)
                         .map_err(display)?;
                 (Arc::new(controller), Some(scheduler))
             } else {
@@ -2213,15 +2412,21 @@ impl Application {
                     None,
                 )
             };
+            if let Some(view) = state.chat_send.received_emoticons(session.user_id(), room) {
+                controller.set_received_emoticons(session.user_id(), room, &view.emoticons);
+            }
             state.start_cancel = CancellationToken::new();
             state.live_generation = state.live_generation.wrapping_add(1);
             state.connecting = true;
             state.live_receive_only = !state.prefs.tts_enabled;
             state.live = Some(controller.clone());
+            state.overlay_hub.clear_items();
+            state.broadcast_receiver_epoch = state.broadcast_receiver_epoch.wrapping_add(1);
+            state.broadcast_receiver_started_at = broadcast_sessions::observed_now();
             (
                 controller,
                 scheduler,
-                session,
+                Some(session),
                 room,
                 state.live_generation,
                 state.start_cancel.clone(),
@@ -2267,22 +2472,38 @@ impl Application {
         // Preflight every managed location before changing either storage or
         // runtime state. Explicit --data-dir may contain unrelated user files.
         let plan = DataResetPlan::inspect(&data_dir)?;
-        self.lock()?.broadcast.invalidate();
+        {
+            let mut state = self.lock()?;
+            state.invalidate_obs_activity(true);
+            state.broadcast.invalidate();
+            state.moderation.invalidate();
+            state.chat_send.invalidate();
+        }
         self.lock()?.cancel_qr();
         self.stop(true).await?;
         let mut state = self.lock()?;
         state.store.clear_application_data().map_err(display)?;
+        state.invalidate_obs_activity(true);
         state.prefs = state.store.load_desktop_preferences().map_err(display)?;
+        state.prefs.authenticated = true;
         state.overlay_server = None;
         state.overlay_error = None;
         state.overlay_settings = state.store.load_overlay_settings().unwrap_or_default();
         let overlay_config = overlay_config(&state.overlay_settings);
         state.overlay_hub.set_config(overlay_config);
         state.overlay_hub.clear_items();
+        state.obs_settings = ObsSettings::default();
+        state.obs_has_password = false;
+        state.obs_status = json!({"state": "idle"});
         state.bili_user_id = None;
         state.bili_profile = None;
         state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
         state.broadcast.invalidate();
+        state.broadcast_session = broadcast_sessions::BroadcastSessionTracker::default();
+        state.broadcast_receiver_epoch = 0;
+        state.broadcast_receiver_started_at = 0;
+        state.moderation.invalidate();
+        state.chat_send.invalidate();
         state.scheduler = None;
         state.audio = None;
         state.resume_live_after_default_device_change = false;
@@ -2401,14 +2622,21 @@ impl Application {
         if let Some(live) = live {
             state.last_live = live.snapshot();
         }
+        let last_live = state.last_live.clone();
+        let session_result =
+            state.observe_broadcast_received(&last_live, broadcast_sessions::observed_now());
         state.live = None;
+        state.overlay_hub.clear_items();
         state.pending_stops -= 1;
         state.stopping = state.pending_stops != 0;
         state.connecting = false;
         if all {
             state.audition_starting = false;
         }
-        queue_result.and(settled_queue_result).and(live_result)?;
+        queue_result
+            .and(settled_queue_result)
+            .and(live_result)
+            .and(session_result)?;
         state.status.clear();
         state.status_error = false;
         Ok(())
@@ -2495,6 +2723,13 @@ impl Application {
     }
 
     async fn preferences(&self, payload: &Value) -> Result<(), String> {
+        if payload["preferences"]
+            .get("authenticated")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            return Err(ANONYMOUS_DISABLED.into());
+        }
         // Acquire before reading the patch base or awaiting a live speech
         // change. A second settings request must not merge against old prefs
         // and later overwrite a newer save while this operation is suspended.
@@ -2564,11 +2799,17 @@ impl Application {
         }
         {
             let mut state = self.lock()?;
+            if state.prefs.broadcast_console && !prefs.broadcast_console {
+                state.suspend_broadcast_observation(broadcast_sessions::observed_now())?;
+            }
             // Validation happens before replacing the in-memory preferences.
             state
                 .store
                 .save_desktop_preferences(&prefs)
                 .map_err(display)?;
+            if state.prefs.broadcast_console && !prefs.broadcast_console {
+                state.moderation.invalidate();
+            }
             state.prefs = prefs;
             if device_changed {
                 state.audio = None;
@@ -2808,24 +3049,22 @@ impl Application {
         });
         state
             .store
-            .save_connection_with_credential(&connection, Some(secret.as_bytes()))
-            .map_err(display)?;
-        if first_connection {
-            state
-                .store
-                .restore_builtin_fish_voices(&connection.id)
-                .map_err(display)?;
-        }
-        let preferred = state
-            .store
-            .presets()
-            .map_err(display)?
-            .into_iter()
-            .find(|preset| {
-                preset.connection_id == connection.id && preset.voice_id == fish::DEFAULT_VOICE_ID
+            .with_savepoint(|store| {
+                store.save_connection_with_credential(&connection, Some(secret.as_bytes()))?;
+                if first_connection {
+                    store.restore_builtin_fish_voices(&connection.id)?;
+                }
+                let preferred = store
+                    .presets()?
+                    .into_iter()
+                    .find(|preset| {
+                        preset.connection_id == connection.id
+                            && preset.voice_id == fish::DEFAULT_VOICE_ID
+                    })
+                    .map(|preset| preset.id);
+                Controller::ensure_first_default_in(store, preferred.as_deref())
             })
-            .map(|preset| preset.id);
-        state.ensure_first_default(preferred.as_deref())?;
+            .map_err(display)?;
         state.config_snapshot = None;
         Ok(json!({"id":connection.id,"verified":true}))
     }
@@ -2871,10 +3110,27 @@ impl Application {
         preferred_only: bool,
         requested_generation: Option<u64>,
     ) {
+        let Ok(shutdown) = self.shutdown_token() else {
+            return;
+        };
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {},
+            _ = self.ensure_local_service_running(kind, endpoint, preferred_only, requested_generation) => {},
+        }
+    }
+
+    async fn ensure_local_service_running(
+        &self,
+        kind: Kind,
+        endpoint: &str,
+        preferred_only: bool,
+        requested_generation: Option<u64>,
+    ) {
         let requested_endpoint = endpoint;
         let (endpoint, generation) = {
             let Ok(mut state) = self.lock() else { return };
-            if state.network_disabled {
+            if state.shutdown.is_cancelled() || state.network_disabled {
                 return;
             }
             if preferred_only
@@ -2954,6 +3210,9 @@ impl Application {
             {
                 return;
             }
+            if state.shutdown.is_cancelled() {
+                return;
+            }
             let data_dir = state.store.data_dir().to_path_buf();
             let slot = state.local_services.get_mut(kind);
             if slot.generation != generation || !slot.auto_start_allowed() {
@@ -3029,10 +3288,38 @@ impl Application {
         }
     }
 
+    pub fn shutdown_token(&self) -> Result<CancellationToken, String> {
+        Ok(self.lock()?.shutdown.clone())
+    }
+
+    /// A terminal barrier, unlike Stop All which allows an explicit restart.
     pub fn stop_owned_local_services(&self) {
         if let Ok(mut state) = self.lock() {
+            state.shutdown.cancel();
+            state.start_cancel.cancel();
+            state.audition_cancel.cancel();
+            state.qr_cancel.cancel();
+            state.qr_generation = state.qr_generation.wrapping_add(1);
+            state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
             state.broadcast.invalidate();
+            state.moderation.invalidate();
+            state.chat_send.invalidate();
+            state.invalidate_obs_activity(false);
+            state.overlay_server = None;
+            if let Some(audio) = &state.audio {
+                audio.writer.cancel_active();
+            }
             state.local_services.stop_owned();
+        }
+    }
+
+    pub async fn shutdown(&self) {
+        self.stop_owned_local_services();
+        let _ = tokio::time::timeout(Duration::from_secs(3), self.stop(true)).await;
+        if let Ok(mut state) = self.lock() {
+            state.live = None;
+            state.scheduler = None;
+            state.audio = None;
         }
     }
 
@@ -3386,6 +3673,8 @@ fn carried_chat(carried: &[LiveEvent], current: &[LiveEvent]) -> Vec<LiveEvent> 
 
 fn command_changes_configuration(action: &str) -> bool {
     !action.starts_with("bili.broadcast.")
+        && !action.starts_with("bili.moderation.")
+        && !action.starts_with("bili.chat.")
         && !matches!(
             action,
             "bili.qr.begin"
@@ -3394,6 +3683,8 @@ fn command_changes_configuration(action: &str) -> bool {
                 | "doubao.qr.cancel"
                 | "live.connect"
                 | "live.disconnect"
+                | "live.audience.refresh"
+                | "live.audience.more"
                 | "queue.stop"
                 | "queue.skip"
                 | "queue.clear"
@@ -3412,6 +3703,13 @@ fn command_changes_configuration(action: &str) -> bool {
                 | "local_services.check"
                 | "local_services.start"
                 | "local_services.stop"
+                | "obs.test"
+                | "obs.refresh"
+                | "obs.bitrate.get"
+                | "obs.bitrate.set"
+                | "obs.launch"
+                | "obs.overlay.add"
+                | "obs.overlay.sync"
         )
 }
 fn new_overlay_token() -> String {
@@ -3438,16 +3736,27 @@ fn overlay_config(settings: &OverlaySettings) -> Value {
     })
 }
 
-/// First result to send. `previous` is `None` when a page just connected:
-/// then only the last few messages still on screen are replayed. Otherwise
-/// it holds the last result already sent in this live session.
+/// First result to send. Initial spine replay is bounded by the hub capacity
+/// and survives idle time; cards retain their existing freshness window.
 fn overlay_feed_start(
     results: &[ProcessedLiveEvent],
     previous: Option<Option<&ProcessedLiveEvent>>,
     now_ms: u64,
     linger_ms: u64,
+    persistent_spine: bool,
 ) -> usize {
     let start = match previous {
+        None if persistent_spine => {
+            let recent = results.len().saturating_sub(crate::overlay::REPLAY_ITEMS);
+            results
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, result)| result.event.kind != EventKind::SuperChat)
+                .take(crate::overlay::SPINE_REPLAY_ITEMS)
+                .last()
+                .map_or(recent, |(index, _)| recent.min(index))
+        }
         None => {
             let fresh = results
                 .iter()
@@ -3468,6 +3777,59 @@ fn overlay_feed_start(
             }),
     };
     start.min(results.len())
+}
+
+fn publish_overlay_results(
+    hub: &OverlayHub,
+    settings: &OverlaySettings,
+    cursor: &mut OverlayCursor,
+    results: &[ProcessedLiveEvent],
+    clock_ms: u64,
+    boundary: (u64, u64),
+    reading_job: Option<u64>,
+) {
+    let (session, replay_after_ms) = boundary;
+    let start = overlay_feed_start(
+        results,
+        cursor.primed.then_some(cursor.last.as_ref()),
+        clock_ms,
+        u64::from(settings.linger_seconds) * 1000,
+        settings.style == OverlayStyle::Spine,
+    );
+    if settings.style == OverlayStyle::Spine
+        && let Some(job_id) = reading_job
+        && let Some((_, result)) = results.iter().enumerate().find(|(index, result)| {
+            *index < start && matches!(result.outcome, LiveEventOutcome::Enqueued { job_id: found } if found == job_id)
+        })
+        && result.event.kind != EventKind::SuperChat
+        && let Some(item) = overlay_item(result, settings)
+    {
+        hub.ensure_session_reading_item(item, session, result.event.observed_at_ms, job_id);
+    }
+    let initial_spine = !cursor.primed && settings.style == OverlayStyle::Spine;
+    let recent = results.len().saturating_sub(crate::overlay::REPLAY_ITEMS);
+    for (index, result) in results.iter().enumerate().skip(start) {
+        if initial_spine
+            && result.event.kind == EventKind::SuperChat
+            && (index < recent
+                || clock_ms.saturating_sub(result.event.observed_at_ms)
+                    > u64::from(settings.linger_seconds) * 1000)
+        {
+            continue;
+        }
+        if result.event.observed_at_ms >= replay_after_ms
+            && let Some(item) = overlay_item(result, settings)
+        {
+            hub.publish_session_item(item, session, result.event.observed_at_ms, reading_job);
+        }
+    }
+    cursor.last = results.last().cloned();
+}
+
+fn overlay_reading_job(current: Option<SpeechJob>, replay_after_ms: u64) -> Option<SpeechJob> {
+    current.filter(|job| {
+        job.origin == JobOrigin::Live && job.preview.event.observed_at_ms >= replay_after_ms
+    })
 }
 
 /// A stable, non-reversible viewer key for avatar colors and grouping.
@@ -3593,7 +3955,7 @@ fn preview_json(p: &RulePreview) -> Value {
     json!({"event":p.event,"filtered_reason":p.filtered_reason,"final_text":p.final_text,"parts":p.parts,"voice":p.voice,"pending_legacy_binding":p.pending_legacy_binding})
 }
 fn job_json(j: &SpeechJob) -> Value {
-    json!({"id":j.id,"origin":if j.origin==JobOrigin::Live{"live"}else{"audition"},"text":j.preview.final_text,"user_name":j.preview.event.user_name})
+    json!({"id":j.id,"origin":if j.origin==JobOrigin::Live{"live"}else{"audition"},"text":j.preview.final_text,"user_name":j.preview.event.user_name,"event":if j.origin==JobOrigin::Live {Some(&j.preview.event)} else {None}})
 }
 fn queue_json(q: &QueueSnapshot) -> Value {
     json!({"accepting":q.accepting,"current":q.current.as_ref().map(job_json),"pending":q.pending.iter().map(job_json).collect::<Vec<_>>(),"history":q.history.iter().map(|h|json!({"id":h.id,"state":format!("{:?}",h.state).to_lowercase(),"detail":h.detail})).collect::<Vec<_>>()})

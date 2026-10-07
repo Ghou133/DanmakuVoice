@@ -24,7 +24,7 @@ const events = [
 const state = {
   config_revision:1,onboarding_done:true,network_disabled:true,app_version:'0.2.2',data_dir:'示例数据',
   preferences:{language:'zh-CN',appearance:'dark',scale:1,master_volume:1,muted:false,tts_enabled:true,output:'default'},
-  setup:{room_id:123,tts_enabled:true,mode:'anonymous'},live_settings:{room_id:123,gift_merge:{enabled:false,initial_seconds:1.5,increment_seconds:.5,maximum_seconds:5}},
+  setup:{room_id:123,tts_enabled:true,mode:'account'},live_settings:{room_id:123,gift_merge:{enabled:false,initial_seconds:1.5,increment_seconds:.5,maximum_seconds:5}},
   live:{room_id:123,running:false,state:'stopped',events,errors:0,no_voice:0},
   queue:{current:null,pending:[],history:[]},
   rules:{default_preset_id:'voice',events:{danmaku_on:true,gift_on:true,free_gift_on:false,super_chat_on:true,guard_on:true,gift_threshold_yuan:5,super_chat_threshold_yuan:30},
@@ -51,8 +51,8 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
       const pathname = new URL(request.url,'http://localhost').pathname;
       const file = path.resolve(root,'.'+(pathname==='/'?'/index.html':decodeURIComponent(pathname)));
       if(!file.startsWith(root+path.sep)){response.writeHead(403).end();return;}
-      const type = {'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.png':'image/png'}[path.extname(file)];
-      let bytes = await fs.readFile(overrideApp && pathname==='/app.js'?overrideApp:file);
+      const type = {'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.png':'image/png','.woff2':'font/woff2'}[path.extname(file)];
+      let bytes = await fs.readFile(overrideApp && pathname==='/app.js'?overrideApp:file).catch(()=>fs.readFile(path.join(root,'fonts',path.basename(file))));
       if(pathname==='/app.js')bytes=Buffer.concat([bytes,Buffer.from('\nglobalThis.__acceptTestSnapshot = acceptSnapshot;\n')]);
       response.writeHead(200,{'Content-Type':type||'application/octet-stream'}).end(bytes);
     }catch{response.writeHead(404).end();}
@@ -61,7 +61,7 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
   const origin = 'http://127.0.0.1:'+server.address().port;
   let browser;
   try {
-    browser = await chromium.launch({headless:true,channel:'msedge'});
+    browser = await chromium.launch({headless:true,channel:'msedge',args:['--disable-features=msWindowTabManagerPublic']});
     const context = await browser.newContext({viewport:{width:1040,height:740}});
     const blocked = [];
     await context.route('**/*',route=>{
@@ -84,7 +84,13 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
           if(holdNextRules){holdNextRules=false;await new Promise(resolve=>{releaseRules=resolve;});}
           state.rules=structuredClone(args.payload.rules);
         } finally { activeRules--; }
-      }else if(args.action==='preferences.save')Object.assign(state.preferences,args.payload.preferences);
+      }else if(args.action==='bindings.save') {
+        const id=args.payload.id||'fixture-name-binding';
+        const record={id,binding:structuredClone(args.payload.binding)};
+        const index=state.bindings.findIndex(item=>item.id===id);
+        if(index<0)state.bindings.push(record);else state.bindings[index]=record;
+      }else if(args.action==='bindings.delete')state.bindings=state.bindings.filter(item=>item.id!==args.payload.id);
+      else if(args.action==='preferences.save')Object.assign(state.preferences,args.payload.preferences);
       else if(args.action==='references.list')return {...structuredClone(state),result:[]};
       else if(!['bili.qr.cancel','doubao.qr.cancel'].includes(args.action))throw new Error('Unexpected action '+args.action);
       state.config_revision++;
@@ -105,10 +111,10 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
       await page.goto(origin);await page.locator('#tts-switch').click();
       const results=[];
       for(const [name,selector,control] of [
-        ['voice-panel','#tts-menu','#tts-menu .voice-pick'],
+        ['voice-panel','#tts-menu','#tts-menu .lake-voice-row'],
         ['viewer','#viewer-voices','#viewer-voices .voice-chip'],
       ]){
-        if(name==='viewer')await page.locator('#chat-feed .chat-hit').first().click();
+        if(name==='viewer')await page.locator('#lake-current .lake-message-name').click();
         const result=await page.evaluate(({name,selector,control,next})=>{
           const node=document.querySelector(selector),retained=document.querySelector(control);
           const count=document.querySelector('#queue-pill .queue-count');
@@ -136,19 +142,20 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
     }
     const viewer = page.locator('#viewer-drawer');
     const openViewer = async()=>{
-      await page.locator('#chat-feed .chat-hit').first().click();
+      await page.locator('[data-action="history.open"]').click();
+      await page.locator('#chat-feed [data-action="viewer.open"]').first().click();
       await page.locator('#viewer-alias').waitFor();
     };
     const closeViewer = async()=>{
-      await page.locator('#viewer-drawer .icon-button[data-action="viewer.close"]').click();
+      await page.keyboard.press('Escape');
       await page.waitForFunction(()=>document.querySelector('#viewer-drawer').hidden);
     };
     const fillAlias = text => page.locator('#viewer-alias').fill(text);
     const countRules = () => calls.filter(call=>call.action==='rules.save').length;
     await page.goto(origin);
-    await page.locator('#chat-feed .chat-hit').first().waitFor();
+    await page.locator('#lake-current .chat-hit').waitFor();
     await openViewer();await fillAlias('小雨');
-    await page.waitForFunction(()=>document.querySelector('#viewer-spoken')?.textContent==='小雨');
+    assert.equal(await page.locator('#viewer-alias').inputValue(),'小雨');
     await closeViewer();
     assert.equal(state.rules.user_words[0].to,'小雨');
     assert.equal(await settings.evaluate(node=>node.open),false);
@@ -157,6 +164,25 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
     await page.keyboard.press('Escape');
     await page.waitForFunction(()=>document.querySelector('#viewer-drawer').hidden);
     check('repeat open and Escape retain the saved alias');
+
+    await openViewer();
+    const boundViewerName=await viewer.locator('.viewer-name').textContent();
+    await viewer.locator('[data-action="viewer.bind"][data-id="voice"]').click();
+    await page.waitForFunction(()=>document.querySelector('#viewer-voices [data-id="voice"]').getAttribute('aria-pressed')==='true');
+    assert.equal(state.bindings.length,1);
+    assert.equal(state.bindings[0].binding.user_name,boundViewerName);
+    assert.equal(state.bindings[0].binding.preset_id,'voice');
+    await closeViewer();
+    await page.reload();
+    await page.locator('#lake-current .chat-hit').waitFor();
+    await openViewer();
+    assert.equal(await viewer.locator('[data-action="viewer.bind"][data-id="voice"]').getAttribute('aria-pressed'),'true');
+    assert.equal(await page.locator('#viewer-alias').inputValue(),'小雨');
+    await viewer.locator('[data-action="viewer.bind"][data-id=""]').click();
+    await page.waitForFunction(()=>document.querySelector('#viewer-voices [data-id=""]').getAttribute('aria-pressed')==='true');
+    assert.equal(state.bindings.length,0);
+    await closeViewer();
+    check('viewer voice saves its exact-name binding, survives reload with the alias, and deletes only on follow-default');
 
     await openViewer();await fillAlias('');await closeViewer();
     assert.equal(state.rules.user_words.length,0);
@@ -167,18 +193,18 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
     assert.equal(await page.locator('#viewer-alias').inputValue(),'重试别名');
     assert.equal(await viewer.evaluate(node=>node.hidden),false);
     rejectNextRules=true;
-    await page.locator('#viewer-drawer .icon-button[data-action="viewer.close"]').click();
+    await page.keyboard.press('Escape');
     await page.waitForTimeout(100);
     assert.equal(await viewer.evaluate(node=>node.hidden),false,'failed close must preserve the unsaved input');
     await closeViewer();assert.equal(state.rules.user_words[0].to,'重试别名');
     check('failed automatic save keeps the draft, reports the error and retries on close');
 
     await openViewer();holdNextRules=true;await fillAlias('第一稿');
-    await page.waitForFunction(()=>document.querySelector('#viewer-spoken')?.textContent==='第一稿');
+    assert.equal(await page.locator('#viewer-alias').inputValue(),'第一稿');
     await page.waitForTimeout(700);
     assert.equal(activeRules,1);
     await fillAlias('最终稿');
-    await page.locator('#viewer-drawer .icon-button[data-action="viewer.close"]').click();
+    await page.keyboard.press('Escape');
     await page.waitForTimeout(100);
     assert.equal(activeRules,1);assert.equal(await viewer.evaluate(node=>node.hidden),false);
     releaseRules();await page.waitForFunction(()=>document.querySelector('#viewer-drawer').hidden);
@@ -197,7 +223,7 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
     await closeViewer();assert.equal(state.rules.user_words[0].to,'输入法完成');
     check('IME composition is saved only after the committed text');
 
-    await openViewer();await page.locator('[data-action="viewer.manage"]').click();
+    await openViewer();await closeViewer();await page.locator('[data-action="settings.open"]').click();
     await settings.waitFor({state:'visible'});
     assert.equal(await viewer.evaluate(node=>node.hidden),true);
     await page.locator('.settings-nav [data-id="rules"]').click();
@@ -208,7 +234,7 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
     check('old rule snapshot defaults filter on and autosaves off');
     await page.screenshot({path:path.join(output,'rules-filter-zh.png')});
     await page.locator('[data-action="settings.close"]').click();await waitClosed();
-    await page.reload();await page.locator('#chat-feed .chat-hit').first().waitFor();
+    await page.reload();await page.locator('#lake-current .chat-hit').waitFor();
     await page.locator('[data-action="settings.open"]').click();
     await page.locator('.settings-nav [data-id="rules"]').click();
     assert.equal(await filter.isChecked(),false);
@@ -227,10 +253,11 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
     await page.screenshot({path:path.join(output,'rules-filter-en-small.png')});
     check('filter copy and layout work in Chinese and English');
     await page.locator('[data-action="settings.close"]').click();await waitClosed();
-    assert.equal(await page.locator('#chat-feed [data-key]').count(),events.length);
+    await page.locator('[data-action="history.open"]').click();
+    assert.equal(await page.locator('#chat-feed .lake-history-entry').count(),events.length);
     for(const line of events) assert.ok((await page.locator('#chat-feed').innerText()).includes(line.message));
-    assert.ok(await page.locator('#chat-feed article').count()<events.length,'consecutive viewer messages should share a group');
-    check('all individual chat entries remain displayed in grouped rows');
+    await page.keyboard.press('Escape');
+    check('all individual chat entries remain displayed in the source full-history rows');
 
     await openViewer();await fillAlias('退出前读音');
     await page.evaluate(()=>window.__offlineListeners['exit-requested']({payload:{request_id:1}}));
@@ -254,11 +281,11 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
         const shot = await capture.newPage();
         for(const theme of ['dark','light']){
           state.preferences.appearance=theme;
-          await shot.goto(origin);await shot.locator('#chat-feed article').first().waitFor();
+          await shot.goto(origin);await shot.locator('#lake-current .lake-message').waitFor();
           await shot.evaluate(()=>document.fonts.ready);
           await shot.waitForTimeout(250);
           assert.equal(await shot.locator('#settings').evaluate(node=>node.open),false);
-          assert.equal(await shot.locator('#chat-feed [data-key]').count(),events.length);
+          assert.equal(await shot.locator('#chat-feed .lake-history-entry').count(),events.length);
           assert.equal(await shot.locator('body').evaluate(node=>node.scrollWidth>innerWidth),false);
           await shot.screenshot({path:path.join(output,theme==='dark'?'01-main-chat-dark.png':'02-main-chat-light.png')});
         }

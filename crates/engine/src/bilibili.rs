@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+use crate::audience::{AudienceSnapshot, run_audience};
 use crate::diagnostics::{self, DiagnosticCode};
 use crate::model::{EventKind, LiveEmote, LiveEvent};
 
@@ -489,7 +490,7 @@ pub(crate) async fn read_json(response: reqwest::Response) -> Result<Value, Bili
     serde_json::from_slice(&bytes).map_err(|_| BiliError::Protocol("接口 JSON 无效"))
 }
 
-fn require_api_ok(value: &Value) -> Result<(), BiliError> {
+pub(crate) fn require_api_ok(value: &Value) -> Result<(), BiliError> {
     match value.get("code").and_then(Value::as_i64) {
         Some(0) => Ok(()),
         Some(code) => Err(BiliError::Api(code)),
@@ -718,20 +719,40 @@ pub struct BiliRoomClient {
     http: Client,
     running: Mutex<Option<RunningRoom>>,
     state_tx: watch::Sender<RoomState>,
+    audience_tx: watch::Sender<AudienceSnapshot>,
+    audience_requests: Mutex<Option<mpsc::Sender<bool>>>,
 }
 
 impl BiliRoomClient {
     pub fn new() -> Result<Self, BiliError> {
         let (state_tx, _) = watch::channel(RoomState::Stopped);
+        let (audience_tx, _) = watch::channel(AudienceSnapshot::default());
         Ok(Self {
             http: http_client()?,
             running: Mutex::new(None),
             state_tx,
+            audience_tx,
+            audience_requests: Mutex::new(None),
         })
     }
 
     pub fn subscribe_state(&self) -> watch::Receiver<RoomState> {
         self.state_tx.subscribe()
+    }
+
+    pub fn audience_snapshot(&self) -> AudienceSnapshot {
+        self.audience_tx.borrow().clone()
+    }
+
+    pub async fn request_audience(&self, more: bool) -> Result<(), BiliError> {
+        let requests = self.audience_requests.lock().await;
+        let sender = requests
+            .as_ref()
+            .ok_or(BiliError::Protocol("请先连接直播间"))?;
+        match sender.try_send(more) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(BiliError::Protocol("请先连接直播间")),
+        }
     }
 
     /// One call starts one long-running room connection. Duplicate starts
@@ -743,14 +764,25 @@ impl BiliRoomClient {
         events: mpsc::Sender<LiveEvent>,
     ) -> Result<(), BiliError> {
         let http = self.http.clone();
+        let audience = self.audience_tx.clone();
+        let (requests, receiver) = mpsc::channel(4);
+        // Keep the request channel serialized with stop/start so a previous
+        // room cannot overwrite a new session's list or consume its requests.
+        let mut request_slot = self.audience_requests.lock().await;
         self.start_task(room_id, move |task_cancel, state| {
+            audience.send_replace(AudienceSnapshot { active: true, ..AudienceSnapshot::default() });
             tokio::spawn(async move {
-                let final_state =
-                    run_room(http, room_id, session, &events, task_cancel, state.clone()).await;
+                let final_state = tokio::select! {
+                    result = run_room(http.clone(), room_id, session, &events, task_cancel.clone(), state.clone(), &audience) => result,
+                    _ = run_audience(http.clone(), room_id, audience.clone(), receiver, task_cancel) => RoomState::Stopped,
+                };
+                audience.send_modify(|snapshot| { snapshot.active = false; snapshot.loading = false; });
                 state.send_replace(final_state);
             })
         })
-        .await
+        .await?;
+        *request_slot = Some(requests);
+        Ok(())
     }
 
     async fn start_task<F>(&self, room_id: u64, make_task: F) -> Result<(), BiliError>
@@ -777,6 +809,7 @@ impl BiliRoomClient {
     /// Cancels discovery, WebSocket work, heartbeat, and reconnect sleep.
     /// Waits for the task so a new `start` cannot overlap the old connection.
     pub async fn stop(&self) {
+        let mut requests = self.audience_requests.lock().await;
         let mut running = self.running.lock().await;
         if let Some(mut slot) = running.take() {
             slot.cancel.cancel();
@@ -789,6 +822,11 @@ impl BiliRoomClient {
             }
         }
         self.state_tx.send_replace(RoomState::Stopped);
+        requests.take();
+        self.audience_tx.send_modify(|snapshot| {
+            snapshot.active = false;
+            snapshot.loading = false;
+        });
     }
 }
 
@@ -810,6 +848,7 @@ async fn run_room(
     events: &mpsc::Sender<LiveEvent>,
     cancel: CancellationToken,
     state: watch::Sender<RoomState>,
+    audience: &watch::Sender<AudienceSnapshot>,
 ) -> RoomState {
     let mut failures = 0u32;
     loop {
@@ -822,7 +861,7 @@ async fn run_room(
         let started = Instant::now();
         let result = tokio::select! {
             _ = cancel.cancelled() => return RoomState::Stopped,
-            result = connect_once(&http, display_room_id, session.as_ref(), events, &cancel, &state) => result,
+            result = connect_once(&http, display_room_id, session.as_ref(), events, &cancel, &state, audience) => result,
         };
         if result == ConnectionEnd::SessionExpired {
             return RoomState::SessionExpired {
@@ -912,6 +951,7 @@ async fn connect_once(
     events: &mpsc::Sender<LiveEvent>,
     cancel: &CancellationToken,
     state: &watch::Sender<RoomState>,
+    audience: &watch::Sender<AudienceSnapshot>,
 ) -> ConnectionEnd {
     let Ok(room_id) = resolve_room(http, display_room_id).await else {
         return ConnectionEnd::Failed(ConnectionFailureStage::ResolveRoom);
@@ -991,7 +1031,7 @@ async fn connect_once(
             }
         };
         state.send_replace(RoomState::Connected { room_id });
-        return stream_room(socket, room_id, events, cancel, initial_packets).await;
+        return stream_room(socket, room_id, events, cancel, initial_packets, audience).await;
     }
     ConnectionEnd::Failed(host_failure)
 }
@@ -1077,7 +1117,7 @@ fn parse_account_profile(value: &Value, user_id: u64) -> Result<BiliAccountProfi
     .validated(user_id)
 }
 
-fn nav_wbi_mixin(value: &Value, authenticated: bool) -> Result<String, BiliError> {
+pub(crate) fn nav_wbi_mixin(value: &Value, authenticated: bool) -> Result<String, BiliError> {
     // Bilibili's nav endpoint returns code -101 and isLogin=false for an
     // unauthenticated viewer. This is expected for anonymous reception, but
     // the same explicit reply means a supplied saved session no longer logs
@@ -1229,13 +1269,14 @@ async fn stream_room<S>(
     events: &mpsc::Sender<LiveEvent>,
     cancel: &CancellationToken,
     initial_packets: Vec<Packet>,
+    audience: &watch::Sender<AudienceSnapshot>,
 ) -> ConnectionEnd
 where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
         + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + Unpin,
 {
-    if let Err(end) = send_event_packets(initial_packets, room_id, events, cancel).await {
+    if let Err(end) = send_event_packets(initial_packets, room_id, events, cancel, audience).await {
         return end;
     }
     let mut heartbeat = interval_at(TokioInstant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
@@ -1260,7 +1301,7 @@ where
                 match message {
                     Message::Binary(bytes) => {
                         let Ok(packets) = decode_packets(&bytes) else { return ConnectionEnd::Failed(ConnectionFailureStage::Stream); };
-                        if let Err(end) = send_event_packets(packets, room_id, events, cancel).await {
+                        if let Err(end) = send_event_packets(packets, room_id, events, cancel, audience).await {
                             return end;
                         }
                     }
@@ -1280,6 +1321,7 @@ async fn send_event_packets(
     room_id: u64,
     events: &mpsc::Sender<LiveEvent>,
     cancel: &CancellationToken,
+    audience: &watch::Sender<AudienceSnapshot>,
 ) -> Result<(), ConnectionEnd> {
     for packet in packets {
         if packet.op != 5 {
@@ -1288,6 +1330,9 @@ async fn send_event_packets(
         let Ok(value) = serde_json::from_slice::<Value>(&packet.body) else {
             continue;
         };
+        if value.get("cmd").and_then(Value::as_str) == Some("WATCHED_CHANGE") {
+            audience.send_modify(|snapshot| snapshot.apply_packet(&value));
+        }
         if let Some(event) = parse_live_event(room_id, now_ms(), &value) {
             let sent = tokio::select! {
                 _ = cancel.cancelled() => return Err(ConnectionEnd::Cancelled),
@@ -1301,7 +1346,7 @@ async fn send_event_packets(
     Ok(())
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1570,7 +1615,7 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
 
 /// Image references come only from Bilibili's own CDN. This also keeps a
 /// malformed packet from becoming an arbitrary WebView image request.
-fn bili_image_url(value: Option<&Value>) -> Option<String> {
+pub(crate) fn bili_image_url(value: Option<&Value>) -> Option<String> {
     let raw = value?.as_str()?;
     if raw.is_empty() || raw.len() > MAX_IMAGE_URL_BYTES {
         return None;
@@ -1701,6 +1746,29 @@ mod tests {
     use futures_util::stream;
     use reqwest::header::HeaderValue;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn watched_packets_update_audience_without_becoming_speech_events() {
+        let (events, mut receiver) = mpsc::channel(1);
+        let (audience, _) = watch::channel(AudienceSnapshot::default());
+        let packets = vec![
+            Packet {
+                op: 3,
+                body: 9000u32.to_be_bytes().to_vec(),
+            },
+            Packet {
+                op: 5,
+                body: serde_json::to_vec(&json!({"cmd":"WATCHED_CHANGE","data":{"num":123}}))
+                    .unwrap(),
+            },
+        ];
+        send_event_packets(packets, 42, &events, &CancellationToken::new(), &audience)
+            .await
+            .unwrap();
+        assert_eq!(audience.borrow().watched_count, Some(123));
+        assert_eq!(audience.borrow().rank_count, None);
+        assert!(receiver.try_recv().is_err());
+    }
 
     #[test]
     fn anonymous_gifts_do_not_merge_distinct_names_under_uid_zero() {
@@ -1871,7 +1939,8 @@ mod tests {
         let cancel = CancellationToken::new();
         let stream_cancel = cancel.clone();
         let task = tokio::spawn(async move {
-            stream_room(socket, 42, &events_tx, &stream_cancel, pending).await
+            let (audience, _) = watch::channel(AudienceSnapshot::default());
+            stream_room(socket, 42, &events_tx, &stream_cancel, pending, &audience).await
         });
         assert_eq!(events_rx.recv().await.unwrap().message, "before");
         assert_eq!(events_rx.recv().await.unwrap().message, "nested");

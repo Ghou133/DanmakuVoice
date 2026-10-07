@@ -5,13 +5,41 @@ export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 }
 
+// Room reception and broadcasting are separate states. Match self by UID only;
+// empty/partial lists and matching names do not prove the counter includes us.
+function isAudienceSelf(snapshot, user) {
+  return !user.mystery && validUid(snapshot?.account?.user_id) && validUid(user.user_id)
+    && String(user.user_id) === String(snapshot.account.user_id);
+}
+
+export function audienceDisplayCount(snapshot) {
+  const audience = snapshot?.live?.audience;
+  if (!audience?.active || !snapshot.live.running || snapshot.network_disabled || audience.error) return null;
+  if (audience.live_status === 0 || audience.live_status === 2) return '0';
+  if (audience.live_status !== 1 || audience.rank_count_text == null) return null;
+  const source = String(audience.rank_count_text);
+  if (!(audience.users || []).some(user => isAudienceSelf(snapshot, user))) return source;
+  const match = /^(\d+)(\+?)$/.exec(source);
+  if (!match) return null;
+  const count = BigInt(match[1]);
+  // Capped text stays a bound; it never becomes an invented exact total.
+  return `${count > 0n ? count - 1n : 0n}${match[2]}`;
+}
+
+export function audienceUsers(snapshot, query = '') {
+  const active = snapshot?.live?.audience?.active && snapshot?.live?.running && snapshot.live.audience.live_status === 1;
+  const users = active ? (snapshot.live.audience.users || []).filter(user => !isAudienceSelf(snapshot, user)) : [];
+  const needle = String(query).trim().toLocaleLowerCase();
+  return needle ? users.filter(user => String(user.user_name || '').toLocaleLowerCase().includes(needle) || (!user.mystery && String(user.user_id || '').includes(needle))) : users;
+}
+
 export function initial(name) {
   return Array.from(String(name || t('访客')).trim())[0] || t('访');
 }
 
 export function headerIdentity(snapshot) {
   const account = snapshot?.account;
-  const loggedIn = !!account?.user_id;
+  const loggedIn = validUid(account?.user_id);
   return {
     loggedIn,
     name: loggedIn ? String(account.name || t('哔哩哔哩用户')) : t('超绝可爱弹幕姬'),
@@ -99,6 +127,75 @@ export function eventKeys(events) {
   });
 }
 
+// A synchronous SHA-256 lets the first restored paint decide whether to animate.
+// Only its digests reach sessionStorage; fallback event keys can contain text.
+function presentationDigest(value) {
+  const bytes = new TextEncoder().encode(String(value));
+  const padded = new Uint8Array(Math.ceil((bytes.length + 9) / 64) * 64);
+  padded.set(bytes); padded[bytes.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(padded.length - 8, Math.floor(bytes.length / 0x20000000));
+  view.setUint32(padded.length - 4, (bytes.length * 8) >>> 0);
+  const state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const constants = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+  const rotate = (word, amount) => (word >>> amount) | (word << (32 - amount));
+  const words = new Uint32Array(64);
+  for (let offset = 0; offset < padded.length; offset += 64) {
+    for (let index = 0; index < 16; index++) words[index] = view.getUint32(offset + index * 4);
+    for (let index = 16; index < 64; index++) {
+      const left = words[index - 15], right = words[index - 2];
+      words[index] = words[index - 16] + (rotate(left, 7) ^ rotate(left, 18) ^ (left >>> 3)) + words[index - 7] + (rotate(right, 17) ^ rotate(right, 19) ^ (right >>> 10));
+    }
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let index = 0; index < 64; index++) {
+      const first = (h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + ((e & f) ^ (~e & g)) + constants[index] + words[index]) >>> 0;
+      const second = ((rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      h = g; g = f; f = e; e = (d + first) >>> 0; d = c; c = b; b = a; a = (first + second) >>> 0;
+    }
+    [a, b, c, d, e, f, g, h].forEach((word, index) => { state[index] = (state[index] + word) >>> 0; });
+  }
+  return state.map(word => word.toString(16).padStart(8, '0')).join('');
+}
+
+// Window-session recovery state is deliberately separate from the chat buffer.
+// Keep the latest 512 displayed identities in each of at most eight account/room
+// scopes. A native app restart starts a fresh session; reconnecting does not.
+export function createLakePresentationLedger(storage, nativeSession = '') {
+  const storageKey = 'danmakuvoice.lakePresented';
+  const session = presentationDigest(nativeSession);
+  const contexts = new Map();
+  const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  try {
+    const raw = storage?.getItem(storageKey);
+    const saved = raw && raw.length <= 300000 ? JSON.parse(raw) : null;
+    if (saved?.version === 1 && saved.session === session && Array.isArray(saved.contexts)) {
+      for (const item of saved.contexts.slice(-8)) {
+        if (!Array.isArray(item) || !digest(item[0]) || !Array.isArray(item[1])) continue;
+        contexts.set(item[0], new Set(item[1].filter(digest).slice(-512)));
+      }
+    }
+  } catch { /* Optional recovery storage may be denied or damaged. */ }
+  return {
+    has(context, key) { return contexts.get(presentationDigest(context))?.has(presentationDigest(key)) || false; },
+    mark(context, keys) {
+      const scope = presentationDigest(context);
+      const seen = contexts.get(scope) || new Set();
+      let changed = !contexts.has(scope);
+      for (const key of keys) {
+        const id = presentationDigest(key);
+        if (seen.has(id)) continue;
+        seen.add(id); changed = true;
+        if (seen.size > 512) seen.delete(seen.values().next().value);
+      }
+      if (!changed) return;
+      contexts.delete(scope); contexts.set(scope, seen);
+      if (contexts.size > 8) contexts.delete(contexts.keys().next().value);
+      try { storage?.setItem(storageKey, JSON.stringify({ version: 1, session, contexts: [...contexts].map(([id, values]) => [id, [...values]]) })); }
+      catch { /* The in-memory state still prevents full-render replay. */ }
+    },
+  };
+}
+
 export function liveConnectionView(live = {}) {
   const running = !!live.running;
   if (live.state === 'session_expired') return { online: false, pending: false, caption: t('登录已失效'), emptyTitle: t('账号登录已失效'), emptyDescription: t('请重新扫码登录，连接后继续接收弹幕。') };
@@ -141,6 +238,7 @@ export function runtimeIssue(snapshot) {
   if (snapshot.status?.error) return errorMessage(typeof snapshot.status.error === 'string' ? snapshot.status.error : snapshot.status.message || t('连接或播放遇到问题，请查看设置。'), 'DV-X00');
   const playback = playbackIssue(snapshot.queue);
   if (playback) return playback;
+  if (snapshot.live?.running && snapshot.received_emotes_error) return ui`个人表情信息读取失败：${snapshot.received_emotes_error}；请打开表情面板重试。`;
   if (snapshot.live?.running && Number(snapshot.live.errors) > 0) return t('本次会话有接收或播报错误，请检查直播间和声音设置。 [DV-V05]');
   if (snapshot.live?.running && snapshot.live.no_voice > 0 && snapshot.setup?.tts_enabled) return t('有弹幕未能播报，请检查默认声音、用户绑定或关键词音效。 [DV-P02]');
   return '';
@@ -172,8 +270,19 @@ export function safeQrUrl(value) {
 }
 
 export function startingStep(snapshot) {
-  if (snapshot.onboarding_done) return 'main';
-  if (snapshot.setup?.room_id) return snapshot.setup.tts_enabled && snapshot.presets?.some(p => p.id === snapshot.rules?.default_preset_id) ? 'ready' : 'tts';
+  const roomReady = validUid(snapshot?.setup?.room_id);
+  // Explicit offline windows exercise local setup without opening a real
+  // account or live connection. Saved anonymous profiles in real windows
+  // must return through login and authenticated own-room resolution.
+  if (!snapshot?.network_disabled) {
+    const loggedIn = validUid(snapshot?.account?.user_id);
+    const legacyTarget = snapshot?.setup?.mode === 'anonymous'
+      || (validUid(snapshot?.setup?.uid) && String(snapshot.setup.uid) !== String(snapshot.account?.user_id));
+    if (legacyTarget || !loggedIn) return snapshot?.onboarding_done || roomReady || legacyTarget ? 'login' : 'welcome';
+    if (!roomReady) return 'login';
+  }
+  if (snapshot?.onboarding_done) return 'main';
+  if (roomReady) return snapshot.setup.tts_enabled && snapshot.presets?.some(p => p.id === snapshot.rules?.default_preset_id) ? 'ready' : 'tts';
   return 'welcome';
 }
 
@@ -189,11 +298,21 @@ export function normalizedEvents(snapshot) {
   return (Array.isArray(snapshot.live?.events) ? snapshot.live.events : []).map(item => item.event || item).filter(item => item && typeof item === 'object');
 }
 
+// The Rust store owns session history. A missing or invalid summary contributes
+// no display rows; the view must not invent an empty session or a duration.
+export function broadcastSessionSummary(broadcast) {
+  const item = broadcast?.last_session;
+  if (!item || !Number.isSafeInteger(item.messages) || item.messages < 0
+    || !Number.isSafeInteger(item.ended_observed_at) || item.ended_observed_at <= 0
+    || (item.seconds != null && (!Number.isSafeInteger(item.seconds) || item.seconds < 0))) return null;
+  return { messages: item.messages, seconds: item.seconds ?? null, endedAt: item.ended_observed_at };
+}
+
 export function qrLabel(qr = {}) {
   return ({ idle: t('正在生成二维码'), waiting: t('等待扫码'), scanned: t('已扫码，请在手机上确认'), complete: t('已连接'), expired: t('二维码已过期') })[qr.status] || localizeDiagnostic(qr.message) || t('等待连接');
 }
 
 export function qrNeedsRoomFallback(snapshot) {
   return snapshot?.qr?.provider === 'bilibili' && snapshot.qr.status === 'expired'
-    && !!snapshot.account?.user_id && !snapshot.setup?.room_id;
+    && validUid(snapshot.account?.user_id) && !validUid(snapshot.setup?.room_id);
 }

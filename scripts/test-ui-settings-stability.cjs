@@ -11,7 +11,7 @@ const providers = ['gpt_sovits', 'dots', 'fish_audio', 'doubao'];
 const state = {
   config_revision: 1, onboarding_done: true, network_disabled: true,
   preferences: { language: 'zh-CN', appearance: 'dark', scale: 1, master_volume: 1, tts_enabled: true },
-  setup: { room_id: 123, tts_enabled: true, mode: 'anonymous', uid: 42 },
+  setup: { room_id: 123, tts_enabled: true, mode: 'account', uid: 42 },
   live_settings: { gift_merge: { enabled: false } }, live: { running: false, state: 'stopped', events: [] },
   queue: { current: null, pending: [], history: [] },
   rules: { default_preset_id: 'gpt_sovits-1', preferred_presets: {}, user_words: [] },
@@ -40,7 +40,7 @@ let failChoice = false;
   const origin = `http://127.0.0.1:${server.address().port}`;
   let browser;
   try {
-    browser = await chromium.launch({ headless: true, channel: 'msedge' });
+    browser = await chromium.launch({ headless: true, channel: 'msedge', args: ['--disable-features=msWindowTabManagerPublic'] });
     const context = await browser.newContext({ viewport: { width: 1040, height: 740 }, reducedMotion: 'no-preference' });
     await context.route('**/*', route => route.request().url().startsWith(origin + '/') ? route.continue() : route.abort());
     const page = await context.newPage();

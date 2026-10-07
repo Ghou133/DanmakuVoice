@@ -57,6 +57,7 @@ pub fn command_code(action: &str) -> &'static str {
         "migration" | "data" | "assets" | "aliases" => "DV-X10",
         "external" => "DV-X11",
         "overlay" => "DV-X17",
+        "obs" => "DV-X18",
         _ => "DV-X00",
     }
 }

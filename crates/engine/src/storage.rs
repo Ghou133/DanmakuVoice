@@ -3,6 +3,7 @@
 use crate::audio::OutputSelection;
 use crate::bilibili::BiliSession;
 use crate::model::{LiveSettings, Provider, VoiceBinding, VoicePreset};
+use crate::obs::ObsSettings;
 use crate::rules::{RuleError, RulePreview, RuleSet};
 use crate::secrets::{self, SecretBytes, SecretError};
 use crate::tts::dobao::DoubaoDevice;
@@ -29,6 +30,11 @@ pub enum StorageError {
     Io(#[from] io::Error),
     #[error("数据库操作失败：{0} [DV-S02]")]
     Sql(#[from] rusqlite::Error),
+    #[error("写入失败且回滚失败；原错误：{write}；回滚错误：{rollback} [DV-S47]")]
+    WriteRollback {
+        write: Box<StorageError>,
+        rollback: rusqlite::Error,
+    },
     #[error("配置格式错误：{0} [DV-S03]")]
     Json(#[from] serde_json::Error),
     #[error("不支持的数据库版本：{0} [DV-S04]")]
@@ -99,6 +105,10 @@ pub enum StorageError {
     DataResetBusy,
     #[error("OBS 叠加层设置无效 [DV-S37]")]
     InvalidOverlaySettings,
+    #[error(
+        "OBS 联动设置无效：地址只能是主机名或 IPv4，端口 1–65535，密码不超过 256 字且不含控制字符 [DV-S38]"
+    )]
+    InvalidObsSettings,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -108,6 +118,78 @@ pub enum AppearancePreference {
     Light,
     #[default]
     System,
+}
+
+/// Only observations made by this application, never Bilibili historical analytics.
+/// An unfinished observation remains active across restarts; it is not a last session.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BroadcastSessionRecord {
+    pub active: Option<BroadcastSessionProgress>,
+    pub last_session: Option<BroadcastSessionSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BroadcastSessionProgress {
+    pub observation_run_id: String,
+    pub started_at: Option<u64>,
+    pub observed_started_at: u64,
+    pub last_observed_at: u64,
+    pub messages: u64,
+    pub receiver: Option<BroadcastReceiverCursor>,
+}
+
+/// The receiver's cumulative count includes messages beyond the display buffer.
+/// A run UUID and receiver epoch prevent reloads, reconnects and account switches
+/// from adding an already-counted buffer again. This is not a credential.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BroadcastReceiverCursor {
+    pub run_id: String,
+    pub epoch: u64,
+    pub received: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BroadcastSessionSummary {
+    pub started_at: Option<u64>,
+    pub observed_started_at: u64,
+    pub ended_observed_at: u64,
+    pub messages: u64,
+    /// Elapsed time to an observed ending. Unknown after an unobserved offline
+    /// ending, or when Bilibili did not supply the current stream's start time.
+    pub seconds: Option<u64>,
+}
+
+impl BroadcastSessionRecord {
+    fn validate(&self) -> Result<(), StorageError> {
+        if let Some(active) = &self.active
+            && (active.observed_started_at == 0
+                || Uuid::parse_str(&active.observation_run_id).is_err()
+                || active.last_observed_at < active.observed_started_at
+                || active
+                    .started_at
+                    .is_some_and(|start| start == 0 || start > active.last_observed_at)
+                || active
+                    .receiver
+                    .as_ref()
+                    .is_some_and(|cursor| Uuid::parse_str(&cursor.run_id).is_err()))
+        {
+            return Err(StorageError::InvalidLiveSettings);
+        }
+        if let Some(last) = &self.last_session
+            && (last.observed_started_at == 0
+                || last.ended_observed_at < last.observed_started_at
+                || last
+                    .started_at
+                    .is_some_and(|start| start == 0 || start > last.ended_observed_at)
+                || last.seconds.is_some_and(|seconds| {
+                    last.started_at
+                        .is_none_or(|start| seconds != last.ended_observed_at - start)
+                }))
+        {
+            return Err(StorageError::InvalidLiveSettings);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -651,6 +733,35 @@ impl DataStore {
         result
     }
 
+    /// Group related database writes, including default-voice repair, into one
+    /// commit. Nested store methods may open their own savepoints. The closure
+    /// must not perform filesystem or network side effects.
+    pub fn with_savepoint<T>(
+        &mut self,
+        write: impl FnOnce(&mut Self) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        self.conn.execute_batch("SAVEPOINT application_write")?;
+        let result = write(self).and_then(|value| {
+            self.conn
+                .execute_batch("RELEASE SAVEPOINT application_write")?;
+            Ok(value)
+        });
+        match result {
+            Ok(value) => Ok(value),
+            Err(write) => {
+                if let Err(rollback) = self.conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT application_write; RELEASE SAVEPOINT application_write",
+                ) {
+                    return Err(StorageError::WriteRollback {
+                        write: Box::new(write),
+                        rollback,
+                    });
+                }
+                Err(write)
+            }
+        }
+    }
+
     /// Snapshot the current database before a user-confirmed legacy import.
     /// SQLite's backup API includes committed WAL content in this file.
     pub fn backup_before_legacy_import(&self) -> Result<PathBuf, StorageError> {
@@ -768,6 +879,89 @@ impl DataStore {
         Ok(settings)
     }
 
+    /// OBS remote-control choices (experimental broadcast console). The
+    /// WebSocket password lives separately in `protected_secrets`.
+    pub fn save_obs_settings(&mut self, settings: &ObsSettings) -> Result<(), StorageError> {
+        if !settings.is_valid() {
+            return Err(StorageError::InvalidObsSettings);
+        }
+        let json = serde_json::to_string(settings)?;
+        self.conn.execute(
+            "INSERT INTO settings(key,json) VALUES('obs',?1)\
+            ON CONFLICT(key) DO UPDATE SET json=excluded.json",
+            params![json],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_obs_settings(&self) -> Result<ObsSettings, StorageError> {
+        let json: Option<String> = self
+            .conn
+            .query_row("SELECT json FROM settings WHERE key='obs'", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let settings = match json {
+            Some(value) => serde_json::from_str(&value)?,
+            None => ObsSettings::default(),
+        };
+        if !settings.is_valid() {
+            return Err(StorageError::InvalidObsSettings);
+        }
+        Ok(settings)
+    }
+
+    /// Replace (or with an empty value, remove) the OBS WebSocket password.
+    /// It is DPAPI-protected like other credentials and never exported.
+    pub fn save_obs_password(&mut self, password: &str) -> Result<(), StorageError> {
+        if password.is_empty() {
+            self.conn.execute(
+                "DELETE FROM protected_secrets WHERE key='obs_websocket'",
+                [],
+            )?;
+            return Ok(());
+        }
+        if password.chars().count() > 256 || password.chars().any(char::is_control) {
+            return Err(StorageError::InvalidObsSettings);
+        }
+        let protected = secrets::protect(password.as_bytes())?;
+        self.conn.execute(
+            "INSERT INTO protected_secrets(key,protected_value) VALUES('obs_websocket',?1)\
+            ON CONFLICT(key) DO UPDATE SET protected_value=excluded.protected_value",
+            params![protected],
+        )?;
+        Ok(())
+    }
+
+    pub fn has_obs_password(&self) -> Result<bool, StorageError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM protected_secrets WHERE key='obs_websocket'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn load_obs_password(&self) -> Result<Option<Zeroizing<String>>, StorageError> {
+        let protected: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT protected_value FROM protected_secrets WHERE key='obs_websocket'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(protected) = protected else {
+            return Ok(None);
+        };
+        let plaintext = secrets::unprotect(&protected)?;
+        let text = plaintext.as_str().map_err(StorageError::from)?;
+        Ok(Some(Zeroizing::new(text.to_owned())))
+    }
+
     pub fn save_desktop_preferences(
         &mut self,
         preferences: &DesktopPreferences,
@@ -795,6 +989,53 @@ impl DataStore {
         };
         preferences.validate()?;
         Ok(preferences)
+    }
+
+    /// Local stream observations are scoped to the authenticated owner and own
+    /// room. Keep them outside shareable configuration exports and secret rows.
+    pub fn load_broadcast_session(
+        &self,
+        account_uid: u64,
+        room_id: u64,
+    ) -> Result<Option<BroadcastSessionRecord>, StorageError> {
+        if account_uid == 0 || room_id == 0 {
+            return Err(StorageError::InvalidLiveSettings);
+        }
+        let key = format!("broadcast.session:{account_uid}:{room_id}");
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT json FROM settings WHERE key=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let record: Option<BroadcastSessionRecord> =
+            json.map(|json| serde_json::from_str(&json)).transpose()?;
+        if let Some(record) = &record {
+            record.validate()?;
+        }
+        Ok(record)
+    }
+
+    /// One row atomically holds both the unfinished observation and last ending.
+    pub fn save_broadcast_session(
+        &mut self,
+        account_uid: u64,
+        room_id: u64,
+        record: &BroadcastSessionRecord,
+    ) -> Result<(), StorageError> {
+        if account_uid == 0 || room_id == 0 {
+            return Err(StorageError::InvalidLiveSettings);
+        }
+        record.validate()?;
+        let key = format!("broadcast.session:{account_uid}:{room_id}");
+        let json = serde_json::to_string(record)?;
+        self.conn.execute(
+            "INSERT INTO settings(key,json) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET json=excluded.json",
+            params![key, json],
+        )?;
+        Ok(())
     }
 
     /// Store only a user-confirmed QR session. The serialized plaintext is
@@ -1895,6 +2136,125 @@ mod tests {
     use crate::model::Provider;
     use crate::rules::{Replacement, SoundRule};
     use crate::voice_library::{ReferenceProfile, ReferenceRole};
+
+    fn broadcast_session_record() -> BroadcastSessionRecord {
+        let run_id = Uuid::new_v4().to_string();
+        BroadcastSessionRecord {
+            active: Some(BroadcastSessionProgress {
+                observation_run_id: run_id.clone(),
+                started_at: Some(100),
+                observed_started_at: 120,
+                last_observed_at: 180,
+                messages: 301,
+                receiver: Some(BroadcastReceiverCursor {
+                    run_id,
+                    epoch: 2,
+                    received: 301,
+                }),
+            }),
+            last_session: Some(BroadcastSessionSummary {
+                started_at: Some(10),
+                observed_started_at: 12,
+                ended_observed_at: 70,
+                messages: 19,
+                seconds: Some(60),
+            }),
+        }
+    }
+
+    #[test]
+    fn broadcast_session_persistence_keeps_active_and_last_scoped_to_owner_room() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let first = broadcast_session_record();
+        let mut other = first.clone();
+        other.active.as_mut().unwrap().messages = 5;
+        store.save_broadcast_session(123, 456, &first).unwrap();
+        store.save_broadcast_session(789, 456, &other).unwrap();
+        assert_eq!(store.load_broadcast_session(123, 789).unwrap(), None);
+        drop(store);
+        let reopened = DataStore::open(temp.path()).unwrap();
+        assert_eq!(
+            reopened.load_broadcast_session(123, 456).unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            reopened.load_broadcast_session(789, 456).unwrap(),
+            Some(other)
+        );
+        assert_eq!(reopened.load_broadcast_session(456, 123).unwrap(), None);
+    }
+
+    #[test]
+    fn broadcast_session_invalid_records_do_not_replace_saved_observations() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let saved = broadcast_session_record();
+        store.save_broadcast_session(123, 456, &saved).unwrap();
+        let mut invalid = saved.clone();
+        invalid.last_session.as_mut().unwrap().seconds = Some(61);
+        assert!(store.save_broadcast_session(123, 456, &invalid).is_err());
+        invalid = saved.clone();
+        invalid
+            .active
+            .as_mut()
+            .unwrap()
+            .receiver
+            .as_mut()
+            .unwrap()
+            .run_id = "bad-run".into();
+        assert!(store.save_broadcast_session(123, 456, &invalid).is_err());
+        assert!(store.save_broadcast_session(0, 456, &saved).is_err());
+        assert!(store.load_broadcast_session(123, 0).is_err());
+        assert_eq!(store.load_broadcast_session(123, 456).unwrap(), Some(saved));
+    }
+
+    #[test]
+    fn broadcast_session_history_is_not_exported_and_clear_data_removes_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        store
+            .save_broadcast_session(123, 456, &broadcast_session_record())
+            .unwrap();
+        let exported = serde_json::to_value(store.export_configuration().unwrap()).unwrap();
+        let exported = exported.to_string();
+        assert!(!exported.contains("broadcast.session"));
+        assert!(!exported.contains("last_session"));
+        assert!(!exported.contains("observation_run_id"));
+        store.clear_application_data().unwrap();
+        assert_eq!(store.load_broadcast_session(123, 456).unwrap(), None);
+    }
+
+    #[test]
+    fn broadcast_session_corruption_and_sql_write_failure_are_explicit() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let saved = broadcast_session_record();
+        store.save_broadcast_session(123, 456, &saved).unwrap();
+        store.conn.execute_batch(
+            "CREATE TRIGGER reject_broadcast_session_write BEFORE UPDATE ON settings
+             WHEN NEW.key LIKE 'broadcast.session:%' BEGIN SELECT RAISE(ABORT, 'test write failure'); END;"
+        ).unwrap();
+        let mut next = saved.clone();
+        next.active.as_mut().unwrap().messages += 1;
+        assert!(matches!(
+            store.save_broadcast_session(123, 456, &next),
+            Err(StorageError::Sql(_))
+        ));
+        assert_eq!(store.load_broadcast_session(123, 456).unwrap(), Some(saved));
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_broadcast_session_write")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE settings SET json='not-json' WHERE key='broadcast.session:123:456'",
+                [],
+            )
+            .unwrap();
+        assert!(store.load_broadcast_session(123, 456).is_err());
+    }
 
     #[test]
     fn invalid_rules_never_replace_the_saved_rules() {
@@ -3009,6 +3369,87 @@ mod tests {
             reopened.save_desktop_preferences(&invalid),
             Err(StorageError::InvalidDesktopPreferences)
         ));
+    }
+
+    #[test]
+    fn obs_settings_round_trip_validate_and_stay_out_of_exports() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        assert_eq!(store.load_obs_settings().unwrap(), ObsSettings::default());
+        assert!(!store.has_obs_password().unwrap());
+        let settings = ObsSettings {
+            enabled: true,
+            host: "obs-fictional-host.lan".into(),
+            port: 4460,
+            auto_launch: false,
+            executable: Some(
+                std::env::temp_dir()
+                    .join("obs64.exe")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        };
+        store.save_obs_settings(&settings).unwrap();
+        for broken in [
+            ObsSettings {
+                host: "ws://127.0.0.1".into(),
+                ..settings.clone()
+            },
+            ObsSettings {
+                port: 0,
+                ..settings.clone()
+            },
+            ObsSettings {
+                executable: Some("C:\\Windows\\System32\\cmd.exe".into()),
+                ..settings.clone()
+            },
+        ] {
+            assert!(matches!(
+                store.save_obs_settings(&broken),
+                Err(StorageError::InvalidObsSettings)
+            ));
+        }
+        assert!(matches!(
+            store.save_obs_password("line\nbreak"),
+            Err(StorageError::InvalidObsSettings)
+        ));
+        drop(store);
+        let reopened = DataStore::open(temp.path()).unwrap();
+        assert_eq!(reopened.load_obs_settings().unwrap(), settings);
+        let exported = serde_json::to_string(&reopened.export_configuration().unwrap()).unwrap();
+        assert!(!exported.contains("obs-fictional-host"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn obs_password_is_protected_cleared_and_never_exported() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        store.save_obs_password("fictional-obs-password").unwrap();
+        assert!(store.has_obs_password().unwrap());
+        assert_eq!(
+            store.load_obs_password().unwrap().unwrap().as_str(),
+            "fictional-obs-password"
+        );
+        let exported = serde_json::to_string(&store.export_configuration().unwrap()).unwrap();
+        assert!(!exported.contains("fictional-obs-password"));
+        store.save_obs_password("").unwrap();
+        assert!(!store.has_obs_password().unwrap());
+        assert!(store.load_obs_password().unwrap().is_none());
+        drop(store);
+        for entry in fs::read_dir(temp.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let bytes = fs::read(&path).unwrap();
+                assert!(
+                    !bytes
+                        .windows(b"fictional-obs-password".len())
+                        .any(|w| w == b"fictional-obs-password"),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]

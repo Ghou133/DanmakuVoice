@@ -532,7 +532,7 @@ fn fill<T: Copy>(data: &mut [T], shared: &Shared, convert: impl Fn(f32) -> T) {
     let volume = f32::from_bits(shared.volume_bits.load(Ordering::Relaxed));
     let mut empty = false;
     let mut played = 0u64;
-    for out in data {
+    for index in 0..data.len() {
         let value = loop {
             match shared.samples.pop() {
                 Some(tagged) if tagged.job_id == shared.active_job.load(Ordering::Acquire) => {
@@ -546,7 +546,14 @@ fn fill<T: Copy>(data: &mut [T], shared: &Shared, convert: impl Fn(f32) -> T) {
                 }
             }
         };
-        *out = convert((value * volume).clamp(-1.0, 1.0));
+        if empty {
+            // The producer may refill during this callback. Consume it on the
+            // next callback rather than repeatedly probing an empty queue on
+            // the real-time thread (including all idle callbacks).
+            data[index..].fill(convert(0.0));
+            break;
+        }
+        data[index] = convert((value * volume).clamp(-1.0, 1.0));
     }
     if played > 0 {
         shared.played_samples.fetch_add(played, Ordering::Relaxed);
@@ -599,6 +606,53 @@ impl AudioWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_callback_fills_all_formats_and_preserves_later_pcm() {
+        let writer = test_writer(48_000, 2, 16);
+        writer.activate(1);
+        let mut signed = [123i16; 16];
+        fill(&mut signed, &writer.shared, |sample| {
+            (sample * i16::MAX as f32) as i16
+        });
+        assert_eq!(signed, [0; 16]);
+        let mut unsigned = [0u16; 16];
+        fill(&mut unsigned, &writer.shared, |sample| {
+            ((sample + 1.0) * 0.5 * u16::MAX as f32) as u16
+        });
+        assert_eq!(unsigned, [32767; 16]);
+        writer
+            .shared
+            .samples
+            .push(TaggedSample {
+                job_id: 99,
+                value: 0.9,
+            })
+            .unwrap_or_else(|_| panic!("test queue unexpectedly full"));
+        writer
+            .shared
+            .samples
+            .push(TaggedSample {
+                job_id: 1,
+                value: 0.5,
+            })
+            .unwrap_or_else(|_| panic!("test queue unexpectedly full"));
+        let mut values = [9.0; 16];
+        fill(&mut values, &writer.shared, |sample| sample);
+        assert_eq!(values[0], 0.5);
+        assert_eq!(values[1..], [0.0; 15]);
+        assert_eq!(writer.shared.played_samples.load(Ordering::Relaxed), 1);
+        assert_eq!(writer.shared.underruns.load(Ordering::Relaxed), 3);
+        writer
+            .shared
+            .samples
+            .push(TaggedSample {
+                job_id: 1,
+                value: 0.25,
+            })
+            .unwrap_or_else(|_| panic!("test queue unexpectedly full"));
+        assert_eq!(writer.render_test_frames(2), vec![0.25, 0.0]);
+    }
 
     #[tokio::test]
     async fn progress_counts_only_heard_samples_of_the_active_job() {

@@ -1,6 +1,24 @@
 // Keys are the original UI copy. Only explicitly marked application text is translated.
 export const english = Object.freeze(Object.fromEntries(`
 打开直播间	Open live room
+刷新	Refresh
+人在看	watching
+查看在看的观众	See who's watching
+在看的观众	Viewers watching now
+正在获取直播状态…	Checking broadcast status…
+搜索用户名或 UID	Search name or UID
+请先连接直播间	Connect to a live room first
+观众数据获取失败	Could not fetch viewer data
+显示上次获取的名单	Showing the last fetched list
+正在获取观众数据…	Fetching viewer data…
+仅显示前 1000 位	Showing up to 1,000 viewers
+B站只公开部分在线观众	Bilibili lists only some of the viewers online
+暂时没有公开的在线观众	No public viewers online right now
+贡献值	Contribution
+贡献	Contrib.
+没有匹配的用户	No matching viewers
+总督	Governor
+提督	Admiral
 刷新开播状态	Refresh broadcast status
 请先扫码登录哔哩哔哩，再管理自己的直播间。	Sign in to Bilibili by QR code to manage your own room.
 未开播	Offline
@@ -176,7 +194,6 @@ AGPL-3.0-only · 许可信息见 GitHub 仓库 NOTICE。	AGPL-3.0-only · See NO
 退出哔哩哔哩账号	Sign out of Bilibili
 合并连续赠送的礼物	Merge consecutive gifts
 断开直播间后可更改。礼物先按播报规则过滤，再合并数量。	Disconnect from the live room before editing. Gifts are filtered by speech rules before their quantities are merged.
-合并同一观众连续赠送的同种礼物	Merge consecutive gifts of the same type from the same viewer
 初始等待（秒）	Initial wait (seconds)
 每次延长（秒）	Extension per gift (seconds)
 最长等待（秒）	Maximum wait (seconds)
@@ -210,7 +227,6 @@ AGPL-3.0-only · 许可信息见 GitHub 仓库 NOTICE。	AGPL-3.0-only · See NO
 音色管理	Manage voices
 个音色	voices
 为观众指定声音	Assign a viewer voice
-还没有音色，点击「添加音色」开始设置。	No voices yet. Select “Add voice” to get started.
 添加观众	Add viewer
 直接添加用户名，或点击弹幕头像指定声音。	Enter a username, or select a chat avatar to assign a voice.
 首选	Preferred
@@ -289,7 +305,6 @@ SoVITS 模型路径	SoVITS model path
 直接使用原文件，不复制音频。	Uses the original file without copying it.
 文本语言	Text language
 参考音频	Reference audio
-选择一段角色录音，并填写录音中的台词。	Choose a character recording and enter its transcript.
 点击选择参考音频	Choose reference audio
 支持 WAV、MP3、FLAC、OGG 或 M4A	Supports WAV, MP3, FLAC, OGG, or M4A
 填写参考音频中实际说出的文字。	Enter the words actually spoken in the reference audio.
@@ -299,14 +314,12 @@ SoVITS 模型路径	SoVITS model path
 使用原文件，不复制音频。原文件移动或删除后需重新选择。	Uses the original file without copying it. Select it again if the file is moved or deleted.
 编辑 dots 音色	Edit dots voice
 添加 dots 音色	Add dots voice
-选择一段录音作为参考声音。	Choose a recording as the reference voice.
 音色名称	Voice name
 例如：日常播报	For example: Everyday voice
 参考文本（可选）	Reference transcript (optional)
 可填写参考音频中说出的文字。	You can enter the words spoken in the reference audio.
 保存音色	Save voice
 收藏 Fish 音色	Save a Fish voice
-粘贴官网音色页面链接或 32 位音色 ID，填写名称后保存。	Paste an official voice page link or a 32-character voice ID, enter a name, and save.
 音色页面链接或 ID	Voice page link or ID
 https://fish.audio/m/… 或 32 位 ID	https://fish.audio/m/… or a 32-character ID
 查找官方名称	Look up official name
@@ -315,18 +328,15 @@ https://fish.audio/m/… 或 32 位 ID	https://fish.audio/m/… or a 32-characte
 收藏音色	Save voice
 编辑 Fish 音色	Edit Fish voice
 试听此音色	Preview this voice
-选择语音服务。	Choose a speech service.
 选择	Select
 按用户名精确匹配，同名账号会共用声音；填写 UID 时优先按 UID 匹配。	Matches the exact username; accounts with the same name share a voice. If provided, UID takes priority.
 编辑观众声音	Edit viewer voice
 指定观众声音	Assign viewer voice
-填写观众用户名即可指定声音；也可以填写 UID 精确识别。	Enter a viewer username to assign a voice, or provide a UID for an exact match.
 旧配置用户名：	Legacy configuration username:\u0020
 。请确认后手动填写用户名或 UID。	. Verify it, then enter the username or UID manually.
 观众用户名	Viewer username
 输入观众当前用户名	Enter the viewer's current username
 观众 UID（选填）	Viewer UID (optional)
-有 UID 时建议填写	Enter the UID if available
 启用此绑定	Enable this binding
 添加播报别名	Add speech alias
 这位观众的用户名会在播报时替换为别名。	This viewer's username is replaced by the alias when read aloud.
@@ -371,7 +381,6 @@ B站官方表情已过滤	Bilibili standalone emote filtered
 礼物最低金额（元）	Minimum gift amount (CNY)
 醒目留言最低金额（元）	Minimum Super Chat amount (CNY)
 关键词音效	Keyword sounds
-弹幕包含触发词时会播放对应音效。	Plays the matching sound effect when a message contains its trigger.
 导入音频，并在这里设置触发音效的关键词。	Import audio and set keywords to trigger sound effects here.
 替换「	Replace “
 导入音频	Import audio
@@ -406,8 +415,6 @@ B站官方表情已过滤	Bilibili standalone emote filtered
 清除应用数据	Clear app data
 删除本机保存的账号、语音服务凭据、设置、音效和备份，然后重新开始设置。	Delete locally saved accounts, speech service credentials, settings, sounds, and backups, then start setup again.
 保存为	Save as
-保存到一个新文件；导出不包含登录凭据、音效文件和聊天记录。	Save to a new file. Exports exclude login credentials, sound files, and chat history.
-导出无凭据配置	Export configuration without credentials
 旧 config.json 的完整路径	Full path to the old config.json
 先读取预览，再由你选择要导入的内容。不会自动导入账号凭据。	Read a preview, then choose what to import. Account credentials are not imported automatically.
 读取导入预览	Read import preview
@@ -650,7 +657,6 @@ Fish 音色已保存	Fish voice saved
 测试与重连	Test and reconnect
 在直播界面底部调节	Adjust at the bottom of the live screen
 导入旧配置	Import old config
-导出的配置不包含登录凭据。清除应用数据会删除本机保存的账号、语音服务凭据、设置、音效和备份，然后重新开始设置。	Exported settings never include sign-in credentials. Clearing app data removes the saved accounts, voice service credentials, settings, sounds and backups on this computer, then starts setup again.
 更新	Updates
 项目主页	Project
 许可信息见 GitHub 仓库 NOTICE。	See NOTICE in the GitHub repository for license details.
@@ -716,7 +722,6 @@ Fish 音色已保存	Fish voice saved
 OBS 叠加层	OBS overlay
 实验	Beta
 实验性	Experimental
-把弹幕和正在朗读的内容画进直播画面，看录播的观众也能看到。	Draws chat and the message being read into your stream, so replay viewers can see it too.
 一体卡	One card
 光脊	Spine
 一条发光的竖线串起刊头和弹幕，没有底板，最轻。	A glowing line joins the masthead and chat. No panel, the lightest look.
@@ -764,7 +769,6 @@ OBS 已连接 · 	OBS connected ·\u0020
 测试弹幕	Test message
 测试醒目留言	Test Super Chat
 添加到 OBS	Add to OBS
-看直播和录播的观众只需要看到内容，默认只在礼物和醒目留言旁显示名字。	Live and replay viewers only need the content, so names appear only beside gifts and Super Chats by default.
 等待 OBS 连接 · 在 OBS 中添加浏览器来源并粘贴地址	Waiting for OBS · Add a Browser source in OBS and paste the address
 预览背景	Preview background
 深色背景	Dark backdrop
@@ -781,7 +785,6 @@ OBS 已连接 · 	OBS connected ·\u0020
 弹幕照常显示，打开右上角开关继续朗读。	Messages still appear. Turn on the switch above to keep reading.
 开播	Go live
 下播	End stream
-下播？	End the stream?
 已下播	Stream ended
 直播中	Live
 继续开播	Continue
@@ -789,7 +792,80 @@ OBS 已连接 · 	OBS connected ·\u0020
 开播前需要人脸验证	Face verification is required before going live
 用哔哩哔哩 App 扫码完成验证，然后点「继续开播」。	Scan with the Bilibili app to verify, then select Continue.
 已开播，请在 OBS 中开始推流	You're live. Start streaming in OBS.
-请先在 OBS 中停止推流。下播只关闭 B站直播间，弹幕接收和播报会继续。	Stop streaming in OBS first. This only closes the Bilibili room; chat and speech keep running.
+已开播，OBS 已开始推流	You're live. OBS started streaming.
+已开播，OBS 正在开始推流	You're live. OBS is starting the stream.
+已开播。OBS 原本就在推流，没有改动它的推流设置	You're live. OBS was already streaming, so its stream settings were left unchanged.
+已开播，但 OBS 没能自动推流，请手动复制推流码：	You're live, but OBS could not start streaming automatically. Copy the stream key by hand:\u0020
+已下播，OBS 已停止推流	Stream ended. OBS stopped streaming.
+已下播，OBS 正在停止推流	Stream ended. OBS is stopping the stream.
+已下播，但 OBS 没能停止推流，请在 OBS 里手动停止：	Stream ended, but OBS could not stop streaming. Stop it in OBS:\u0020
+OBS 联动	OBS link
+OBS 与开播	OBS & going live
+OBS 功能	OBS features
+开播台	Broadcast console
+叠加层	Overlay
+开播、下播、标题与推流	Go live, end, title and stream
+弹幕画进直播画面	Chat drawn into your stream
+未启用	Off
+已启用 · 同步控制 OBS	On · controls OBS
+已启用	On
+地址不可用	Address unavailable
+OBS 正在显示	Showing in OBS
+等待 OBS 显示	Waiting for OBS
+正在启动 OBS…	Starting OBS…
+等 OBS 打开 WebSocket，最多约 45 秒	Waiting up to about 45 s for OBS to open its WebSocket
+没能连上 OBS	Could not reach OBS
+尚未连接 OBS	Not connected to OBS yet
+尚未检测 OBS	OBS has not been checked yet
+正在检测 OBS…	Checking OBS…
+来源同步失败	Source sync failed
+正在同步 OBS 来源地址…	Syncing the OBS source address…
+OBS 中还没有叠加层来源，请点“添加到 OBS”。	No overlay source exists in OBS yet. Select Add to OBS.
+OBS 来源地址已同步	OBS source address is in sync
+OBS 来源地址已同步 · 等待画面连接，请确认场景和来源可见。	OBS source address is in sync · Waiting for the browser. Check that its scene and source are visible.
+已手动选择。点“自动查找”恢复默认。	Chosen by hand. Click Find automatically to go back to the default.
+已自动找到。Steam 版或便携版可以手动选择 obs64.exe。	Found automatically. For the Steam or portable version, choose obs64.exe by hand.
+没有找到 OBS。请选择 OBS 安装目录 bin\\64bit 下的 obs64.exe。	OBS was not found. Choose obs64.exe in the bin\\64bit folder of your OBS installation.
+OBS 程序	OBS program
+自动：	Auto:\u0020
+点击选择 obs64.exe	Choose obs64.exe
+选择 obs64.exe	Choose obs64.exe
+请选择 OBS 的 obs64.exe	Choose OBS's obs64.exe
+自动查找	Find automatically
+启动 OBS	Start OBS
+OBS 连接	OBS connection
+连接设置	Connection settings
+在 OBS 中打开“工具 → WebSocket 服务器设置”，勾选“开启 WebSocket 服务器”，端口和密码与这里一致（需要 OBS 28 或更高版本）。	In OBS, open Tools → WebSocket Server Settings, check Enable WebSocket server, and use the same port and password as here (OBS 28 or later).
+OBS 设在其他电脑上，无法自动启动。	OBS is set to another computer, so it can't be started automatically.
+OBS 没开时自动启动	Start OBS if it isn't running
+开播会把 OBS 当前配置的推流服务改为“自定义”，填入 B站服务器和推流码；OBS 已经在推流时不会改动。	Going live switches OBS's current stream service to Custom with the Bilibili server and stream key; nothing changes while OBS is already streaming.
+OBS 已启动并连上	OBS started and connected
+OBS 已经在运行，连接正常	OBS is already running and connected
+已添加到 OBS	Added to OBS
+已放进当前场景	Added to the current scene
+OBS 里的叠加层已更新	Overlay updated in OBS
+已生成新地址，OBS 里的叠加层已同步更新	New address generated; the overlay in OBS was updated too
+开播、下播时同步控制 OBS	Control OBS when going live and ending
+开播后自动把推流码填进 OBS 并开始推流；下播时先停止 OBS 推流，再关闭直播间。	Going live fills the stream key into OBS and starts streaming; ending stops OBS first, then closes the room.
+OBS 地址	OBS address
+OBS 和弹幕姬在同一台电脑时保持 127.0.0.1。	Keep 127.0.0.1 when OBS runs on this computer.
+WebSocket 端口	WebSocket port
+OBS 默认是 4455。	OBS uses 4455 by default.
+WebSocket 密码	WebSocket password
+已加密保存在本机。输入新密码可替换。	Encrypted on this computer. Enter a new one to replace it.
+OBS 开启了“身份验证”时填写；在 OBS 的“显示连接信息”里可以看到。	Needed when authentication is on in OBS; see Show Connect Info in OBS.
+保存密码	Save password
+测试连接	Test connection
+正在连接 OBS…	Connecting to OBS…
+已连接 OBS	Connected to OBS
+正在推流	streaming
+未在推流	not streaming
+OBS 连接正常	OBS connection OK
+OBS 密码已加密保存	OBS password saved and encrypted
+已清除 OBS 密码	OBS password cleared
+请输入 OBS WebSocket 密码	Enter the OBS WebSocket password
+请填写 OBS 所在电脑的地址，例如 127.0.0.1	Enter the address of the computer running OBS, such as 127.0.0.1
+端口需在 1 到 65535 之间	Port must be between 1 and 65535
 在弹幕姬里开播、下播，随时改标题和分区。画面和声音仍由 OBS 推流。	Go live, end the stream and change the title or category from here. OBS still sends the video and audio.
 一键开播、下播	Go live in one click
 主界面右上角出现开播台，直播时显示已开播时长。	A broadcast console appears at the top right of the main screen and shows how long you've been live.
@@ -837,6 +913,117 @@ OBS 已连接 · 	OBS connected ·\u0020
 已启用开播台，主界面右上角可以开播和下播	Broadcast console is on. Go live from the top right of the main screen.
 已关闭开播台	Broadcast console is off
 开播只打开 B站直播间；画面和声音由 OBS 推送。退出弹幕姬不会自动下播。启用期间，弹幕姬约每分钟读取一次自己房间的开播状态。	Going live only opens the Bilibili room; OBS sends the video and audio. Exiting this app doesn't end the stream. While the console is on, the app reads your room's status about once a minute.
+还没有音色。	No voices yet.
+不包含登录凭据、音效文件和聊天记录。	Excludes login credentials, sound files, and chat history.
+清除应用数据会删除本机保存的账号、语音服务凭据、设置、音效和备份，然后重新开始设置。	Clearing app data removes the saved accounts, voice service credentials, settings, sounds and backups on this computer, then starts setup again.
+会在 OBS 当前场景放一个“弹幕姬叠加层”浏览器来源，再点一次只更新它。手动添加时，宽高填画布分辨率。	Adds a browser source to the current OBS scene; selecting it again only updates it. When adding one manually, use the canvas resolution as width and height.
+直播详情	Stream details
+账号已登录<br>请先开通直播间	Signed in<br>Open a Bilibili live room first
+未找到本账号直播间，请先在 B站开通直播间后重新扫码	No live room was found for this account. Open one on Bilibili, then sign in again.
+请扫码登录哔哩哔哩后接收弹幕	Sign in to Bilibili by QR code before receiving chat
+放弃未保存的直播详情？	Discard unsaved stream details?
+关闭后，尚未保存的直播信息、码率和叠加层标题修改会丢失。	Closing discards unsaved room details, bitrate and overlay heading changes.
+OBS 视频码率	OBS video bitrate
+正在读取 OBS 码率…	Reading OBS bitrate…
+保存到 OBS 当前配置文件	Saves to the current OBS profile
+保存到 OBS 当前配置文件，下次开播生效。	Saves to the current OBS profile. Applies the next time streaming starts.
+请先停止 OBS 推流和录制，再修改码率。	Stop OBS streaming and recording before changing the bitrate.
+保存码率	Save bitrate
+OBS 叠加层主标题	OBS overlay heading
+最多 12 个字，保存后叠加层立即更新。	Up to 12 characters. The overlay updates immediately after saving.
+保存主标题	Save heading
+码率需在 100 到 100000 Kbps 之间	Bitrate must be between 100 and 100000 Kbps
+请填写 1 到 12 字的叠加层主标题	Enter an overlay heading of 1 to 12 characters
+OBS 码率已保存	OBS bitrate saved
+叠加层主标题已保存	Overlay heading saved
+已开播，但 OBS 没能自动推流，请检查「设置 → OBS 与开播」：	Live room opened, but OBS could not start streaming. Check Settings → OBS & broadcast:
+直播间管理	Room moderation
+设为房管	Appoint moderator
+撤销房管	Remove moderator
+仅房主可设置	Only the room owner can change this
+已设为房管	Moderator appointed
+已撤销房管	Moderator removed
+该用户没有公开 UID，无法管理。	This user has no public UID and cannot be moderated.
+扫码登录后可管理直播间用户	Sign in by QR code to moderate room users
+不能禁言或拉黑自己	You cannot mute or block yourself
+离线测试窗口不可管理直播间	Room moderation is unavailable in offline test mode
+当前直播间	Current room
+正在读取管理权限…	Reading moderation permissions…
+仅主播或获授权的房管可操作	Available to the streamer or authorized room moderators
+禁言时长	Mute duration
+本场直播	This broadcast
+1 小时	1 hour
+24 小时	24 hours
+7 天	7 days
+永久	Permanent
+解除禁言	Unmute
+禁言	Mute
+解除直播间拉黑	Unblock in room
+直播间拉黑	Block in room
+同步到 B站直播间	Applies to the Bilibili room
+已禁言	User muted
+已解除禁言	User unmuted
+已加入直播间黑名单	User blocked in the room
+已解除直播间拉黑	User unblocked in the room
+发送弹幕	Send chat
+弹幕发送与用户管理	Chat and room moderation
+在主界面发送弹幕和表情，点头像管理禁言、直播黑名单和房管。	Send chat and emoticons from the main screen. Select an avatar to manage mutes, live-room blocks and moderators.
+发送到自己的直播间	Send to your own live room
+表情包	Emoticons
+发送	Send
+请先扫码登录 B站账号	Sign in to Bilibili by QR code first
+离线测试窗口不可发送弹幕	Sending chat is unavailable in offline test mode
+当前账号不可发送	Unavailable for this account
+正在读取表情包…	Loading emoticons…
+暂无可发送的表情包	No available emoticons
+请输入弹幕内容	Enter a chat message
+已发送	Sent
+弹幕超过当前直播间允许的长度，请缩短后再发送	Message exceeds this room's limit. Shorten it before sending.
+切换到日间	Switch to daytime
+切换到夜间	Switch to nighttime
+此刻这一句	The current phrase
+全部弹幕	All chat
+声音 · volume	Sound · volume
+今晚辛苦啦。	Thank you for tonight.
+这一场的弹幕，留在湖里。	Tonight's messages stay in the lake.
+准备好了，就让今晚开始。	When you are ready, let tonight begin.
+在这里，等下一句。	Here, waiting for the next line.
+条弹幕	chat messages
+暂无上一场数据	No previous session data
+暂无记录	No record yet
+直播标题已保存到 B站	Live title saved to Bilibili
+等待验证	Waiting for verification
+已任命	Appointed
+为房管	as a moderator
+回到准备	Back to preparation
+B站直播间	Bilibili live room
+上一场	Previous session
+分钟	minutes
+调整播报音量	Adjust speech volume
+本机收到	Received here
+仅保留最近 100 条本机收到的弹幕	The latest 100 messages received on this device are retained
+本场	This stream
+房管	Moderator
+朗读已关	Reading off
+朗读弹幕	Read chat
+音量	Volume
+说点什么…	Say something…
+今晚辛苦啦	Thank you for tonight
+今晚	Tonight
+句弹幕	chat messages
+句弹幕沉进了湖里	messages settled in the lake
+小时	hours
+分	minutes
+不能在直播间发言	Cannot send chat in this room
+已在直播间黑名单	Blocked from this live room
+不能再进入你的直播间	Cannot enter your live room again
+可以帮你禁言	Can help mute viewers
+让 TA 帮你管理弹幕	Let them help moderate chat
+确认拉黑	Confirm block
+再点一次确认	Select again to confirm
+开播前需要验证本人	Verify your identity before streaming
+用哔哩哔哩 App 扫码完成人脸验证，	Scan with the Bilibili app to verify your identity,
+再回来点继续。	then come back and select Continue.
 `.trim().split('\n').map(line => {
   const tab = line.indexOf('\t');
   return [line.slice(0, tab), line.slice(tab + 1)];

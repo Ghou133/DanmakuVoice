@@ -4,13 +4,17 @@
 use crate::audio::{AudioError, AudioWriter};
 use crate::tts::{AudioEncoding, AudioStream};
 use crate::wav::{WavError, WavPcmParser};
+#[cfg(windows)]
+use decoder_child::Child;
 use std::io;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+#[cfg(not(windows))]
+use tokio::process::Child;
+use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Error)]
@@ -96,6 +100,56 @@ fn hide_console(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW);
 }
 
+fn spawn_decoder(command: &mut Command, stdin: bool) -> io::Result<Child> {
+    #[cfg(windows)]
+    {
+        decoder_child::Child::spawn(command, stdin)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = stdin;
+        command.spawn()
+    }
+}
+
+#[cfg(windows)]
+mod decoder_child {
+    use super::*;
+    use crate::owned_process::OwnedChild;
+    use std::os::windows::io::OwnedHandle;
+    pub(super) struct Child {
+        native: OwnedChild,
+        pub stdin: Option<tokio::process::ChildStdin>,
+        pub stdout: Option<tokio::process::ChildStdout>,
+    }
+    impl Child {
+        pub(super) fn spawn(command: &Command, stdin: bool) -> io::Result<Self> {
+            let mut native = OwnedChild::spawn(command.as_std(), stdin, true, false)?;
+            let stdin = native
+                .stdin
+                .take()
+                .map(|file| tokio::process::ChildStdin::from_std(OwnedHandle::from(file).into()))
+                .transpose()?;
+            let stdout = native
+                .stdout
+                .take()
+                .map(|file| tokio::process::ChildStdout::from_std(OwnedHandle::from(file).into()))
+                .transpose()?;
+            Ok(Self {
+                native,
+                stdin,
+                stdout,
+            })
+        }
+        pub(super) async fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+            self.native.wait().await
+        }
+        pub(super) async fn kill(&mut self) -> io::Result<()> {
+            self.native.kill().await
+        }
+    }
+}
+
 /// Decode a TTS response as it arrives. PCM from dots.tts receives a local
 /// `atempo` filter, never a server-side speed value. The per-voice gain applies
 /// only to this speech fragment; the CPAL master gain applies to all audio.
@@ -169,7 +223,7 @@ pub async fn play_tts(
     command.args(["-i", "pipe:0"]);
     output_args(&mut command, output, playback.speed)?;
     command.stdin(Stdio::piped());
-    let mut child = command.spawn().map_err(DecodeError::Start)?;
+    let mut child = spawn_decoder(&mut command, true).map_err(DecodeError::Start)?;
     let mut stdin = child.stdin.take().expect("piped ffmpeg stdin");
     let stdout = child.stdout.take().expect("piped ffmpeg stdout");
     let feeder = async move {
@@ -230,7 +284,7 @@ pub async fn play_sound(
     command.arg("-i").arg(sound_path);
     output_args(&mut command, output, 1.0)?;
     command.stdin(Stdio::null());
-    let mut child = command.spawn().map_err(DecodeError::Start)?;
+    let mut child = spawn_decoder(&mut command, false).map_err(DecodeError::Start)?;
     let stdout = child.stdout.take().expect("piped ffmpeg stdout");
     let result = tokio::select! {
         biased;
@@ -343,7 +397,7 @@ mod tests {
             .kill_on_drop(true);
         #[cfg(windows)]
         hide_console(&mut command);
-        let mut child = command.spawn().unwrap();
+        let mut child = spawn_decoder(&mut command, false).unwrap();
         child.wait().await.unwrap();
         let result = finish_child(
             &mut child,
@@ -390,16 +444,23 @@ mod tests {
         command.kill_on_drop(true);
         hide_console(&mut command);
 
-        let output = timeout(Duration::from_secs(5), command.output())
-            .await
-            .expect("child timed out")
-            .expect("child did not start");
+        let mut child = spawn_decoder(&mut command, false).expect("child did not start");
+        let mut output = String::new();
+        timeout(
+            Duration::from_secs(5),
+            child.stdout.take().unwrap().read_to_string(&mut output),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(
-            output.status.success(),
-            "hidden child failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            timeout(Duration::from_secs(5), child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("pipe-ok"));
+        assert!(output.contains("pipe-ok"));
     }
 
     fn streaming_wav() -> Vec<u8> {

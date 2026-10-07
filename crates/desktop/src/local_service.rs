@@ -1,12 +1,16 @@
 //! Optional local TTS process ownership. A configured directory is only used
 //! for the default local voice; existing servers are probed and never adopted.
 
+#[cfg(windows)]
+use danmakuvoice_engine::owned_process::OwnedChild as Child;
 use serde::Serialize;
+#[cfg(not(windows))]
+use std::process::Child;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     time::Duration,
 };
 use tokio::{
@@ -562,8 +566,6 @@ fn process_path(path: PathBuf) -> Result<PathBuf, String> {
 
 struct OwnedProcess {
     child: Child,
-    #[cfg(windows)]
-    job: std::os::windows::io::OwnedHandle,
 }
 
 impl OwnedProcess {
@@ -633,53 +635,11 @@ impl OwnedProcess {
     }
 
     #[cfg(windows)]
-    fn spawn_owned(mut command: Command, stderr_log: File) -> Result<Self, String> {
-        use std::os::windows::io::{FromRawHandle, OwnedHandle};
-        use std::os::windows::{io::AsRawHandle, process::CommandExt};
-        use windows_sys::Win32::System::{
-            JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-                SetInformationJobObject,
-            },
-            Threading::CREATE_NO_WINDOW,
-        };
-        command.creation_flags(CREATE_NO_WINDOW);
-        // SAFETY: A null name requests a private job. OwnedHandle closes it.
-        let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if raw.is_null() {
-            return Err("无法创建本地服务进程边界".into());
-        }
-        // SAFETY: CreateJobObjectW returned a unique owned handle.
-        let job = unsafe { OwnedHandle::from_raw_handle(raw) };
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: The job and the fixed-size limits structure remain valid.
-        let configured = unsafe {
-            SetInformationJobObject(
-                raw,
-                JobObjectExtendedLimitInformation,
-                (&raw const limits).cast(),
-                std::mem::size_of_val(&limits) as u32,
-            )
-        };
-        if configured == 0 {
-            return Err("无法保护本地服务进程".into());
-        }
-        let mut child = command.spawn().map_err(|_| "无法启动本地 TTS 服务")?;
-        // SAFETY: child owns this live process handle and job is live.
-        let assigned = unsafe { AssignProcessToJobObject(raw, child.as_raw_handle()) };
-        if assigned == 0 {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("无法接管本地服务子进程".into());
-        }
-        if let Err(error) = start_stderr_capture(&mut child, stderr_log) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        Ok(Self { child, job })
+    fn spawn_owned(command: Command, stderr_log: File) -> Result<Self, String> {
+        let mut child = Child::spawn(&command, false, false, true)
+            .map_err(|error| format!("无法安全启动本地 TTS 服务：{error}"))?;
+        start_stderr_capture(&mut child, stderr_log)?;
+        Ok(Self { child })
     }
 
     fn exited(&mut self) -> bool {
@@ -788,19 +748,6 @@ fn capture_bounded_stderr<R: Read, W: Write>(mut stderr: R, mut log: W) {
     }
 }
 
-impl Drop for OwnedProcess {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-            // SAFETY: The job is private to this child and remains owned here.
-            unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
-        }
-        let _ = self.child.try_wait();
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -819,9 +766,6 @@ pub(crate) mod tests {
             return;
         }
         if mode == "parent" {
-            // Give the test process time to assign this process to its private
-            // Job Object before spawning a descendant.
-            std::thread::sleep(Duration::from_millis(100));
             let mut grandchild = Command::new(std::env::current_exe().unwrap());
             grandchild
                 .args([
@@ -923,7 +867,7 @@ pub(crate) mod tests {
         let marker = temp.path().join("unused.pid");
         let log = File::create(temp.path().join("child.log")).unwrap();
         let mut owned = OwnedProcess::spawn_owned(fixture_command("exit", &marker), log).unwrap();
-        owned.child.wait().unwrap();
+        owned.child.blocking_wait().unwrap();
         let mut state = ServiceState::new(Some(temp.path().join("invalid-install")));
         state.process = Some(owned);
         let endpoint = Endpoint::parse(Kind::Dots, "http://127.0.0.1:19881").unwrap();

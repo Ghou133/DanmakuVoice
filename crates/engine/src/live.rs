@@ -25,6 +25,7 @@ use crate::{
     event_pipeline::EventPipeline,
     model::{EventKind, GiftMergeSettings, LiveEvent, Provider},
     playback::PreparedPlayback,
+    received_emotes::ReceivedEmoteCatalog,
     rules::{RulePreview, RuleSet},
     scheduler::{JobOrigin, SchedulerHandle, SubmitError},
     storage::{DataStore, StorageError},
@@ -35,7 +36,7 @@ use crate::{
 /// cannot keep up. A disconnected receiver causes the room task to exit.
 pub const LIVE_EVENT_CHANNEL_CAPACITY: usize = 128;
 pub const LIVE_RECENT_EVENT_LIMIT: usize = 100;
-const MAX_LIVE_EVENT_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_LIVE_EVENT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LiveFailure {
@@ -77,12 +78,15 @@ pub struct ProcessedLiveEvent {
 pub struct LiveSnapshot {
     pub running: bool,
     pub room_id: Option<u64>,
+    /// Canonical room returned by room_init; retained through reconnect/stop.
+    pub resolved_room_id: Option<u64>,
     pub room_state: RoomState,
     pub received: u64,
     pub enqueued: u64,
     pub filtered: u64,
     pub no_voice: u64,
     pub errors: u64,
+    pub emote_lookup_error: Option<String>,
     pub last_failure: Option<LiveFailure>,
     pub recent_events: Vec<LiveEvent>,
     pub recent_results: Vec<ProcessedLiveEvent>,
@@ -106,11 +110,21 @@ impl fmt::Debug for LiveSnapshot {
     }
 }
 
+impl LiveSnapshot {
+    pub fn canonical_room_id(&self) -> Option<u64> {
+        self.resolved_room_id.or(match self.room_state {
+            RoomState::Connected { room_id, .. } => Some(room_id),
+            _ => self.room_id,
+        })
+    }
+}
+
 impl Default for LiveSnapshot {
     fn default() -> Self {
         Self {
             running: false,
             room_id: None,
+            resolved_room_id: None,
             room_state: RoomState::Stopped,
             received: 0,
             enqueued: 0,
@@ -118,6 +132,7 @@ impl Default for LiveSnapshot {
             no_voice: 0,
             errors: 0,
             last_failure: None,
+            emote_lookup_error: None,
             recent_events: Vec::new(),
             recent_results: Vec::new(),
         }
@@ -145,6 +160,7 @@ struct WorkerContext {
     scheduler: Option<SchedulerHandle>,
     tts_enabled: Arc<Mutex<bool>>,
     playback_changes: watch::Receiver<u64>,
+    emote_catalog: watch::Receiver<Arc<ReceivedEmoteCatalog>>,
     data_dir: PathBuf,
     dobao_device: Option<DoubaoDevice>,
     updates: watch::Sender<LiveSnapshot>,
@@ -152,8 +168,8 @@ struct WorkerContext {
     room_driven: bool,
 }
 
-/// A single-room controller. Keep `dobao_device` stable and persisted outside
-/// this type; the controller never generates a new device identity.
+/// A single-room controller. A supplied device stays fixed; otherwise a stored
+/// Doubao identity is loaded lazily only for an event that needs it.
 pub struct LiveController {
     room: BiliRoomClient,
     scheduler: Option<SchedulerHandle>,
@@ -163,6 +179,7 @@ pub struct LiveController {
     dobao_device: Option<DoubaoDevice>,
     running: Mutex<Option<Running>>,
     updates: watch::Sender<LiveSnapshot>,
+    emote_catalog: watch::Sender<Arc<ReceivedEmoteCatalog>>,
 }
 
 impl LiveController {
@@ -187,6 +204,7 @@ impl LiveController {
         dobao_device: Option<DoubaoDevice>,
     ) -> Result<Self, LiveError> {
         let (updates, _) = watch::channel(LiveSnapshot::default());
+        let (emote_catalog, _) = watch::channel(Arc::new(ReceivedEmoteCatalog::default()));
         let (playback_changes, _) = watch::channel(0);
         let tts_enabled = Arc::new(Mutex::new(scheduler.is_some()));
         Ok(Self {
@@ -198,6 +216,7 @@ impl LiveController {
             dobao_device,
             running: Mutex::new(None),
             updates,
+            emote_catalog,
         })
     }
 
@@ -207,6 +226,41 @@ impl LiveController {
 
     pub fn snapshot(&self) -> LiveSnapshot {
         self.updates.borrow().clone()
+    }
+
+    /// Only verified current-account metadata may enter this in-memory catalog.
+    /// Updating display metadata never requeues speech or changes old outcomes.
+    pub fn set_received_emoticons(
+        &self,
+        account_id: u64,
+        room_id: u64,
+        packs: &[crate::chat_send::ChatEmoticonPack],
+    ) {
+        let catalog = Arc::new(ReceivedEmoteCatalog::from_packs(account_id, room_id, packs));
+        self.emote_catalog.send_replace(catalog.clone());
+        self.updates.send_modify(|state| {
+            state.emote_lookup_error = None;
+            for event in &mut state.recent_events {
+                catalog.enrich(event);
+            }
+            for item in &mut state.recent_results {
+                catalog.enrich(&mut item.event);
+            }
+        });
+    }
+
+    pub fn set_received_emoticon_error(&self, error: String) {
+        self.updates
+            .send_modify(|state| state.emote_lookup_error = Some(error.clone()));
+    }
+
+    pub fn audience_snapshot(&self) -> crate::audience::AudienceSnapshot {
+        self.room.audience_snapshot()
+    }
+
+    pub async fn request_audience(&self, more: bool) -> Result<(), LiveError> {
+        self.room.request_audience(more).await?;
+        Ok(())
     }
 
     /// Serialize a short synchronous service-retirement check with live
@@ -259,8 +313,44 @@ impl LiveController {
         {
             return Err(LiveError::Scheduler);
         }
+        let mut lookup_error = None;
+        if let Some(session) = session.as_ref() {
+            if !self
+                .emote_catalog
+                .borrow()
+                .matches_context(session.user_id(), room_id)
+            {
+                // Never retain another account's catalog when this read fails.
+                self.emote_catalog
+                    .send_replace(Arc::new(ReceivedEmoteCatalog::default()));
+                let prior = self.emote_catalog.subscribe();
+                let result = tokio::time::timeout(Duration::from_secs(5), async {
+                    crate::chat_send::ChatSendClient::new()?
+                        .account_emoticons_for(session, room_id)
+                        .await
+                })
+                .await;
+                // A newer UI metadata read can finish while this read waits.
+                if !prior.has_changed().unwrap_or(true) {
+                    match result {
+                        Ok(Ok(packs)) => {
+                            self.set_received_emoticons(session.user_id(), room_id, &packs)
+                        }
+                        Ok(Err(error)) => lookup_error = Some(error.to_string()),
+                        Err(_) => {
+                            lookup_error = Some("表情图片资料读取超时，请刷新表情列表".into())
+                        }
+                    }
+                }
+            }
+        } else {
+            self.emote_catalog
+                .send_replace(Arc::new(ReceivedEmoteCatalog::default()));
+        }
         let (events_tx, events_rx) = mpsc::channel(LIVE_EVENT_CHANNEL_CAPACITY);
         let slot = self.spawn_worker(room_id, events_rx, true);
+        self.updates
+            .send_modify(|state| state.emote_lookup_error = lookup_error);
         if let Err(error) = self.room.start(room_id, session, events_tx).await {
             slot.cancel.cancel();
             let _ = slot.worker.await;
@@ -317,6 +407,7 @@ impl LiveController {
                 updates: self.updates.clone(),
                 cancel: cancel.clone(),
                 room_driven,
+                emote_catalog: self.emote_catalog.subscribe(),
             },
         ));
         Running { cancel, worker }
@@ -490,6 +581,7 @@ async fn run_events(
         scheduler,
         tts_enabled,
         mut playback_changes,
+        emote_catalog,
         data_dir,
         dobao_device,
         updates,
@@ -534,7 +626,10 @@ async fn run_events(
                         &state,
                         RoomState::Stopped | RoomState::SessionExpired { .. }
                     );
-                    updates.send_modify(|snapshot| snapshot.room_state = state);
+                    updates.send_modify(|snapshot| {
+                        if let RoomState::Connected { room_id, .. } = &state { snapshot.resolved_room_id = Some(*room_id); }
+                        snapshot.room_state = state;
+                    });
                     if room_driven && terminal {
                         room_ended = true;
                         break 'session;
@@ -544,7 +639,7 @@ async fn run_events(
                     break 'session;
                 }
             },
-            _ = tick.tick() => {
+            _ = tick.tick(), if pipeline.pending_gifts() > 0 => {
                 if reconcile_playback_generation(
                     &mut pipeline, &mut playback_changes, &mut playback_generation) {
                     continue;
@@ -595,7 +690,7 @@ async fn run_events(
                 }
             },
             event = events.recv() => {
-                let Some(event) = event else { break; };
+                let Some(mut event) = event else { break; };
                 // A room task can end with packets still buffered in the
                 // bounded channel. They must not turn into new paid jobs.
                 if room_driven && events.is_closed() {
@@ -608,6 +703,12 @@ async fn run_events(
                     });
                     record_failure(&updates, LiveFailure::Rules);
                     continue;
+                }
+                let requested = updates.borrow().room_id.unwrap_or_default();
+                if let RoomState::Connected { room_id } = *room_state.borrow() {
+                    emote_catalog.borrow().enrich_in_connected_room(&mut event, requested, room_id);
+                } else {
+                    emote_catalog.borrow().enrich(&mut event);
                 }
                 updates.send_modify(|snapshot| {
                     snapshot.received = snapshot.received.saturating_add(1);
@@ -835,7 +936,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T) {
     items.push(item);
 }
 
-fn event_payload_bytes(event: &LiveEvent) -> usize {
+pub(crate) fn event_payload_bytes(event: &LiveEvent) -> usize {
     event
         .user_name
         .len()
@@ -1624,6 +1725,7 @@ mod tests {
                 scheduler: None,
                 tts_enabled: Arc::new(Mutex::new(false)),
                 playback_changes: playback_rx,
+                emote_catalog: watch::channel(Arc::new(ReceivedEmoteCatalog::default())).1,
                 data_dir: PathBuf::from("unused-receive-only"),
                 dobao_device: None,
                 updates,
@@ -1779,6 +1881,110 @@ mod tests {
         assert_eq!(controller.snapshot().recent_events.len(), 4);
         assert!(controller.snapshot().running);
         assert!(jobs_rx.try_recv().is_err());
+        controller.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn personal_marker_catalog_enriches_before_live_filter_and_metadata_refresh_never_requeues()
+     {
+        use crate::chat_send::{ChatEmoticon, ChatEmoticonPack};
+        const MARKER: &str = "[费可装扮表情包_爱你]";
+        const IMAGE: &str =
+            "https://i0.hdslb.com/bfs/garb/699dc00ce1374521842dc1bf13d5946fc5d5607e.png";
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = configure_store(dir.path());
+        let mut rules = store.load_rules().unwrap();
+        rules.events.filter_bilibili_emoticons = true;
+        store.save_rules(&rules).unwrap();
+        let (jobs_tx, mut jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: false,
+        }));
+        scheduler.start().await.unwrap();
+        let controller = LiveController::new(dir.path(), scheduler, None).unwrap();
+        let events = controller.start_offline(42).await.unwrap();
+        let packs = vec![ChatEmoticonPack {
+            source: "account",
+            name: "费可装扮表情包".into(),
+            pkg_type: Some(3),
+            icon: None,
+            emoticons: vec![ChatEmoticon {
+                emoticon_unique: "account:3735:52234".into(),
+                emoji: MARKER.into(),
+                url: Some(IMAGE.into()),
+                allowed: true,
+                kind: "text",
+                text: Some(MARKER.into()),
+                description: None,
+            }],
+        }];
+        // Reproduce the real packet: plain comment marker, dm_type=0, no URL.
+        let raw = |text: &str, sequence: u64| {
+            crate::bilibili::parse_live_event(42, sequence, &serde_json::json!({"cmd":"DANMU_MSG","info":[[0,1,25,16777215,0,0,0,0,0,0,0,0,0],text,[7,"虚构观众"]]})).unwrap()
+        };
+        // Older messages acquire only display metadata, never a new job.
+        events.send(raw(MARKER, 1)).await.unwrap();
+        let _ = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_processed(&controller, 1).await;
+        let before = controller.snapshot();
+        assert!(before.recent_events[0].emotes.is_empty());
+        controller.set_received_emoticons(42, 42, &packs);
+        let after = controller.snapshot();
+        assert_eq!(
+            (after.received, after.enqueued, after.filtered),
+            (before.received, before.enqueued, before.filtered)
+        );
+        assert_eq!(
+            after.recent_results[0].outcome,
+            before.recent_results[0].outcome
+        );
+        assert_eq!(after.recent_events[0].emotes[0].url, IMAGE);
+        assert_eq!(after.recent_results[0].event.emotes[0].url, IMAGE);
+        assert!(jobs_rx.try_recv().is_err());
+
+        events.send(raw(MARKER, 2)).await.unwrap();
+        wait_for_processed(&controller, 2).await;
+        assert_eq!(controller.snapshot().filtered, 1);
+        assert_eq!(
+            controller.snapshot().recent_results[1].outcome,
+            LiveEventOutcome::Filtered
+        );
+        assert!(controller.snapshot().recent_events[1].emotes[0].large);
+        assert!(jobs_rx.try_recv().is_err());
+
+        let mixed = format!("你好{MARKER}");
+        events.send(raw(&mixed, 3)).await.unwrap();
+        let job = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.preview.event.message, mixed);
+        assert_eq!(job.preview.event.emotes[0].url, IMAGE);
+        assert!(!job.preview.event.is_bilibili_emoticon);
+        wait_for_processed(&controller, 3).await;
+
+        rules.events.filter_bilibili_emoticons = false;
+        store.save_rules(&rules).unwrap();
+        events.send(raw(MARKER, 4)).await.unwrap();
+        let job = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(job.preview.event.is_bilibili_emoticon);
+        assert_eq!(job.preview.event.emotes[0].url, IMAGE);
+        wait_for_processed(&controller, 4).await;
+        assert_eq!(
+            (
+                controller.snapshot().enqueued,
+                controller.snapshot().filtered
+            ),
+            (3, 1)
+        );
+        assert!(controller.snapshot().running);
         controller.stop().await.unwrap();
     }
 }

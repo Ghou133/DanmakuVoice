@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -33,7 +33,8 @@ const FONTS: &[&str] = &[
 const PORT_ATTEMPTS: u16 = 10;
 const MAX_REQUEST_HEAD: usize = 8 * 1024;
 const MAX_CLIENTS: usize = 8;
-const REPLAY_ITEMS: usize = 12;
+pub(crate) const REPLAY_ITEMS: usize = 12;
+pub(crate) const SPINE_REPLAY_ITEMS: usize = 12;
 const KEEPALIVE: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const PAGE_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
@@ -76,8 +77,14 @@ struct HubState {
     status: Value,
     reading: Value,
     items: VecDeque<Value>,
+    spine_items: VecDeque<Value>,
+    reading_item: Option<Value>,
     seq: u64,
+    session: u64,
+    replay_after_ms: u64,
     clients: BTreeMap<u64, ClientSize>,
+    obs_clients: BTreeMap<u64, ()>,
+    obs_generation: u64,
     next_client: u64,
 }
 
@@ -147,47 +154,187 @@ impl OverlayHub {
         self.send(Frame::new("status", &status));
     }
 
+    #[cfg(test)]
     pub fn set_reading(&self, reading: Value) {
+        self.update_reading(reading, None);
+    }
+
+    pub(crate) fn set_session_reading(&self, reading: Value, session: u64) {
+        self.update_reading(reading, Some(session));
+    }
+
+    fn update_reading(&self, mut reading: Value, session: Option<u64>) {
         let mut state = self.lock();
+        if session.is_some_and(|session| session != state.session) {
+            return;
+        }
+        if reading.is_object() {
+            reading["session"] = json!(state.session);
+        }
         if state.reading == reading {
             return;
         }
+        state.reading_item = reading
+            .get("job_id")
+            .filter(|job| !job.is_null())
+            .and_then(|job| {
+                state
+                    .spine_items
+                    .iter()
+                    .rev()
+                    .find(|item| item.get("job_id") == Some(job))
+                    .or_else(|| {
+                        state
+                            .reading_item
+                            .as_ref()
+                            .filter(|item| item.get("job_id") == Some(job))
+                    })
+            })
+            .cloned();
         state.reading = reading.clone();
-        drop(state);
-        self.send(Frame::new("reading", &reading));
+        let frame = if reading.is_null() {
+            json!({"session": state.session, "job_id": Value::Null})
+        } else {
+            reading
+        };
+        self.send(Frame::new("reading", &frame));
     }
 
     /// Items carry an increasing `seq` so a page can match reading updates
     /// and ignore duplicates after a reconnect.
-    pub fn publish_item(&self, mut item: Value) {
+    pub fn publish_item(&self, item: Value) {
+        self.publish_item_checked(item, None, None);
+    }
+
+    pub(crate) fn publish_session_item(
+        &self,
+        item: Value,
+        session: u64,
+        observed_at_ms: u64,
+        reading_job: Option<u64>,
+    ) {
+        self.publish_item_checked(item, Some((session, observed_at_ms)), reading_job);
+    }
+
+    fn publish_item_checked(
+        &self,
+        item: Value,
+        boundary: Option<(u64, u64)>,
+        reading_job: Option<u64>,
+    ) {
         let mut state = self.lock();
+        if boundary.is_some_and(|(session, observed_at_ms)| {
+            session != state.session || observed_at_ms < state.replay_after_ms
+        }) {
+            return;
+        }
+        self.publish_locked(&mut state, item, reading_job);
+    }
+
+    fn publish_locked(&self, state: &mut HubState, mut item: Value, reading_job: Option<u64>) {
         state.seq += 1;
         item["seq"] = json!(state.seq);
+        item["session"] = json!(state.session);
+        if item["kind"] != "super_chat" {
+            if state.spine_items.len() == SPINE_REPLAY_ITEMS {
+                state.spine_items.pop_front();
+            }
+            state.spine_items.push_back(item.clone());
+            let current = reading_job.or_else(|| state.reading["job_id"].as_u64());
+            if item
+                .get("job_id")
+                .and_then(Value::as_u64)
+                .is_some_and(|job| Some(job) == current)
+            {
+                state.reading_item = Some(item.clone());
+            }
+        }
         if state.items.len() == REPLAY_ITEMS {
             state.items.pop_front();
         }
         state.items.push_back(item.clone());
-        drop(state);
         self.send(Frame::new("item", &item));
     }
 
-    /// A new live session starts with an empty overlay.
-    pub fn clear_items(&self) {
+    pub(crate) fn ensure_session_reading_item(
+        &self,
+        item: Value,
+        session: u64,
+        observed_at_ms: u64,
+        job_id: u64,
+    ) {
         let mut state = self.lock();
-        if state.items.is_empty() {
+        if state.session != session
+            || observed_at_ms < state.replay_after_ms
+            || item["kind"] == "super_chat"
+        {
             return;
         }
+        let retained = state
+            .spine_items
+            .iter()
+            .chain(state.items.iter())
+            .chain(state.reading_item.iter())
+            .find(|item| item["job_id"].as_u64() == Some(job_id))
+            .cloned();
+        if let Some(retained) = retained {
+            state.reading_item = Some(retained);
+        } else {
+            // Restore a long queued ordinary row once without rewinding the
+            // live cursor. Pages deduplicate jobs already retained locally.
+            self.publish_locked(&mut state, item, Some(job_id));
+        }
+    }
+
+    /// A new live session starts with an empty overlay. The generation also
+    /// reaches pages that were disconnected when the clear frame was sent.
+    pub fn clear_items(&self) {
+        let _ = self.advance_session(None);
+    }
+
+    pub(crate) fn clear_session_items(&self, session: u64) -> Option<(u64, u64)> {
+        self.advance_session(Some(session))
+    }
+
+    fn advance_session(&self, expected_session: Option<u64>) -> Option<(u64, u64)> {
+        let mut state = self.lock();
+        if expected_session.is_some_and(|session| state.session != session) {
+            return None;
+        }
         state.items.clear();
-        drop(state);
-        self.send(Frame::new("clear", &json!({})));
+        state.spine_items.clear();
+        state.reading_item = None;
+        state.reading = Value::Null;
+        state.session = state.session.saturating_add(1);
+        state.replay_after_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let session = state.session;
+        self.send(Frame::new("clear", &json!({"session": session})));
+        Some((session, state.replay_after_ms))
+    }
+
+    pub(crate) fn replay_boundary(&self) -> (u64, u64) {
+        let state = self.lock();
+        (state.session, state.replay_after_ms)
     }
 
     pub fn clients(&self) -> Vec<ClientSize> {
         self.lock().clients.values().copied().collect()
     }
 
+    #[cfg(test)]
     pub fn has_clients(&self) -> bool {
         !self.lock().clients.is_empty()
+    }
+
+    /// Ordinary browser previews must not hide a disconnected OBS source.
+    /// The agent string is a health hint only; token/origin checks still apply.
+    pub(crate) fn obs_health(&self) -> (usize, u64) {
+        let state = self.lock();
+        (state.obs_clients.len(), state.obs_generation)
     }
 
     fn token_matches(&self, candidate: &str) -> bool {
@@ -205,20 +352,42 @@ impl OverlayHub {
     }
 
     fn hello(&self) -> Frame {
+        Frame::new("hello", &self.replay_snapshot())
+    }
+
+    pub(crate) fn replay_snapshot(&self) -> Value {
         let state = self.lock();
-        Frame::new(
-            "hello",
-            &json!({
+        let items: Vec<Value> = if state.config["style"] == "spine" {
+            // SC traffic must not evict the ordinary rows that a spine keeps
+            // on screen. These caches remain bounded (12 + 12 + one read),
+            // deduplicated and ordered by the original application sequence.
+            let mut retained = BTreeMap::new();
+            for item in state
+                .items
+                .iter()
+                .chain(state.spine_items.iter())
+                .chain(state.reading_item.iter())
+            {
+                if let Some(seq) = item["seq"].as_u64() {
+                    retained.insert(seq, item.clone());
+                }
+            }
+            retained.into_values().collect()
+        } else {
+            state.items.iter().cloned().collect()
+        };
+        json!({
                 "instance": self.instance,
+                "session": state.session,
+                "heartbeat_ms": KEEPALIVE.as_millis() as u64,
                 "config": state.config,
                 "status": state.status,
                 "reading": state.reading,
-                "items": state.items,
-            }),
-        )
+                "items": items,
+        })
     }
 
-    fn register(&self, size: ClientSize) -> Option<u64> {
+    fn register(&self, size: ClientSize, obs: bool) -> Option<u64> {
         let mut state = self.lock();
         if state.clients.len() >= MAX_CLIENTS {
             return None;
@@ -226,11 +395,17 @@ impl OverlayHub {
         state.next_client += 1;
         let id = state.next_client;
         state.clients.insert(id, size);
+        if obs {
+            state.obs_clients.insert(id, ());
+            state.obs_generation = state.obs_generation.wrapping_add(1);
+        }
         Some(id)
     }
 
     fn unregister(&self, id: u64) {
-        self.lock().clients.remove(&id);
+        let mut state = self.lock();
+        state.clients.remove(&id);
+        state.obs_clients.remove(&id);
     }
 }
 
@@ -305,7 +480,11 @@ impl OverlayServer {
                 let assets = assets.clone();
                 let cancel = accept_cancel.clone();
                 tokio::spawn(async move {
-                    handle(stream, port, hub, assets, cancel).await;
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {},
+                        _ = handle(stream, port, hub, assets, cancel.clone()) => {},
+                    }
                 });
             }
         });
@@ -324,6 +503,7 @@ struct Request {
     query: BTreeMap<String, String>,
     host: Option<String>,
     origin: Option<String>,
+    obs_agent: bool,
 }
 
 impl Request {
@@ -359,6 +539,11 @@ impl Request {
                 request.host = Some(value);
             } else if name.eq_ignore_ascii_case("origin") {
                 request.origin = Some(value);
+            } else if name.eq_ignore_ascii_case("user-agent") {
+                request.obs_agent = value.split_ascii_whitespace().any(|part| {
+                    part.strip_prefix("OBS/")
+                        .is_some_and(|version| !version.is_empty())
+                });
             }
         }
         Some(request)
@@ -524,7 +709,7 @@ async fn handle(
             })
             .await;
         }
-        Route::Events(size) => stream_events(stream, hub, size, cancel).await,
+        Route::Events(size) => stream_events(stream, hub, size, request.obs_agent, cancel).await,
     }
 }
 
@@ -539,12 +724,13 @@ async fn stream_events(
     stream: TcpStream,
     hub: Arc<OverlayHub>,
     size: ClientSize,
+    obs: bool,
     cancel: CancellationToken,
 ) {
     // Subscribe before taking the hello snapshot so no update falls between.
     let mut frames = hub.frames.subscribe();
     let (mut reader, mut writer) = stream.into_split();
-    let Some(id) = hub.register(size) else {
+    let Some(id) = hub.register(size, obs) else {
         let head = response_head("503 Service Unavailable", "text/plain", Some(0), "no-store");
         let _ = write_frame(&mut writer, &head).await;
         return;
@@ -582,7 +768,7 @@ async fn stream_events(
                 Err(broadcast::error::RecvError::Lagged(_)) => hub.hello().encode(),
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            _ = tokio::time::sleep(KEEPALIVE) => ": ping\n\n".to_owned(),
+            _ = tokio::time::sleep(KEEPALIVE) => Frame::new("heartbeat", &json!({})).encode(),
         };
         if write_frame(&mut writer, &next).await.is_err() {
             break;
@@ -593,6 +779,169 @@ async fn stream_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_session_clear_marks_empty_history_and_resets_reading() {
+        let hub = OverlayHub::new();
+        let mut frames = hub.frames.subscribe();
+        hub.set_reading(json!({"job_id":7,"played_ms":100}));
+        assert_eq!(frames.try_recv().unwrap().event, "reading");
+        hub.clear_items();
+        let clear = frames.try_recv().unwrap();
+        assert_eq!(clear.event, "clear");
+        assert_eq!(
+            serde_json::from_str::<Value>(&clear.data).unwrap()["session"],
+            1
+        );
+        let hello = hub.replay_snapshot();
+        assert_eq!(hello["session"], 1);
+        assert_eq!(hello["items"], json!([]));
+        assert_eq!(hello["reading"], Value::Null);
+        assert!(hub.replay_boundary().1 > 0);
+        hub.publish_item(json!({"kind":"danmaku","message":"旧场"}));
+        hub.clear_items();
+        hub.publish_item(json!({"kind":"danmaku","message":"新场"}));
+        let hello = hub.replay_snapshot();
+        assert_eq!(hello["session"], 2);
+        assert_eq!(hello["items"].as_array().unwrap().len(), 1);
+        assert_eq!(hello["items"][0]["message"], "新场");
+        assert_eq!(hello["items"][0]["seq"], 2);
+    }
+
+    #[test]
+    fn overlay_session_replay_is_bounded_without_clients_and_has_no_age_expiry() {
+        let hub = OverlayHub::new();
+        assert!(!hub.has_clients());
+        for index in 1..=20 {
+            hub.publish_item(json!({"kind":"danmaku","at":1,"message":index.to_string()}));
+        }
+        let hello = hub.replay_snapshot();
+        let items = hello["items"].as_array().unwrap();
+        assert_eq!(items.len(), REPLAY_ITEMS);
+        assert_eq!(items[0]["message"], "9");
+        assert_eq!(items[REPLAY_ITEMS - 1]["seq"], 20);
+        assert_eq!(hello["session"], 0);
+    }
+
+    #[test]
+    fn overlay_session_rejects_delayed_packets_and_reading_from_an_old_feed() {
+        let hub = OverlayHub::new();
+        let old_session = hub.replay_boundary().0;
+        hub.clear_items();
+        let (session, cutoff) = hub.replay_boundary();
+        hub.publish_session_item(
+            json!({"kind":"danmaku","message":"旧读包"}),
+            old_session,
+            cutoff + 1,
+            None,
+        );
+        hub.set_session_reading(json!({"job_id":7}), old_session);
+        hub.publish_session_item(
+            json!({"kind":"danmaku","message":"旧时间"}),
+            session,
+            cutoff - 1,
+            None,
+        );
+        assert_eq!(hub.replay_snapshot()["items"], json!([]));
+        assert!(hub.replay_snapshot()["reading"].is_null());
+        hub.publish_session_item(
+            json!({"kind":"danmaku","message":"本场"}),
+            session,
+            cutoff + 1,
+            None,
+        );
+        hub.set_session_reading(json!({"job_id":8}), session);
+        let hello = hub.replay_snapshot();
+        assert_eq!(hello["items"][0]["session"], session);
+        assert_eq!(hello["reading"]["session"], session);
+        assert_eq!(hello["items"][0]["seq"], 1);
+        // A receiver tick captured the old app snapshot before a clear. Its
+        // conditional fallback must neither erase the new row nor advance it.
+        assert!(hub.clear_session_items(old_session).is_none());
+        assert_eq!(hub.replay_snapshot(), hello);
+        assert_eq!(hub.replay_boundary().0, session);
+    }
+
+    #[test]
+    fn overlay_spine_replay_keeps_ordinary_rows_and_current_read_when_sc_floods() {
+        let hub = OverlayHub::new();
+        hub.set_config(json!({"style":"spine"}));
+        hub.publish_item(json!({"kind":"danmaku","job_id":7,"message":"还在播报"}));
+        hub.set_reading(json!({"job_id":7}));
+        for index in 2..=30 {
+            hub.publish_item(json!({"kind":"danmaku","message":index.to_string()}));
+        }
+        for index in 31..=80 {
+            hub.publish_item(json!({"kind":"super_chat","message":index.to_string()}));
+        }
+        let hello = hub.replay_snapshot();
+        let items = hello["items"].as_array().unwrap();
+        assert_eq!(items.len(), REPLAY_ITEMS + SPINE_REPLAY_ITEMS + 1);
+        assert_eq!(items[0]["job_id"], 7);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["kind"] == "danmaku")
+                .count(),
+            SPINE_REPLAY_ITEMS + 1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["kind"] == "super_chat")
+                .count(),
+            REPLAY_ITEMS
+        );
+        assert!(
+            items
+                .windows(2)
+                .all(|pair| pair[0]["seq"].as_u64() < pair[1]["seq"].as_u64())
+        );
+        hub.set_reading(Value::Null);
+        let settled = hub.replay_snapshot();
+        assert_eq!(
+            settled["items"].as_array().unwrap().len(),
+            REPLAY_ITEMS + SPINE_REPLAY_ITEMS
+        );
+        hub.set_config(json!({"style":"card"}));
+        assert_eq!(
+            hub.replay_snapshot()["items"].as_array().unwrap().len(),
+            REPLAY_ITEMS
+        );
+        hub.clear_items();
+        hub.set_config(json!({"style":"spine"}));
+        assert_eq!(hub.replay_snapshot()["items"], json!([]));
+    }
+
+    #[test]
+    fn overlay_reading_pin_reuses_cached_sequence_and_emits_missing_job_only_once() {
+        let hub = OverlayHub::new();
+        hub.set_config(json!({"style":"spine"}));
+        hub.publish_item(json!({"kind":"danmaku","job_id":7,"message":"已有"}));
+        let before = hub.replay_snapshot();
+        let mut frames = hub.frames.subscribe();
+        hub.ensure_session_reading_item(
+            json!({"kind":"danmaku","job_id":7,"message":"已有"}),
+            0,
+            1,
+            7,
+        );
+        assert_eq!(hub.replay_snapshot(), before);
+        assert!(frames.try_recv().is_err());
+        for _ in 0..3 {
+            hub.ensure_session_reading_item(
+                json!({"kind":"danmaku","job_id":8,"message":"需要补回"}),
+                0,
+                1,
+                8,
+            );
+        }
+        assert_eq!(frames.try_recv().unwrap().event, "item");
+        assert!(frames.try_recv().is_err());
+        let hello = hub.replay_snapshot();
+        assert_eq!(hello["items"].as_array().unwrap().len(), 2);
+        assert_eq!(hello["items"][1]["seq"], 2);
+    }
     use tokio::io::AsyncBufReadExt;
 
     fn assets() -> AssetLoader {
@@ -649,6 +998,40 @@ mod tests {
         );
         assert!(Request::parse("GET overlay HTTP/1.1").is_none());
         assert!(Request::parse("garbage").is_none());
+        assert!(
+            Request::parse(
+                "GET /overlay/events HTTP/1.1\r\nUser-Agent: Mozilla/5.0 Chrome/126 OBS/32.2.2"
+            )
+            .unwrap()
+            .obs_agent
+        );
+        assert!(
+            !Request::parse("GET /overlay/events HTTP/1.1\r\nUser-Agent: browser-preview")
+                .unwrap()
+                .obs_agent
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_overlay_disconnects_incomplete_http_clients() {
+        let (server, _) = server().await;
+        let port = server.port();
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        client
+            .write_all(b"GET /overlay HTTP/1.1\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        drop(server);
+        let mut byte = [0];
+        assert_eq!(
+            timeout(Duration::from_millis(500), client.read(&mut byte))
+                .await
+                .expect("closed overlay retained an HTTP client")
+                .unwrap(),
+            0
+        );
+        assert!(TcpListener::bind(("127.0.0.1", port)).await.is_ok());
     }
 
     #[tokio::test]
@@ -732,6 +1115,7 @@ mod tests {
             }
         };
         let hello = next_data().await;
+        assert_eq!(hello["heartbeat_ms"], 15_000);
         assert_eq!(hello["config"]["style"], "spine");
         assert_eq!(hello["items"][0]["message"], "早");
         assert_eq!(hello["items"][0]["seq"], 1);
@@ -790,5 +1174,59 @@ mod tests {
         .await
         .unwrap();
         drop(server);
+    }
+
+    #[tokio::test]
+    async fn obs_health_distinguishes_preview_and_emits_named_heartbeat() {
+        let (server, hub) = server().await;
+        let port = server.port();
+        let mut preview = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        preview.write_all(format!("GET /overlay/events?token=0123456789abcdef0123456789abcdef HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: preview-browser\r\n\r\n").as_bytes()).await.unwrap();
+        let mut buffer = [0; 4096];
+        assert!(preview.read(&mut buffer).await.unwrap() > 0);
+        assert!(hub.has_clients());
+        assert_eq!(hub.obs_health(), (0, 0));
+        let mut obs = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        obs.write_all(format!("GET /overlay/events?token=0123456789abcdef0123456789abcdef HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: Chrome/126 OBS/32.2.2\r\n\r\n").as_bytes()).await.unwrap();
+        let mut lines = tokio::io::BufReader::new(obs).lines();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .starts_with("data:")
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(hub.obs_health(), (1, 1));
+        tokio::time::timeout(Duration::from_secs(17), async {
+            loop {
+                if lines.next_line().await.unwrap().unwrap() == "event: heartbeat" {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(lines);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while hub.obs_health().0 > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            hub.has_clients(),
+            "closing OBS must not close the browser preview"
+        );
+        assert_eq!(hub.obs_health(), (0, 1));
+        drop(preview);
     }
 }

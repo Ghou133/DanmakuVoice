@@ -90,6 +90,20 @@ pub fn apply_confirmed_legacy_import(
     expected: &LegacyPreview,
     options: &LegacyImportOptions,
 ) -> Result<LegacyImportReport, LegacyImportError> {
+    apply_confirmed_legacy_import_with_finalize(store, old_config_path, expected, options, |_| {
+        Ok(())
+    })
+}
+
+/// Run related database-only repairs before committing the reviewed import.
+/// A repair failure rolls back the import and cleans its newly copied assets.
+pub fn apply_confirmed_legacy_import_with_finalize(
+    store: &mut DataStore,
+    old_config_path: &Path,
+    expected: &LegacyPreview,
+    options: &LegacyImportOptions,
+    finalize: impl FnOnce(&mut DataStore) -> Result<(), StorageError>,
+) -> Result<LegacyImportReport, LegacyImportError> {
     let latest = preview_legacy_config_file(old_config_path)?;
     if &latest != expected {
         return Err(LegacyImportError::StalePreview);
@@ -132,7 +146,11 @@ pub fn apply_confirmed_legacy_import(
         &chosen,
         backup_path.clone(),
         &mut imported_paths,
-    ) {
+    )
+    .and_then(|report| {
+        finalize(&mut importer)?;
+        Ok(report)
+    }) {
         Ok(report) => match importer.finish_legacy_import_transaction(true) {
             Ok(()) => Ok(report),
             Err(error) => rollback_import(

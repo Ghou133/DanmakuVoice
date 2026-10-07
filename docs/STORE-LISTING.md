@@ -33,7 +33,7 @@
 自由选择读哪些消息，设置礼物和醒目留言的金额门槛；编写播报模板；用词典修正用户名和正文的读音；为关键词配上音效。
 
 【简单上手】
-扫码登录或输入主播 UID 即可连接，无需登录也能接收弹幕。关闭播报时弹幕照常显示。夜幕／晨雾两套主题，简体中文／English 界面，设置改动自动保存，可选开机启动。
+扫码登录受支持的直播平台账号，自动连接自己的直播间。关闭播报时弹幕照常显示。夜幕／晨雾两套主题，简体中文／English 界面，设置改动自动保存，可选开机启动。
 
 【放心使用】
 免费、开源、无广告，不含应用内购买。登录凭据和 API Key 只在本机按当前 Windows 用户加密保存；应用不内置开发者的数据收集或使用统计。待播报的文字只会发送给你选择的语音服务。
@@ -45,7 +45,7 @@
 ### 产品功能（每行一项）
 
 - 接收受支持直播间的弹幕、礼物、醒目留言和上舰消息
-- 扫码登录，或输入主播 UID 免登录接收
+- 扫码登录，自动连接自己的直播间
 - 接入支持的云端语音服务或自行部署的本地语音服务
 - 聚光卡片显示正在朗读的弹幕
 - 查看待读列表，点选任意一条立即朗读
@@ -63,12 +63,12 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 
 ### 版本新增内容
 
-0.3.0
-- 新增开播台（实验，默认关闭）：管理自己的直播标题与分区，开播/下播、直播计时、复制推流信息到 OBS 及人脸验证提示
-- 新增 OBS 浏览器叠加层（实验，默认关闭）：弹幕、醒目留言、朗读进度和样式/位置设置
-- 内置中文衬线字体与英文 Instrument Serif 字体
-- 修复设置草稿保持、聚光卡片读完收回和本地 TTS 服务生命周期
-- 实验功能尚未完成真实账号开播及 OBS 推流验收，欢迎反馈
+0.3.1
+- 更新湖面界面、直播详情与观众面板，保留深浅主题和朗读动效
+- 实验性开播台增加文字／表情发送、按权限管理观众及 OBS 联动，默认关闭
+- OBS 光脊保留本场最近弹幕，并改进刷新、断线恢复和会话隔离
+- 修复退出与取消竞态、本地 TTS 子进程清理、设置保存、音色绑定和错误状态同步
+- 改进空闲资源占用和数据目录一致性；真实账号直播、音频与 OBS 推流验收仍待完成
 
 ### 截图说明（与截图依次对应）
 
@@ -78,7 +78,7 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 4. 待读弹幕一目了然，点选任意一条立即朗读。
 5. 选择读哪些消息，编写模板、修正读音、配上音效。
 6. 六个分类平铺的设置页，深浅主题随时切换。
-7. 扫码或输入主播 UID，三步开始接收弹幕。
+7. 扫码登录，按首次设置步骤开始接收弹幕。
 
 ### 版权与商标信息
 
@@ -117,7 +117,7 @@ YOUR RULES
 Choose which messages are read and set amount thresholds for gifts and Super Chats. Write speech templates, fix pronunciations with name and message dictionaries, and add sounds triggered by keywords.
 
 EASY TO USE
-Scan to sign in, or enter a streamer UID to receive chat without signing in. Turning speech off keeps chat on screen. Night and Mist themes, Simplified Chinese and English interface, settings saved automatically, optional start with Windows.
+Scan to sign in with your supported live-platform account and connect to your own room. Turning speech off keeps chat on screen. Night and Mist themes, Simplified Chinese and English interface, settings saved automatically, optional start with Windows.
 
 PRIVATE BY DESIGN
 Free, open source, no ads and no in-app purchases. Sign-in data and API keys are encrypted on this PC for the current Windows user. There is no developer-run telemetry. Text to be spoken is sent only to the voice service you choose.
@@ -129,7 +129,7 @@ DanmakuVoice is an independent third-party project. See the GitHub documentation
 ### Product features
 
 - Receives live chat, gifts, Super Chats and memberships from supported rooms
-- Sign in by QR code, or receive chat with a streamer UID
+- Sign in by QR code and connect to your own room
 - Supported cloud speech services or self-hosted speech services
 - Spotlight card for the message being read
 - Up next queue: pick any message to read it now
@@ -147,12 +147,12 @@ danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 
 ### What's new in this version
 
-0.3.0
-- Experimental broadcast console, off by default: manage your own room title/category, go live/end live, show elapsed time, copy streaming details to OBS, and display face-verification prompts
-- Experimental OBS browser overlay, off by default: chat, Super Chats, reading progress, styles and placement
-- Bundled Chinese serif and Instrument Serif fonts
-- Fixed settings draft retention, spotlight collapse and local TTS service lifecycle
-- Real-account broadcasting and OBS streaming acceptance remain pending for these experimental features
+0.3.1
+- Updated lake interface, broadcast details and viewer panel, retaining both themes and reading animations
+- Experimental chat/emote sending, permission-aware viewer management and OBS control; disabled by default
+- Recent messages remain in the current overlay session, with improved refresh, reconnect and session isolation
+- Fixed exit/cancellation races, owned TTS process cleanup, settings persistence, voice bindings and error-state synchronization
+- Improved idle resource use and consistent data storage; real-account broadcasting, audio and OBS streaming acceptance remain pending
 
 ### Screenshot captions
 
@@ -162,7 +162,7 @@ danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 4. See what will be read next and pick any message to read it now.
 5. Choose what is read, write templates, fix pronunciations and add sounds.
 6. Settings in six flat categories, with light and dark themes.
-7. Scan to sign in or enter a streamer UID, and start in three steps.
+7. Scan to sign in and follow the first-run setup steps.
 
 ### Copyright and trademark info
 
@@ -182,17 +182,19 @@ Licensed under the GNU Affero General Public License v3.0 only. Complete source 
 
 This is a free, open-source Windows desktop utility for receiving Bilibili live-room messages and playing text-to-speech or user-selected audio. It does not send chat messages or host a social network. Incoming live chat is third-party user-generated content; the age questionnaire declares user content conservatively. User/keyword playback filtering is available, but the app does not implement reporting or server-side chat moderation.
 
-No developer account, payment, or administrator privileges are needed to open the app. The welcome page leads to a choice of QR login or an anonymous broadcaster UID. Bilibili login can be skipped; a broadcaster UID is needed to connect anonymously. On the voice setup step, speech can be disabled. In Settings > General (通用) > Audio output (音频输出), Play test tone (播放测试音) generates a short local tone through the real decoder and selected device, without a cloud account. To test cloud speech, add your own supported provider account/API key; no developer credentials are included. Local TTS requires a separately installed service/model. The UI supports Simplified Chinese and English, selectable in Settings > General. Microsoft Edge WebView2 Runtime is required.
+No developer account, payment, or administrator privileges are needed to open the app. Completing first-run setup and receiving chat require the reviewer's own Bilibili account with a live room: choose Start setup, scan with the Bilibili app, and confirm sign-in. Anonymous broadcaster UID entry is no longer offered. At the voice setup step, choose display-only mode to skip cloud speech setup. After completing setup, Settings > General (通用) > Audio output (音频输出) > Play test tone (播放测试音) generates a short local tone through the real decoder and selected device without a cloud speech account. To test cloud speech, add your own supported provider account/API key; no developer credentials are included. Local TTS requires a separately installed service/model. The UI supports Simplified Chinese and English, selectable in Settings > General. Microsoft Edge WebView2 Runtime is required.
 
 The runFullTrust capability is required by the Rust/Tauri desktop application for its WebView2 window, system audio output, user-selected files, and spawning its bundled FFmpeg decoder. Optional local TTS services are started only when configured by the user. FFmpeg is launched directly from the installed MSIX directory; no executable is downloaded or extracted to AppData for the Store build. StartupTask is disabled by default and is enabled only through the user's setting. Updates are managed by Microsoft Store.
 
+The unvirtualizedResources capability keeps user aliases and voice bindings in the same durable LocalAppData/DanmakuVoice database as portable builds. On Windows 11, file virtualization is excluded only for this application data directory; the compatible Windows 10 declaration disables file-write virtualization. Registry virtualization is unchanged. Replacing the executable or reinstalling the package should not isolate configuration in a package-specific copy. No credentials are automatically imported from an older copy.
+
 The submission includes FFmpeg (LGPL-2.1-or-later), original third-party license notices, and a link to the exact complete source archive. The application's own source is AGPL-3.0-only. Source and support: https://github.com/Ghou133/DanmakuVoice
-Corresponding complete source for package 1.3.0.0 (app 0.3.0): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.0.0
-Commit: 51404fd68c87dedda15e884f46204376c4031ebc.
+Corresponding complete source for package 1.3.1.0 (app 0.3.1): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.1.0
+The exact source commit is recorded in the submission package's SUBMISSION-README.txt and in the source release. Publish and verify the matching source archive before submitting the package.
 
-Version 0.3.0 adds experimental Broadcast and OBS overlay settings, off by default. Broadcast manages only the signed-in user's own Bilibili room; capture, encoding and RTMP publishing remain in OBS. A token-protected overlay is served only on 127.0.0.1 when enabled. These features require the user's own Bilibili account or OBS; no developer credentials are supplied. The local test tone remains available without an account. Bundled serif fonts include their copyright and SIL OFL 1.1 notices. Exact complete source: https://github.com/Ghou133/DanmakuVoice/releases/download/store-v1.3.0.0/DanmakuVoice-source.zip
+Version 0.3.1 updates the lake interface and fixes lifecycle, cancellation, persistence and reconnection issues. Experimental Broadcast and OBS overlay settings remain off by default. Broadcast manages only the signed-in user's own Bilibili room; capture, encoding and RTMP publishing remain in OBS. Optional chat and moderation actions require the current account's platform permissions. OBS control requires the user's configured OBS WebSocket connection. A token-protected overlay is served only on 127.0.0.1 when enabled. No developer credentials are supplied. After first-run setup, the local test tone requires no cloud speech account. Bundled serif fonts include their copyright and SIL OFL 1.1 notices. Exact complete source: https://github.com/Ghou133/DanmakuVoice/releases/download/store-v1.3.1.0/DanmakuVoice-source.zip
 
-Metadata-only resubmission addressing report 7210d7cf-406f-4430-90d6-d0a0b61a27f4, policy 10.1.3 Search Terms: the reported third-party product title was removed. Both language listings use seven unique relevant terms, consisting only of our own app names and generic live-chat/speech functions. Public descriptions, features, trademark wording and screenshot captions use generic third-party live-chat and speech wording. Existing screenshots and the validated 1.3.0.0 package are unchanged. Actual compatibility, account requirements, WebView2 requirements and test steps are described above and in the linked source documentation. This resubmission does not add support for additional live platforms or providers.
+The 1.3.0.0 metadata resubmission addressed report 7210d7cf-406f-4430-90d6-d0a0b61a27f4, policy 10.1.3 Search Terms. The 1.3.1.0 update retains the generic search terms and existing screenshots. It does not add support for additional live platforms or speech providers. This file prepares submission text; current certification and publication status must be checked in Partner Center.
 
 ### runFullTrust 说明（500 字以内）
 

@@ -1,4 +1,52 @@
-import { errorMessage, mergeSnapshot } from './helpers.mjs';
+import { errorMessage, mergeSnapshot, audienceUsers, audienceDisplayCount } from './helpers.mjs';
+
+test('audience list searches confirmed viewers safely and clears when the room stops', () => {
+  const snapshot = { live: { running: true, audience: { active: true, live_status: 1, rank_count: 9999, users: [{ user_id: 42, user_name: '<Viewer>' }, { user_id: null, user_name: '神秘人', mystery: true }] }, events: [
+    { user_id: 7, user_name: 'Chatter', kind: 'danmaku', message: 'hello' },
+  ] } };
+  assert.equal(audienceUsers(snapshot, '42')[0].user_name, '<Viewer>');
+  assert.equal(audienceUsers(snapshot, 'viewer').length, 1);
+  assert.equal(audienceUsers(snapshot, 'missing').length, 0);
+  assert.equal(audienceUsers(snapshot, 'chatter').length, 0, 'chat senders are not presented as confirmed viewers');
+  assert.equal(audienceUsers(snapshot).length, 2);
+  snapshot.live.running = false;
+  assert.equal(audienceUsers(snapshot).length, 0);
+});
+
+test('audience excludes a verified self once and never guesses from an empty list or a name', () => {
+  const self = { user_id: 42, user_name: 'Me' };
+  const snapshot = { account: { user_id: 42, name: 'Me' }, live: { running: true, audience: { active: true, live_status: 1, rank_count_text: '1', users: [self] } } };
+  assert.equal(audienceDisplayCount(snapshot), '0');
+  assert.equal(audienceUsers(snapshot).length, 0);
+  snapshot.live.audience.users.push(self);
+  assert.equal(audienceDisplayCount(snapshot), '0', 'duplicate pages cannot subtract self twice');
+  snapshot.live.audience.rank_count_text = '9999+';
+  assert.equal(audienceDisplayCount(snapshot), '9998+');
+  snapshot.live.audience.rank_count_text = '1';
+  snapshot.live.audience.users = [{ user_id: 7, user_name: 'Me' }];
+  assert.equal(audienceDisplayCount(snapshot), '1');
+  assert.equal(audienceUsers(snapshot).length, 1);
+  snapshot.live.audience.users = [];
+  assert.equal(audienceDisplayCount(snapshot), '1', 'an anonymous/partial list does not prove self inclusion');
+  snapshot.live.audience.users = [{ ...self, mystery: true }];
+  assert.equal(audienceDisplayCount(snapshot), '1');
+  snapshot.account.user_id = null;
+  snapshot.live.audience.users = [self];
+  assert.equal(audienceDisplayCount(snapshot), '1');
+});
+
+test('unbroadcast rooms show zero despite active reception, and unknown state is unavailable', () => {
+  const snapshot = { live: { running: true, audience: { active: true, live_status: 0, rank_count_text: '1', users: [{ user_id: 7, user_name: 'Old' }] } } };
+  assert.equal(audienceDisplayCount(snapshot), '0');
+  assert.equal(audienceUsers(snapshot).length, 0);
+  snapshot.live.audience.live_status = 2;
+  assert.equal(audienceDisplayCount(snapshot), '0');
+  snapshot.live.audience.live_status = null;
+  assert.equal(audienceDisplayCount(snapshot), null);
+  snapshot.live.audience.live_status = 1;
+  snapshot.live.audience.error = 'Network failure';
+  assert.equal(audienceDisplayCount(snapshot), null);
+});
 
 test('support codes survive wrapping and runtime display without duplicated generic labels', () => {
   const original = 'FFmpeg 无法启动（系统错误 5） [DV-C02]';
@@ -21,11 +69,17 @@ test('voice settings keep read-only observations active during onboarding', () =
 
 test('header uses only the logged-in account and blocks unsafe or offline avatar requests', () => {
   assert.equal(headerIdentity({account:{name:'stale user'}}).name, '超绝可爱弹幕姬');
+  for (const user_id of [0, '0', -1, 'anonymous-42', '18446744073709551616']) {
+    const identity = headerIdentity({ account:{user_id,name:'stale user'}, setup:{mode:'anonymous',uid:77,room_id:12} });
+    assert.equal(identity.loggedIn, false);
+    assert.equal(identity.name, '超绝可爱弹幕姬');
+  }
   assert.equal(headerIdentity({account:{user_id:42}}).name, '哔哩哔哩用户');
   const state = {account:{user_id:42,name:'当前账号',avatar_url:'https://i0.hdslb.com/bfs/face/avatar.jpg'}};
   assert.equal(headerIdentity(state).avatar, state.account.avatar_url);
   assert.equal(headerIdentity({...state,network_disabled:true}).avatar, '');
   assert.equal(headerIdentity({account:{...state.account,avatar_url:'https://evil.example/image.jpg'}}).avatar, '');
+  assert.equal(headerIdentity({...state,setup:{mode:'anonymous',uid:77,room_id:12}}).name, '当前账号');
 });
 
 test('untrusted danmaku and attribute text cannot introduce HTML', () => {
@@ -57,18 +111,43 @@ test('UID validation rejects empty, signed, decimal, exponent and overflow input
   assert.equal(numericId('123456'), 123456);
 });
 
-test('onboarding resumes from saved state without fabricating successful setup', () => {
+test('onboarding requires an account and its room before resuming saved online setup', () => {
   assert.equal(startingStep({}), 'welcome');
-  assert.equal(startingStep({ setup: { room_id: 12 } }), 'tts');
-  assert.equal(startingStep({ setup: { room_id: 12, tts_enabled: true }, rules: { default_preset_id: 'a' }, presets: [{ id: 'a' }] }), 'ready');
-  assert.equal(startingStep({ onboarding_done: true }), 'main');
+  assert.equal(startingStep({ setup: { room_id: 12 } }), 'login');
+  assert.equal(startingStep({ onboarding_done: true }), 'login');
+  assert.equal(startingStep({ onboarding_done: true, setup:{mode:'anonymous',uid:77,room_id:12}, account:{} }), 'login');
+  const loggedIn = {account:{user_id:42},setup:{mode:'account',uid:42,room_id:12}};
+  assert.equal(startingStep(loggedIn), 'tts');
+  assert.equal(startingStep({ ...loggedIn, setup: {...loggedIn.setup,tts_enabled:true}, rules:{default_preset_id:'a'}, presets:[{id:'a'}] }), 'ready');
+  assert.equal(startingStep({ ...loggedIn, onboarding_done:true }), 'main');
+  assert.equal(startingStep({ ...loggedIn, onboarding_done:true, live:{running:true,state:'connected'} }), 'main');
+  assert.equal(startingStep({ account:{user_id:42}, onboarding_done:true, setup:{} }), 'login');
 });
 
-test('QR room fallback is shown only after account login without a resolved room', () => {
+test('legacy anonymous and other-user targets return to authenticated own-room resolution', () => {
+  const loggedIn = {account:{user_id:42},onboarding_done:true};
+  assert.equal(startingStep({...loggedIn,setup:{mode:'anonymous',uid:77,room_id:12}}), 'login');
+  assert.equal(startingStep({...loggedIn,setup:{mode:'anonymous',uid:42,room_id:12}}), 'login');
+  assert.equal(startingStep({...loggedIn,setup:{mode:'account',uid:77,room_id:12}}), 'login');
+  assert.equal(startingStep({onboarding_done:true,account:{name:'stale user'},setup:{mode:'account',room_id:12}}), 'login');
+});
+
+test('explicit offline fixtures can exercise local setup without enabling real anonymous reception', () => {
+  assert.equal(startingStep({network_disabled:true}), 'welcome');
+  assert.equal(startingStep({network_disabled:true,setup:{mode:'anonymous',room_id:12}}), 'tts');
+  assert.equal(startingStep({network_disabled:true,setup:{room_id:12,tts_enabled:true},rules:{default_preset_id:'a'},presets:[{id:'a'}]}), 'ready');
+  assert.equal(startingStep({network_disabled:true,onboarding_done:true}), 'main');
+  assert.equal(startingStep({network_disabled:false,onboarding_done:true,setup:{mode:'anonymous',room_id:12}}), 'login');
+});
+
+test('missing own-room status requires a real account after QR login', () => {
   assert.equal(qrNeedsRoomFallback({ qr: { provider: 'bilibili', status: 'expired' }, account: { user_id: 12 }, setup: { room_id: null } }), true);
   assert.equal(qrNeedsRoomFallback({ qr: { provider: 'bilibili', status: 'expired' }, account: { user_id: 12 }, setup: { room_id: 34 } }), false);
   assert.equal(qrNeedsRoomFallback({ qr: { provider: 'bilibili', status: 'expired' }, account: {}, setup: {} }), false);
   assert.equal(qrNeedsRoomFallback({ qr: { provider: 'doubao', status: 'expired' }, account: { user_id: 12 }, setup: {} }), false);
+  assert.equal(qrNeedsRoomFallback({ qr: { provider: 'bilibili', status: 'waiting' }, account: { user_id: 12 }, setup: {} }), false);
+  assert.equal(qrNeedsRoomFallback({ qr: { provider: 'bilibili', status: 'expired' }, account: { user_id: '0' }, setup: {} }), false);
+  assert.equal(qrNeedsRoomFallback({ qr: { provider: 'bilibili', status: 'expired' }, account: { user_id: 12 }, setup: {room_id:0} }), true);
 });
 
 test('event text preserves real messages and represents gifts and guards', () => {
@@ -131,6 +210,8 @@ test('asynchronous speech failures are actionable instead of appearing healthy',
   assert.equal(runtimeIssue({ live: { running: false, errors: 1 } }), '');
   assert.equal(runtimeIssue({ live: { state: 'reconnecting', running: true } }), '');
   assert.match(runtimeIssue({ live: { state: 'session_expired', running: false } }), /重新扫码/);
+  assert.match(runtimeIssue({ live: { running: true }, received_emotes_error: '读取超时' }), /个人表情信息读取失败.*读取超时/);
+  assert.equal(runtimeIssue({ live: { running: false }, received_emotes_error: '读取超时' }), '');
 });
 
 test('playback failures preserve the engine diagnosis with an empty-detail fallback', () => {

@@ -48,7 +48,7 @@ export function mountSelects(root) {
       trigger.disabled = select.disabled;
       trigger.setAttribute('aria-required', String(select.required));
     };
-    controls.set(select, { sync });
+    controls.set(select, { sync, trigger, open: () => open() });
     sync();
     select.addEventListener('change', () => { sync(); queueMicrotask(sync); });
     select.addEventListener('invalid', event => { event.preventDefault(); trigger.focus(); trigger.setAttribute('aria-invalid', 'true'); });
@@ -57,8 +57,12 @@ export function mountSelects(root) {
     const open = () => {
       if (select.disabled) return;
       closeSelect();
+      const lakeEditor = select.closest('#onair-panel[data-mode="info"]');
+      const lakeArea = lakeEditor && ['parent_area_id', 'area_id'].includes(select.name)
+        ? select.name === 'parent_area_id' ? 'parent' : 'child' : null;
       const menu = document.createElement('div');
       menu.className = 'select-menu';
+      if (lakeArea) menu.dataset.lakeArea = lakeArea;
       menu.id = `select-menu-${sequence++}`;
       menu.setAttribute('role', 'listbox');
       menu.setAttribute('aria-label', trigger.getAttribute('aria-label'));
@@ -99,21 +103,44 @@ export function mountSelects(root) {
         trigger.removeAttribute('aria-invalid');
         trigger.focus({ preventScroll: true });
         // Re-selecting a category must also return to its overview.
-        if (changed || select.id === 'settings-category') {
+        if (changed || select.id === 'settings-category' || lakeArea === 'parent') {
           select.dispatchEvent(new Event('input', { bubbles: true }));
           select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        if (lakeArea === 'parent') {
+          // The room form's existing change handler updates the real child options.
+          // Open that next field only after its options and trigger have synchronized.
+          queueMicrotask(() => {
+            if (!lakeEditor.isConnected || lakeEditor.hidden) return;
+            const child = select.form?.elements.namedItem('area_id');
+            const control = controls.get(child);
+            if (!control || child.disabled) return;
+            control.trigger.focus({ preventScroll: true });
+            control.open();
+          });
         }
       };
       (select.closest('dialog') || document.body).append(menu);
       menu.showPopover();
       const bounds = trigger.getBoundingClientRect();
-      menu.style.width = `${Math.min(Math.max(bounds.width, 180), innerWidth - 24)}px`;
-      const below = innerHeight - bounds.bottom - 18;
-      const above = bounds.top - 18;
-      const down = below >= Math.min(menu.scrollHeight + 2, 280) || below >= above;
-      menu.style.maxHeight = `${Math.max(40, Math.min(280, down ? below : above))}px`;
-      menu.style.left = `${Math.max(12, Math.min(bounds.left, innerWidth - menu.offsetWidth - 12))}px`;
-      menu.style.top = `${down ? bounds.bottom + 6 : Math.max(12, bounds.top - menu.offsetHeight - 6)}px`;
+      const areaBounds = lakeEditor?.querySelector('.onair-areas')?.getBoundingClientRect();
+      if (lakeArea && areaBounds) {
+        const editBounds = lakeEditor.getBoundingClientRect();
+        const top = areaBounds.top + 30;
+        // Lake.dc.html: .alist left 34/92, top 30, min-width 150 plus padding/border.
+        menu.style.width = '164px';
+        menu.style.left = `${editBounds.left + (lakeArea === 'parent' ? 34 : 92)}px`;
+        menu.style.top = `${top}px`;
+        menu.style.maxHeight = `${Math.max(40, innerHeight - top - 12)}px`;
+      } else {
+        menu.style.width = `${Math.min(Math.max(bounds.width, 180), innerWidth - 24)}px`;
+        const below = innerHeight - bounds.bottom - 18;
+        const above = bounds.top - 18;
+        const down = below >= Math.min(menu.scrollHeight + 2, 280) || below >= above;
+        menu.style.maxHeight = `${Math.max(40, Math.min(280, down ? below : above))}px`;
+        menu.style.left = `${Math.max(12, Math.min(bounds.left, innerWidth - menu.offsetWidth - 12))}px`;
+        menu.style.top = `${down ? bounds.bottom + 6 : Math.max(12, bounds.top - menu.offsetHeight - 6)}px`;
+      }
       opened = { trigger, menu, listeners };
       trigger.setAttribute('aria-expanded', 'true');
       trigger.setAttribute('aria-controls', menu.id);

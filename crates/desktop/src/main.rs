@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod app_data;
 mod embedded_ffmpeg;
 mod local_service;
 mod overlay;
@@ -21,6 +22,10 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 use zeroize::Zeroizing;
+
+// This is one application window, not a browser with shell-visible tabs.
+// Retain Wry's default feature exclusions when overriding its browser args.
+const WEBVIEW_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,msWindowTabManagerPublic --autoplay-policy=no-user-gesture-required";
 
 #[derive(Debug)]
 struct MissingWebView2Runtime;
@@ -108,9 +113,8 @@ impl ExitBridge {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.page_generation = state.page_generation.wrapping_add(1);
         state.frontend_ready = false;
-        if matches!(state.pending, ExitPending::Frontend(_)) {
-            state.pending = ExitPending::None;
-        }
+        // Reload cannot revoke an already requested exit. Its original
+        // deadline still falls back to native cleanup if this page never replies.
     }
 
     fn page_generation(&self) -> u64 {
@@ -159,13 +163,14 @@ impl ExitBridge {
     fn expire_frontend_request(&self, id: u64) -> bool {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if state.pending == ExitPending::Frontend(id) {
-            state.pending = ExitPending::None;
+            state.pending = ExitPending::Native(id);
             true
         } else {
             false
         }
     }
 
+    #[cfg(test)]
     fn abort_request(&self, id: u64) {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if matches!(
@@ -221,7 +226,6 @@ async fn finish_exit(
     request_id: u64,
 ) -> Result<(), String> {
     if !exit_bridge.accept_frontend_result(request_id, saved) {
-        show_window(&app);
         return Err("退出请求已过期，请重新点击退出".into());
     }
     if !saved {
@@ -233,13 +237,7 @@ async fn finish_exit(
 }
 
 async fn shutdown_and_exit(app: &tauri::AppHandle, state: &Application) {
-    // Closing is a single action, including when a network task fails to stop.
-    let _ = tokio::time::timeout(
-        Duration::from_secs(3),
-        state.dispatch("queue.stop", serde_json::json!({})),
-    )
-    .await;
-    state.stop_owned_local_services();
+    state.shutdown().await;
     app.exit(0);
 }
 
@@ -292,7 +290,9 @@ async fn dispatch(
         && let Some(window) = app.get_webview_window("main")
     {
         let (title, show, exit) = native_labels(&result);
-        window.set_title(title).map_err(|e| e.to_string())?;
+        if window.title().map_err(|e| e.to_string())? != title {
+            window.set_title(title).map_err(|e| e.to_string())?;
+        }
         if let Some(labels) = app.try_state::<TrayLabels>() {
             labels.show.set_text(show).map_err(|e| e.to_string())?;
             labels.exit.set_text(exit).map_err(|e| e.to_string())?;
@@ -428,6 +428,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .visible(false)
             .center()
             .data_directory(webview_data)
+            .additional_browser_args(WEBVIEW_BROWSER_ARGS)
             .initialization_script(theme_script)
             .on_page_load({
                 let exit_bridge = exit_bridge.clone();
@@ -520,11 +521,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             });
             let state = app.state::<Application>().inner().clone();
             tauri::async_runtime::spawn(async move {
+                let Ok(shutdown) = state.shutdown_token() else {
+                    return;
+                };
                 let mut interval = tokio::time::interval(Duration::from_secs(5));
                 interval.tick().await;
                 loop {
-                    interval.tick().await;
-                    state.reconcile_default_output().await;
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => break,
+                        _ = interval.tick() => tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => break,
+                            _ = state.reconcile_default_output() => {},
+                        },
+                    }
                 }
             });
             Ok(())
@@ -623,7 +634,7 @@ fn request_exit(app: &tauri::AppHandle, bridge: &ExitBridge) {
                 )
                 .is_err()
             {
-                bridge.abort_request(request_id);
+                bridge.expire_frontend_request(request_id);
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let state = app.state::<Application>().inner().clone();
@@ -802,7 +813,7 @@ mod exit_bridge_tests {
     }
 
     #[test]
-    fn reload_invalidates_old_snapshot_and_allows_new_close_request() {
+    fn reload_invalidates_old_snapshot_and_preserves_pending_exit_deadline() {
         let bridge = ExitBridge::default();
         let previous_page = bridge.page_generation();
         bridge.page_started();
@@ -812,9 +823,12 @@ mod exit_bridge_tests {
         let bridge = ExitBridge::default();
         let current_page = bridge.page_generation();
         bridge.frontend_ready_if(current_page);
-        assert!(matches!(bridge.begin_request(), ExitRoute::Frontend(_)));
+        let ExitRoute::Frontend(request) = bridge.begin_request() else {
+            panic!("expected frontend");
+        };
         bridge.page_started();
-        assert!(matches!(bridge.begin_request(), ExitRoute::Native(_)));
+        assert_eq!(bridge.begin_request(), ExitRoute::Pending);
+        assert!(bridge.expire_frontend_request(request));
     }
 
     #[test]
@@ -829,21 +843,16 @@ mod exit_bridge_tests {
     }
 
     #[test]
-    fn expired_request_does_not_accept_late_exit_or_clear_a_new_request() {
+    fn expired_request_rejects_late_result_and_repeated_close() {
         let bridge = ExitBridge::default();
         bridge.frontend_ready_if(bridge.page_generation());
-        let ExitRoute::Frontend(old_request) = bridge.begin_request() else {
-            panic!("ready page must use its listener");
+        let ExitRoute::Frontend(request) = bridge.begin_request() else {
+            panic!("expected frontend");
         };
-        assert!(bridge.expire_frontend_request(old_request));
-        assert!(!bridge.accept_frontend_result(old_request, true));
-        let ExitRoute::Frontend(new_request) = bridge.begin_request() else {
-            panic!("expired request must release retry entry");
-        };
-        assert_ne!(old_request, new_request);
-        assert!(!bridge.expire_frontend_request(old_request));
-        assert!(bridge.accept_frontend_result(new_request, true));
-        assert!(!bridge.expire_frontend_request(new_request));
+        assert!(bridge.expire_frontend_request(request));
+        assert!(!bridge.accept_frontend_result(request, true));
+        assert_eq!(bridge.begin_request(), ExitRoute::Pending);
+        assert!(!bridge.expire_frontend_request(request));
     }
 
     #[test]

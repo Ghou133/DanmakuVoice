@@ -38,5 +38,8 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 tempfile = "3"
 async-trait = "0.1"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
