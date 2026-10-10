@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
-from package_msix import ROOT, FOUNDATION, UAP5, RESCAP, DESKTOP6, VIRTUALIZATION, manifest, safe_member, stage, verify
+from package_msix import ROOT, FOUNDATION, UAP5, RESCAP, manifest, safe_member, stage, verify
 from source_inventory import snapshot_id
 
 
@@ -45,16 +45,16 @@ class MsixTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 safe_member(bad)
 
-    def test_store_and_portable_share_durable_appdata(self):
+    def test_store_uses_default_virtualization_without_rejected_capability(self):
         identity = json.loads((ROOT/'packaging/store-identity.json').read_text(encoding='utf-8'))
         doc = ET.fromstring(manifest(identity, '0.3.0'))
-        props = doc.find(f'{{{FOUNDATION}}}Properties')
-        self.assertEqual(props.find(f'{{{DESKTOP6}}}FileSystemWriteVirtualization').text, 'disabled')
-        exclusions = props.findall(f'.//{{{VIRTUALIZATION}}}ExcludedDirectory')
-        self.assertEqual([item.text for item in exclusions], [r'$(KnownFolder:LocalAppData)\DanmakuVoice'])
         capabilities = {item.attrib['Name'] for item in doc.findall(f'.//{{{RESCAP}}}Capability')}
-        self.assertEqual(capabilities, {'runFullTrust', 'unvirtualizedResources'})
-        self.assertIsNone(props.find(f'{{{DESKTOP6}}}RegistryWriteVirtualization'))
+        self.assertEqual(capabilities, {'runFullTrust'})
+        # Match the approved 1.3.0.0 policy on Windows 10 and 11. Neither the
+        # broad legacy switch nor a narrow exclusion may reintroduce opt-outs.
+        forbidden = {'FileSystemWriteVirtualization', 'RegistryWriteVirtualization',
+                     'ExcludedDirectories', 'ExcludedDirectory', 'ExcludedKeys', 'ExcludedKey'}
+        self.assertFalse({node.tag.rsplit('}', 1)[-1] for node in doc.iter()} & forbidden)
 
     def test_package_corruption_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

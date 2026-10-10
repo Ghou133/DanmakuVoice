@@ -36,7 +36,7 @@
 
 “关于”页改由 Store 管理更新；开机启动使用清单声明的 Windows StartupTask，默认关闭，必须由用户明确启用。不向包目录写配置，不自动搬运或导入旧版凭据。WebView2 及用户自己配置的外部 TTS 环境仍需实际验证；本应用的签名不会替外部服务签名。
 
-默认数据目录由系统 Known Folder API 定位至当前用户的 `AppData\Local\DanmakuVoice`，与便携版本共用。清单加入 `unvirtualizedResources`：Windows 11 仅排除该目录的文件虚拟化，Windows 10 使用兼容的文件虚拟化关闭属性；注册表虚拟化不改动。依据 [Microsoft 的文件虚拟化说明](https://learn.microsoft.com/en-us/windows/msix/desktop/flexible-virtualization)，避免卸载、换版本或改变包身份时留下只能被旧包看到的别名、音色绑定。旧数据副本保留，凭据不自动导入；正式提交仍须通过完整 MakeAppx 验证和微软受限能力审核，本地清单测试不代表商店已批准。
+默认逻辑数据目录由系统 Known Folder API 定位至当前用户的 `AppData\Local\DanmakuVoice`；商店版沿用已通过 1.3.0.0 的 Windows 默认文件和注册表虚拟化，不声明 `unvirtualizedResources` 或任何虚拟化排除。商店版与便携版不承诺共用物理数据库，卸载后配置可能被系统删除；普通配置导出不是完整备份。升级保持产品身份不变，不自动覆盖旧副本或导入凭据。发布前核对实际 MSIX 清单，并区分隔离数据回归与真实签名商店升级验收。依据 [Microsoft 的文件虚拟化说明](https://learn.microsoft.com/en-us/windows/msix/desktop/flexible-virtualization)，Known Folder 返回逻辑路径不等于关闭 I/O 虚拟化。
 
 ## 商店资料与提交前验收
 

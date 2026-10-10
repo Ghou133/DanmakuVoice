@@ -25,9 +25,9 @@ async function run() {
   const section = (value, start, end) => value.slice(value.indexOf(start), value.indexOf(end, value.indexOf(start)));
   // Fixed digests of the original artwork before this behavior change keep
   // this gate reproducible without a local target/ backup or browser snapshot.
-  assert.equal(hash(section(html, '<style>', '</style>')), '84cee46750f3c1178dffdb7ccf30fbae9b665de974d42cddf15ce8381e9bca1f', 'production CSS must be byte-identical');
+  assert.equal(hash(section(html, '<style>', '</style>').replaceAll('display:block;height:100%;width:100%;background:var(--tc);transform:scaleX(var(--left,1));transform-origin:left', 'display:block;height:100%;width:calc(var(--left,1)*100%);background:var(--tc)')), '84cee46750f3c1178dffdb7ccf30fbae9b665de974d42cddf15ce8381e9bca1f', 'only the two verified SC track rendering rules may differ from the original CSS');
   assert.equal(hash(section(html, '<body>', '<script>')), '77ad5f9cf0bcedcdbd46e4a67087de815bda97bc0440a86abc4daa5daa53ca41', 'production DOM must be byte-identical');
-  checks.push({name:'original production CSS and DOM bytes preserved',passed:true});
+  checks.push({name:'original artwork bytes preserved except the two verified SC track rendering rules',passed:true});
   let opening = {instance:'fictional-app',session:0,heartbeat_ms:15000,config:{style:'spine',linger_seconds:14},status:{connection:'connected',tts:true,words:4},items:[1,2,3,4].map(seq=>item(seq,seq)),reading:null};
   const clients = new Set();
   const server = http.createServer(async (req,res) => {
@@ -59,8 +59,13 @@ async function run() {
       window.__sources=[];window.__rafRequests=0;
       const Native=EventSource;
       window.EventSource=class extends Native {constructor(url){super(url);window.__sources.push(this);}};
-      const raf=requestAnimationFrame;
-      window.requestAnimationFrame=callback=>{window.__rafRequests++;return raf(callback);};
+      // Count production callbacks after the page clock has installed its
+      // scheduler. Wrapping requestAnimationFrame before clock.install can be
+      // overwritten by Playwright and make idle-loop assertions vacuous.
+      addEventListener('DOMContentLoaded',()=>{
+        const frame=window.frame;
+        window.frame=(...args)=>{window.__rafRequests++;return frame(...args);};
+      });
     });
     await page.clock.install({time:new Date()});
     await page.clock.pauseAt(new Date(Date.now()+1000));
@@ -188,6 +193,11 @@ async function run() {
       const at=await page.evaluate(()=>Date.now());
       await emit('item',item(2,null,at));await advance(350);
       assert.equal(await rows().count(),1);
+      await advance(8000);
+      assert.equal(await page.locator('.spot').count(),0);
+      const waitingRaf=await page.evaluate(()=>window.__rafRequests);
+      await advance(3000);
+      assert.equal(await page.evaluate(()=>window.__rafRequests),waitingRaf,'expiry-only wait must not request animation frames');
       await advance(30000);assert.equal(await rows().count(),0);
     });
     await check('Super Chat keeps its price duration and expires while spine ordinary rows remain',async()=>{
@@ -196,14 +206,71 @@ async function run() {
       await emit('item',{...item(1,null,at),kind:'super_chat',price:30});
       await emit('item',item(2,null,at));await advance(350);
       assert.equal(await page.locator('.ticket').count(),1);
+      await page.evaluate(()=>{
+        window.__countdownNode=document.querySelector('.sleft').firstChild;
+        window.__countdownWrites=0;
+        new MutationObserver(records=>window.__countdownWrites+=records.length).observe(document.querySelector('.sleft'),{childList:true});
+      });
+      await page.evaluate(() => {
+        const ticket=document.querySelector('.ticket'), original=ticket.style.getPropertyValue('--left');
+        for(const stub of [false,true]) {
+          ticket.classList.toggle('stub',stub);
+          const fill=ticket.querySelector(stub?'.strack i':'.ttrack i'), track=fill.parentElement;
+          for(const fraction of [0,.25,.5,1]) {
+            ticket.style.setProperty('--left',String(fraction));
+            const actual=fill.getBoundingClientRect(), parent=track.getBoundingClientRect();
+            if(Math.abs(actual.width-parent.width*fraction)>.02 || Math.abs(actual.left-parent.left)>.02) throw Error('SC track visual extent changed');
+            if(Math.abs(parseFloat(getComputedStyle(fill).width)-parent.width)>.02) throw Error('SC progress still changes layout width');
+          }
+        }
+        ticket.classList.remove('stub');ticket.style.setProperty('--left',original);
+      });
+      const initialTrack=await page.locator('.ticket .ttrack i').evaluate(el=>getComputedStyle(el).getPropertyValue('--left'));
+      await advance(200);
+      assert.equal(await page.evaluate(()=>window.__countdownNode===document.querySelector('.sleft').firstChild),true,'unchanged countdown preserves its text node');
+      assert.notEqual(await page.locator('.ticket .ttrack i').evaluate(el=>getComputedStyle(el).getPropertyValue('--left')),initialTrack,'progress track keeps animating');
+      assert.equal(await page.locator('.ticket .ttrack i').evaluate(el=>getComputedStyle(el).getPropertyValue('--left')),await page.locator('.ticket .strack i').evaluate(el=>getComputedStyle(el).getPropertyValue('--left')),'both original tracks stay synchronized');
+      await advance(1800);
+      assert.ok(await page.evaluate(()=>window.__countdownWrites>=1 && window.__countdownWrites<=3),'countdown only mutates at second boundaries');
       await advance(62000);assert.equal(await page.locator('.ticket').count(),0);
       assert.equal(await rows().count(),1);
     });
     await check('waiting-only spotlight demotes at the original timeout and becomes idle',async()=>{
       await emit('item',item(3,3));await advance(350);assert.equal(await page.locator('.spot').count(),1);
+      const waitingRaf=await page.evaluate(()=>window.__rafRequests);await advance(10000);
+      assert.equal(await page.evaluate(()=>window.__rafRequests),waitingRaf,'queued reading waits on its deadline without per-frame work');
       await advance(22000);assert.equal(await page.locator('.spot').count(),0);
       const raf=await page.evaluate(()=>window.__rafRequests);await advance(30000);
       assert.equal(await page.evaluate(()=>window.__rafRequests),raf);assert.equal(await rows().count(),2);
+    });
+    await check('a new reading interrupts a pending spotlight deadline and resumes progress',async()=>{
+      await emit('item',item(4,4));await advance(350);
+      const raf=await page.evaluate(()=>window.__rafRequests);await advance(1000);
+      assert.equal(await page.evaluate(()=>window.__rafRequests),raf);
+      await emit('reading',{job_id:4,played_ms:100,queued_ms:3000,chars:12});await advance(400);
+      assert.ok(await page.evaluate(()=>window.__rafRequests)>raf);
+      assert.equal(await page.locator('.spot.reading').count(),1);
+      await emit('reading',null);await advance(2300);
+      assert.equal(await page.locator('.spot').count(),0);
+    });
+    await check('long Super Chat skips unchanged progress styles without slowing its frame loop',async()=>{
+      await emit('hello',{...opening,instance:'fictional-long-sc',session:0,items:[],reading:null});
+      await emit('item',{...item(1,null,await page.evaluate(()=>Date.now())),kind:'super_chat',price:2000});
+      await advance(800);
+      await page.evaluate(()=>{
+        window.__trackWrites=0;
+        window.__trackObserver=new MutationObserver(records=>window.__trackWrites+=records.length);
+        window.__trackObserver.observe(document.querySelector('.ticket'),{attributes:true,attributeFilter:['style']});
+      });
+      const raf=await page.evaluate(()=>window.__rafRequests);
+      const progress=await page.locator('.ticket .ttrack i').evaluate(el=>getComputedStyle(el).getPropertyValue('--left'));
+      await advance(100);
+      assert.ok(await page.evaluate(()=>window.__rafRequests)>raf,'visible animation keeps the browser frame cadence');
+      assert.equal(await page.evaluate(()=>window.__trackWrites),0,'rounded progress did not change, so no style assignment is needed');
+      await advance(300);
+      assert.notEqual(await page.locator('.ticket .ttrack i').evaluate(el=>getComputedStyle(el).getPropertyValue('--left')),progress);
+      assert.equal(await page.evaluate(()=>window.__trackWrites),1);
+      await page.evaluate(()=>window.__trackObserver.disconnect());
     });
     await check('normal motion keeps the original completion hold, shrink and same-node artwork',async()=>{
       opening={...opening,instance:'fictional-normal-motion',session:0,items:[1,2,3,4,5].map(seq=>item(seq,seq)),reading:{job_id:5,played_ms:500,queued_ms:2000,chars:6}};

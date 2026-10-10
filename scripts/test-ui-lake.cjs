@@ -458,12 +458,16 @@ async function noOverlap(selectors, label) {
     assert.deepEqual(await page.locator('#lake-current .lake-letter').allTextContents(), ['👩🏽‍🚀', ' ', '👨‍👩‍👧‍👦', ' ', 'e\u0301']);
     const movingSelectors = '.lake-scenery *, .lake-orb, #lake-current .lake-letter, #lake-history .lake-message';
     assert.equal(await page.locator(movingSelectors).evaluateAll(nodes => nodes.every(node => getComputedStyle(node).animationName === 'none')), true, 'reduced motion must disable every lake animation');
+    assert.equal(await page.locator('.lake-reflection').evaluate(node => getComputedStyle(node, '::before').animationName), 'none', 'reduced motion must also disable the reflection plane');
     await page.emulateMedia({ reducedMotion: 'no-preference' });
+    assert.deepEqual(await page.locator('.lake-reflection').evaluate(node => { const style = getComputedStyle(node, '::before'); return [style.animationName, style.animationDuration, style.backgroundSize]; }), ['lake-shimmer', '3s', '100% 50%'], 'reflection retains its original tile and three-second movement');
     await page.evaluate(() => window.__fixtureListeners['resource-mode']({ payload: false }));
     await page.waitForFunction(() => document.documentElement.dataset.inactive === 'true');
     assert.equal(await page.locator(movingSelectors).evaluateAll(nodes => nodes.every(node => getComputedStyle(node).animationPlayState === 'paused')), true, 'background state must freeze all lake animations');
+    assert.equal(await page.locator('.lake-reflection').evaluate(node => getComputedStyle(node, '::before').animationPlayState), 'paused', 'background must freeze the reflection plane');
     await page.evaluate(() => window.__fixtureListeners['resource-mode']({ payload: true }));
     await page.waitForFunction(() => document.documentElement.dataset.inactive === 'false');
+    assert.equal(await page.locator('.lake-reflection').evaluate(node => getComputedStyle(node, '::before').animationPlayState), 'running', 'foreground must resume the reflection plane');
     assert.equal(await waveAnimation(), 'lake-wave-idle');
     await page.emulateMedia({ reducedMotion: 'reduce' });
     check('IME Enter waits for committed title input, session totals exceed the message buffer, grapheme clusters stay intact, and reduced/background motion pauses correctly');

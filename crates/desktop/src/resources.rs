@@ -33,8 +33,17 @@ fn query_active(window: &WebviewWindow) -> bool {
 }
 
 pub fn apply(window: &WebviewWindow, focused: Option<bool>) {
-    // Focused events can precede the dispatcher's cached is_focused value.
-    // Their explicit value is authoritative, including native titlebar focus.
+    // Windows can deliver focus/restore notifications without granting this
+    // process the foreground window (for example after a blocked activation).
+    // The HWND query avoids both that false positive and Tao's cached focus.
+    #[cfg(windows)]
+    let foreground = {
+        let _ = focused;
+        query_active(window)
+    };
+    // Other platforms still need the event value before the dispatcher cache
+    // catches up, including native titlebar focus.
+    #[cfg(not(windows))]
     let foreground = focused.unwrap_or_else(|| query_active(window));
     let policy = window.state::<ResourcePolicy>();
     if policy.0.swap(u8::from(foreground), Ordering::Relaxed) == u8::from(foreground) {

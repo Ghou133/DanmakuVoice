@@ -130,8 +130,11 @@
 @keyframes lake-mist {from{transform:translateX(-60px)}to{transform:translateX(80px)}}
 .lake-horizon {position:absolute;left:0;right:0;top:var(--lake-horizon);height:1px;background:linear-gradient(90deg,transparent,var(--lake-path) 72%,transparent)}
 .lake-water {position:absolute;left:0;right:0;top:calc(477 * var(--lake-y) - var(--titlebar-h));bottom:0;background:var(--lake-water)}
-.lake-reflection {position:absolute;left:calc(722 * var(--lake-x));top:calc(478 * var(--lake-y) - var(--titlebar-h));width:calc(136 * var(--lake-x));height:calc(262 * var(--lake-y));background:repeating-linear-gradient(180deg,var(--lake-path) 0 2px,transparent 2px 9px);-webkit-mask-image:radial-gradient(50% 100% at 50% 0%,#000,transparent);mask-image:radial-gradient(50% 100% at 50% 0%,#000,transparent);filter:blur(1px);animation:lake-shimmer 3s linear infinite}
-@keyframes lake-shimmer {from{background-position:0 0}to{background-position:0 18px}}
+.lake-reflection {position:absolute;left:calc(722 * var(--lake-x));top:calc(478 * var(--lake-y) - var(--titlebar-h));width:calc(136 * var(--lake-x));height:calc(262 * var(--lake-y));overflow:hidden;-webkit-mask-image:radial-gradient(50% 100% at 50% 0%,#000,transparent);mask-image:radial-gradient(50% 100% at 50% 0%,#000,transparent);filter:blur(1px)}
+/* Translate two original-height tiles behind the same mask. The second tile
+   preserves the old background-repeat seam without repainting every frame. */
+.lake-reflection::before {content:"";position:absolute;inset:-100% 0 0;background:repeating-linear-gradient(180deg,var(--lake-path) 0 2px,transparent 2px 9px);background-size:100% 50%;animation:lake-shimmer 3s linear infinite}
+@keyframes lake-shimmer {from{transform:translateY(0)}to{transform:translateY(18px)}}
 .lake-ripple {position:absolute;box-sizing:content-box;width:60px;height:12px;margin:-6px 0 0 -30px;border-radius:50%;border:1px solid var(--lake-path);opacity:0;animation:lake-ripple 9s ease-out infinite;pointer-events:none}
 .lake-ripple.ripple-one {left:calc(300 * var(--lake-x));top:calc(620 * var(--lake-y) - var(--titlebar-h))}
 .lake-ripple.ripple-two {left:calc(860 * var(--lake-x));top:calc(560 * var(--lake-y) - var(--titlebar-h));animation-delay:-4s}

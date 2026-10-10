@@ -650,6 +650,8 @@ fn user_configuration_child_process() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let app = Application::new(options.data_dir.clone(), true).unwrap();
+        let reference = options.data_dir.parent().unwrap().join("external-reference.wav");
+        let cache_file = options.data_dir.join("cache/dots/inductor/upgrade-marker");
         if std::env::var_os("DV_USER_CONFIGURATION_TEST_WRITE").is_some() {
             save_test_voice(&app).await;
             let mut rules = app.snapshot().unwrap()["rules"].clone();
@@ -666,6 +668,23 @@ fn user_configuration_child_process() {
             )
             .await
             .unwrap();
+            std::fs::write(&reference, b"RIFF isolated reference fixture").unwrap();
+            app.dispatch("assets.import", json!({"path":reference,"name":"upgrade sound"}))
+                .await.unwrap();
+            app.dispatch("connections.save", json!({"connection":{"id":"sovits-upgrade","name":"SoVITS","settings":{"provider":"gpt_sovits","endpoint":"http://127.0.0.1:9882","timeout_secs":180},"has_credential":false}}))
+                .await.unwrap();
+            for (connection, role) in [
+                ("local", json!({"kind":"dots","role":"reference.wav"})),
+                ("sovits-upgrade", json!({"kind":"gpt_sovits","gpt_weights_path":"GPT_weights/fixture.ckpt","sovits_weights_path":"SoVITS_weights/fixture.pth"})),
+            ] {
+                app.dispatch("references.save", json!({"profile":{
+                    "connection_id":connection,"role":role,"audio_path":reference,
+                    "reference_text":"fixture","reference_language":"all_zh",
+                    "text_language":"all_zh","text_free":false
+                }})).await.unwrap();
+            }
+            std::fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+            std::fs::write(&cache_file, b"isolated cache marker").unwrap();
         }
         let snapshot = app.snapshot().unwrap();
         assert_eq!(
@@ -677,6 +696,15 @@ fn user_configuration_child_process() {
         assert_eq!(bindings[0]["id"], "upgrade-user-binding");
         assert_eq!(bindings[0]["binding"]["preset_id"], "voice");
         assert_eq!(snapshot["presets"].as_array().unwrap().len(), 1);
+        let asset = &snapshot["assets"].as_array().unwrap()[0];
+        let asset_path = app.lock().unwrap().store.asset_path(asset["id"].as_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read(&asset_path).unwrap(), std::fs::read(&reference).unwrap());
+        for connection in ["local", "sovits-upgrade"] {
+            let profiles = app.dispatch("references.list", json!({"connection_id":connection})).await.unwrap();
+            assert_eq!(profiles["result"].as_array().unwrap().len(), 1);
+            assert_eq!(profiles["result"][0]["profile"]["audio_path"], json!(reference));
+        }
+        assert_eq!(std::fs::read(&cache_file).unwrap(), b"isolated cache marker");
         std::fs::write(
             report,
             serde_json::to_vec(&json!({
@@ -684,7 +712,10 @@ fn user_configuration_child_process() {
                 "isolated_data_dir": options.data_dir,
                 "alias_count": snapshot["rules"]["user_words"].as_array().unwrap().len(),
                 "binding_count": bindings.len(),
-                "preset_count": snapshot["presets"].as_array().unwrap().len()
+                "preset_count": snapshot["presets"].as_array().unwrap().len(),
+                "asset_path": asset_path,
+                "external_reference": reference,
+                "dots_cache": cache_file
             }))
             .unwrap(),
         )

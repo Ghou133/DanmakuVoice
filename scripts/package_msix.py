@@ -19,9 +19,7 @@ UAP = NS + 'uap/windows10'
 UAP5 = UAP + '/5'
 UAP10 = UAP + '/10'
 RESCAP = NS + 'foundation/windows10/restrictedcapabilities'
-DESKTOP6 = NS + 'desktop/windows10/6'
-VIRTUALIZATION = NS + 'virtualization/windows10'
-for prefix, uri in [('', FOUNDATION), ('uap', UAP), ('uap5', UAP5), ('uap10', UAP10), ('rescap', RESCAP), ('desktop6', DESKTOP6), ('virtualization', VIRTUALIZATION)]:
+for prefix, uri in [('', FOUNDATION), ('uap', UAP), ('uap5', UAP5), ('uap10', UAP10), ('rescap', RESCAP)]:
     ET.register_namespace(prefix, uri)
 
 
@@ -44,20 +42,15 @@ def manifest(identity, version):
         raise ValueError('Invalid Store package name')
     if not re.fullmatch(r'CN=[0-9A-Fa-f-]{36}', identity['publisher']):
         raise ValueError('Use the exact Partner Center Publisher identity')
-    root = ET.Element(f'{{{FOUNDATION}}}Package', IgnorableNamespaces='uap uap5 uap10 rescap desktop6 virtualization')
+    root = ET.Element(f'{{{FOUNDATION}}}Package', IgnorableNamespaces='uap uap5 uap10 rescap')
     def add(parent, tag, **attrs):
         return ET.SubElement(parent, f'{{{FOUNDATION}}}{tag}', attrs)
     add(root, 'Identity', Name=identity['name'], Publisher=identity['publisher'], Version=store_version(version), ProcessorArchitecture='x64')
     props = add(root, 'Properties')
     for tag, value in [('DisplayName', identity['display_name']), ('PublisherDisplayName', identity['publisher_display_name']), ('Description', '直播弹幕接收与语音播报'), ('Logo', 'Assets/StoreLogo.png')]:
         add(props, tag).text = value
-    # Portable and Store builds must use the same durable user database.
-    # Windows 10 needs the legacy switch; Windows 11 applies the narrow
-    # directory exclusion instead. No Registry virtualization is changed.
-    ET.SubElement(props, f'{{{DESKTOP6}}}FileSystemWriteVirtualization').text = 'disabled'
-    virtual_files = ET.SubElement(props, f'{{{VIRTUALIZATION}}}FileSystemWriteVirtualization')
-    excluded = ET.SubElement(virtual_files, f'{{{VIRTUALIZATION}}}ExcludedDirectories')
-    ET.SubElement(excluded, f'{{{VIRTUALIZATION}}}ExcludedDirectory').text = r'$(KnownFolder:LocalAppData)\DanmakuVoice'
+    # Keep the default Windows data virtualization used by approved 1.3.0.0.
+    # Store and unpackaged builds do not promise a shared physical database.
     resources = add(root, 'Resources')
     add(resources, 'Resource', Language='zh-CN')
     deps = add(root, 'Dependencies')
@@ -70,7 +63,6 @@ def manifest(identity, version):
     ET.SubElement(startup, f'{{{UAP5}}}StartupTask', TaskId='DanmakuVoiceStartup', Enabled='false', DisplayName=identity['display_name'])
     caps = add(root, 'Capabilities')
     ET.SubElement(caps, f'{{{RESCAP}}}Capability', Name='runFullTrust')
-    ET.SubElement(caps, f'{{{RESCAP}}}Capability', Name='unvirtualizedResources')
     ET.indent(root)
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 

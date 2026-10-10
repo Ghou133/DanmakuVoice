@@ -203,7 +203,7 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .ticket .tfoot{display:flex;align-items:center;gap:calc(18*var(--p));height:calc(54*var(--p))}
 .ticket .tlabel{font-family:var(--numeral);font-size:calc(13*var(--p));letter-spacing:.4em;color:var(--tc);opacity:.85;white-space:nowrap}
 .ticket .ttrack{flex:1;height:calc(1.5*var(--p));background:rgba(var(--tr),.16)}
-.ticket .ttrack i{display:block;height:100%;width:calc(var(--left,1)*100%);background:var(--tc)}
+.ticket .ttrack i{display:block;height:100%;width:100%;background:var(--tc);transform:scaleX(var(--left,1));transform-origin:left}
 .ticket .tprice{font-family:var(--numeral);font-size:calc(40*var(--p));line-height:1;color:var(--tc)}
 .medal{position:absolute;top:calc(2*var(--p));left:50%;width:calc(48*var(--p));height:calc(48*var(--p));margin-left:calc(-24*var(--p));border-radius:50%;padding:calc(4*var(--p));box-sizing:border-box;background:#17131a;
   box-shadow:0 0 0 2px var(--tc),0 calc(8*var(--p)) calc(18*var(--p)) calc(-6*var(--p)) rgba(0,0,0,.8);animation:medal .7s cubic-bezier(.3,1.5,.5,1) .15s both}
@@ -224,7 +224,7 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .stubbar .stext{font-family:var(--serif);font-weight:700;font-size:calc(17*var(--p));letter-spacing:.04em;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .stubbar .sleft{font-family:var(--numeral);font-style:italic;font-size:calc(17*var(--p));color:rgba(var(--tr),.7)}
 .stubbar .strack{position:absolute;left:calc(60*var(--p));right:calc(24*var(--p));bottom:calc(4*var(--p));height:1px;background:rgba(var(--tr),.15)}
-.stubbar .strack i{display:block;height:100%;width:calc(var(--left,1)*100%);background:var(--tc)}
+.stubbar .strack i{display:block;height:100%;width:100%;background:var(--tc);transform:scaleX(var(--left,1));transform-origin:left}
 .ticket.out{transition:opacity .6s ease,transform .6s ease;opacity:0;transform:translateY(calc(-10*var(--p)))}
 
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -698,10 +698,15 @@ function finishJob(job) {
 
 // ---------------------------------------------------------------- frame loop
 let loopRunning = false;
-function ensureLoop() { if (!loopRunning) { loopRunning = true; requestAnimationFrame(frame); } }
+let loopTimer = 0;
+function ensureLoop() {
+  clearTimeout(loopTimer); loopTimer = 0;
+  if (!loopRunning) { loopRunning = true; requestAnimationFrame(frame); }
+}
 function frame() {
   const t = now();
   let busy = false;
+  let nextWake = Infinity;
   const fraction = readingFraction();
   for (const rec of state.items.values()) {
     if (rec.leaving) continue;
@@ -711,7 +716,7 @@ function frame() {
       setLit(rec, fraction);
       busy = true;
     } else if (rec.demoUntil) {
-      if (t < rec.demoStart) { busy = true; }
+      if (t < rec.demoStart) { nextWake = Math.min(nextWake, rec.demoStart - t); }
       else if (t < rec.demoUntil) {
         if (rec.spotMode !== "reading" && state.spot === rec.seq) { rec.el.classList.remove("timer"); rec.el.classList.add("reading"); rec.spotMode = "reading"; }
         const f = (t - rec.demoStart) / (rec.demoUntil - rec.demoStart);
@@ -732,14 +737,27 @@ function frame() {
     }
     if (!retainsRows()) {
       if (t > rec.expires && state.spot !== rec.seq && rec.state !== "reading") remove(rec);
-      else busy = true;
-    } else if (state.spot === rec.seq && rec.spotMode === "waiting") busy = true;
+      else if (t <= rec.expires) nextWake = Math.min(nextWake, rec.expires - t + 1);
+    }
+    if (state.spot === rec.seq && rec.spotMode === "waiting") nextWake = Math.min(nextWake, rec.spotAt + 20001 - t);
   }
   for (const rec of state.tickets.values()) {
     const left = Math.max(0, 1 - (t - rec.start) / rec.total);
-    rec.el.style.setProperty("--left", left.toFixed(4));
+    const progress = left.toFixed(4);
+    // Preserve the original four-decimal progress and frame rate, but do not
+    // rewrite an identical style while a long ticket waits for the next step.
+    if (rec.progress !== progress) {
+      rec.el.style.setProperty("--left", progress);
+      rec.progress = progress;
+    }
     const remaining = Math.ceil((rec.total - (t - rec.start)) / 1000);
-    rec.el.querySelector(".sleft").textContent = remaining >= 60 ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}` : `0:${String(Math.max(0, remaining)).padStart(2, "0")}`;
+    const remainingText = remaining >= 60 ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}` : `0:${String(Math.max(0, remaining)).padStart(2, "0")}`;
+    // The progress track stays frame-synchronized; its second label does not
+    // need another DOM lookup and text assignment on every frame.
+    if (rec.remainingText !== remainingText) {
+      rec.el.querySelector(".sleft").textContent = remainingText;
+      rec.remainingText = remainingText;
+    }
     if (state.reading && rec.job === state.reading.job_id && fraction != null) setTicketLit(rec, fraction);
     else if (rec.demoUntil) {
       if (t >= rec.demoStart && t < rec.demoUntil) { rec.el.classList.add("reading"); setTicketLit(rec, (t - rec.demoStart) / (rec.demoUntil - rec.demoStart)); }
@@ -750,7 +768,13 @@ function frame() {
     if (left <= 0) dropTicket(rec);
     busy = true;
   }
-  if (busy) requestAnimationFrame(frame); else loopRunning = false;
+  if (busy) requestAnimationFrame(frame);
+  else {
+    loopRunning = false;
+    // Expiry and queued-reading deadlines are timers, not animated work.
+    // New items/readings cancel this wait and immediately request a frame.
+    if (Number.isFinite(nextWake)) loopTimer = setTimeout(ensureLoop, Math.max(1, nextWake));
+  }
 }
 
 // ---------------------------------------------------------------- connection

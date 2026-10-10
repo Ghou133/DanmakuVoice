@@ -1,7 +1,8 @@
-//! One per-user location shared by portable and Store builds.
+//! Stable per-user logical data location. Windows may virtualize Store I/O.
 //!
 //! Never derive configuration storage from the executable, its version, the
 //! working directory, or a launcher's LOCALAPPDATA environment override.
+//! Returning the logical path does not disable package file virtualization.
 use std::path::PathBuf;
 
 #[cfg(windows)]

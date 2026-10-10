@@ -63,12 +63,10 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 
 ### 版本新增内容
 
-0.3.1
-- 更新湖面界面、直播详情与观众面板，保留深浅主题和朗读动效
-- 实验性开播台增加文字／表情发送、按权限管理观众及 OBS 联动，默认关闭
-- OBS 光脊保留本场最近弹幕，并改进刷新、断线恢复和会话隔离
-- 修复退出与取消竞态、本地 TTS 子进程清理、设置保存、音色绑定和错误状态同步
-- 改进空闲资源占用和数据目录一致性；真实账号直播、音频与 OBS 推流验收仍待完成
+0.3.2
+- 优化水面反光与 OBS 醒目留言进度线的绘制，保留原美术、布局和动画节奏
+- 修复窗口后台活动判断，减少叠加层等待期间不必要的动画回调
+- 商店包移除未获批准的存储权限，恢复 Windows 默认应用数据虚拟化
 
 ### 截图说明（与截图依次对应）
 
@@ -147,12 +145,10 @@ danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 
 ### What's new in this version
 
-0.3.1
-- Updated lake interface, broadcast details and viewer panel, retaining both themes and reading animations
-- Experimental chat/emote sending, permission-aware viewer management and OBS control; disabled by default
-- Recent messages remain in the current overlay session, with improved refresh, reconnect and session isolation
-- Fixed exit/cancellation races, owned TTS process cleanup, settings persistence, voice bindings and error-state synchronization
-- Improved idle resource use and consistent data storage; real-account broadcasting, audio and OBS streaming acceptance remain pending
+0.3.2
+- Optimized lake reflection and OBS Super Chat progress rendering while preserving artwork, layout and animation timing
+- Fixed background window activity detection and removed unnecessary animation callbacks during overlay waits
+- Removed the unapproved storage capability from the Store package and restored default Windows app data virtualization
 
 ### Screenshot captions
 
@@ -186,15 +182,15 @@ No developer account, payment, or administrator privileges are needed to open th
 
 The runFullTrust capability is required by the Rust/Tauri desktop application for its WebView2 window, system audio output, user-selected files, and spawning its bundled FFmpeg decoder. Optional local TTS services are started only when configured by the user. FFmpeg is launched directly from the installed MSIX directory; no executable is downloaded or extracted to AppData for the Store build. StartupTask is disabled by default and is enabled only through the user's setting. Updates are managed by Microsoft Store.
 
-The unvirtualizedResources capability keeps user aliases and voice bindings in the same durable LocalAppData/DanmakuVoice database as portable builds. On Windows 11, file virtualization is excluded only for this application data directory; the compatible Windows 10 declaration disables file-write virtualization. Registry virtualization is unchanged. Replacing the executable or reinstalling the package should not isolate configuration in a package-specific copy. No credentials are automatically imported from an older copy.
+Version 0.3.2 removes unvirtualizedResources and all file/registry virtualization opt-outs, addressing certification report 7b667596-99b5-4b4e-ad00-61168ed4db28 (10.6.3). Only runFullTrust remains, matching the approved 1.3.0.0 capability set. Windows manages Store app data virtualization. Store and portable builds do not promise a shared physical database or retention after uninstall. Package identity is unchanged. No old database is overwritten and no credentials are automatically imported. We are not requesting reconsideration of unvirtualizedResources.
 
 The submission includes FFmpeg (LGPL-2.1-or-later), original third-party license notices, and a link to the exact complete source archive. The application's own source is AGPL-3.0-only. Source and support: https://github.com/Ghou133/DanmakuVoice
-Corresponding complete source for package 1.3.1.0 (app 0.3.1): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.1.0
+Corresponding complete source for package 1.3.2.0 (app 0.3.2): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.2.0
 The exact source commit is recorded in the submission package's SUBMISSION-README.txt and in the source release. Publish and verify the matching source archive before submitting the package.
 
-Version 0.3.1 updates the lake interface and fixes lifecycle, cancellation, persistence and reconnection issues. Experimental Broadcast and OBS overlay settings remain off by default. Broadcast manages only the signed-in user's own Bilibili room; capture, encoding and RTMP publishing remain in OBS. Optional chat and moderation actions require the current account's platform permissions. OBS control requires the user's configured OBS WebSocket connection. A token-protected overlay is served only on 127.0.0.1 when enabled. No developer credentials are supplied. After first-run setup, the local test tone requires no cloud speech account. Bundled serif fonts include their copyright and SIL OFL 1.1 notices. Exact complete source: https://github.com/Ghou133/DanmakuVoice/releases/download/store-v1.3.1.0/DanmakuVoice-source.zip
+Version 0.3.2 is a rendering and packaging fix. Experimental Broadcast and OBS overlay settings remain off by default. Broadcast manages only the signed-in user's own Bilibili room; capture, encoding and RTMP publishing remain in OBS. Optional chat and moderation actions require the current account's platform permissions. OBS control requires the user's configured OBS WebSocket connection. A token-protected overlay is served only on 127.0.0.1 when enabled. No developer credentials are supplied. After first-run setup, the local test tone requires no cloud speech account. Bundled serif fonts include their copyright and SIL OFL 1.1 notices. Exact complete source: https://github.com/Ghou133/DanmakuVoice/releases/download/store-v1.3.2.0/DanmakuVoice-source.zip
 
-The 1.3.0.0 metadata resubmission addressed report 7210d7cf-406f-4430-90d6-d0a0b61a27f4, policy 10.1.3 Search Terms. The 1.3.1.0 update retains the generic search terms and existing screenshots. It does not add support for additional live platforms or speech providers. This file prepares submission text; current certification and publication status must be checked in Partner Center.
+The 1.3.0.0 metadata resubmission addressed report 7210d7cf-406f-4430-90d6-d0a0b61a27f4, policy 10.1.3 Search Terms. The 1.3.2.0 update retains the generic search terms and existing screenshots. It does not add support for additional live platforms or speech providers. This file prepares submission text; certification and publication require a separate Microsoft decision.
 
 ### runFullTrust 说明（500 字以内）
 
