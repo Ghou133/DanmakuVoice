@@ -1,5 +1,7 @@
 # 唯一进度记录
 
+最新：2026-10-14 仓库维护与全面审查，见文末同名章节（含 Git 基线对齐、本轮修复与待办清单）。
+
 更新：2026-10-07（北京时间；UTC 2026-10-06）。本轮以本机最新未提交工作树为基线，在隔离副本完成审查、修复和测试，随后按用户要求安全合回 `E:\AITTS\DanmakuVoice`。用户既有修改和 Git index 保留，未覆盖既有发行包或个人配置，未提交、推送或发布。当前结果不是正式发行或实播验收。
 
 ## 追加：已合入代码的 30 分钟隔离长测（2026-10-07）
@@ -657,6 +659,91 @@ CPU 为采样到的原生窗口和独立引擎进程合计；相邻采样的 CPU
 - 修正后 autosave focused **10/10**、前端全部 **172/172** 通过；证据 `autosave-ci-regression.log`、`node-ci-final.log`。最终 GitHub Actions 仍须在新提交上完整通过后，才可使用其 MSIX 送审。
 
 
+### GitHub 最终通过与商店送审回执（2026-10-07 01:32 UTC）
+
+- GitHub `main` 已通过普通快进更新至 `7a782be01e72e7881da535d9065814f70aa82393`，最终 Actions `37552835713` **completed / success**：fmt、严格全目标 Clippy、Rust **481 通过／10 显式忽略**、Node **172/172**、Python 打包 **28/28**、真实 FFmpeg smoke、静态 CRT 正式构建、完整源码与许可检查、空 CARGO_HOME 的解压源码离线重建、MakeAppx 语义校验及包内字节核对均通过。此前取消或失败的运行保留为历史，未计作最终通过。
+- 下载的 CI artifact 整体 SHA-256 为 `5ea0091e68cdbd1162dadb792aea145804a69a08db44e5f5ba88a1d3ef902ef7`，与 GitHub 官方 artifact digest 一致。进一步验证完整源码 ZIP 的 196 个公开源码文件逐字节等于该提交；MSIX 为 `1.3.1.0`／x64、应用版本 `0.3.1`，固定包名、Publisher CN、PFN 和线上显示名称均匹配，启动任务默认关闭。
+- 正式 MSIX SHA-256：`63b88bff6219909a0e54de9ee5f7ce2027c0e0708a391b56fbc777d24798b682`；配套完整源码 ZIP SHA-256：`09075a4138af4002ae31dcb68b9fe444b0f876eeb9f73ed0c396dd8079f69962`。本地位于 `target/github-sync-20261007/store-artifact-verified-retry/`，校验详见 `artifact-verification.json`。MSIX 是微软送审用未签名包，不能作为普通用户安装包。
+- 为满足同版源码公开要求，发布仅含源码和校验值的 `store-v1.3.1.0`：https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.1.0 。线上 asset digest 与 CI 源码完全一致，tag 指向上述精确提交；未发布公开 EXE／未签名 MSIX，未改变 GitHub latest 应用版本。源码校验链接及隐私政策已匿名请求确认可访问。
+- 已在现有 Store 产品 `9P4DFD8HGN03` 创建并提交 **Submission 3**，ID **`1152921505702060881`**。微软接受并保存 `1.3.1.0`，自动替换草稿中面向相同设备的旧包。2026-10-07T01:32:39Z 刷新页面返回 **`Product update: In certification`**、`Cancel certification`，并明确认证通过后自动发布；截图也显示更新进入认证流程。**当前尚未认证通过或确认上架**，线上 Submission 2／1.3.0.0 仍可用。
+- `unvirtualizedResources` 上传提示需要微软批准，已保存其仅用于本应用持久配置目录的说明并刷新回读；这是待认证的受限能力，不是已获批准。原 runFullTrust 无需重填。中英文每种语言仅更新 3 个文字字段和 1 条过时登录图注，另外 17 个字段、每种语言 7 张截图、价格 0、全球市场、未来市场、可发现性及认证后发布设置均保留并回读核对。Properties 保持 Unchanged，Age ratings 显示 Complete；未重答问卷或接受新法律协议。
+- 审核说明已纠正必须扫码登录／自有直播间、语音设置可跳过、实验性发送与管理功能及准确源码链接。完整文字经过保存、刷新和内容比较，凭据区仍为空，未提供开发者凭据、导出登录状态或新建长期认证。
+- 原开发目录的 11 个发布元数据／测试／说明文件已先备份至 `local-release-metadata-before.zip`，再从已验证发布工作树同步。197 个本地文件与预期基线加这 11 项变更一致；原 index SHA-256 仍为 `544fce1a51bd564467423c5fa3b29e28b8823b4ac4c428923c36183e17dbadbe`，原本地历史、个人配置和旧发行包保留。本节是送审后的本地回执，未改变已冻结的包／源码提交。
+- 证据集中在 `target/github-sync-20261007/`：`ci-37552835713-final.json`、`ci-success.log`、`store-source-release-receipt.json`、`store-listing-verification.json`、`store-options-verified.json`、`store-certification-notes-verified.json`、`store-submission-receipt.json`、`store-update-state.json` 和 `store-ui/submission-3-in-certification.png`。
+- 剩余边界：微软受限能力审批及认证／签名／发布结果尚待完成；真实账号收发／开播、付费云合成、实际音频、真实 OBS 写入和 Store 签名安装／SAC 未在本次授权范围执行，原有 10 项显式忽略也未包装成通过。必要人工验收仍是认证后从 Store 更新，确认版本和原配置，再由用户自行验证真实音频、账号连接／表情、TTS 取消与音色切换、窗口退出，以及需要的 OBS 场景。
+
+
+## 2026-10-10 GPU / OBS 独立测量与修复
+
+本轮只处理本地 GPU、显存与可见性路径。基线 HEAD `8568e13d310a3312254e054a40934ffdf4a8b1eb`，197 个最新工作区文件，快照 `1ae3f9532f8d7a24c8d3156922865b5344b74adad2e31361a3e8eca870747c32`。先保存脏改动、原 index 和完整源码到 `target/gpu-20261010/`，在独立副本实现。没有使用远端代码覆盖本地，没有推送、发布或打开商店审核页；没有更改个人配置、现有安装或发行包。
+
+已修复：
+- Windows WebView 恢复/焦点提示可能为真，而系统前台 HWND 属于其他程序。原版错误地恢复主界面动画；现在 Windows 路径核对实际前台窗口，可见性与最小化状态。其他平台原有焦点提示逻辑保留，OBS 服务独立运行。
+- 普通弹幕仅等待到期、等待读取或演示开始时，使用截止时间定时器，收到新事件立即恢复动画帧。原版在仅等待到期的 3 秒内多执行 188 次回调；新增回归原版失败、修复版通过。
+- Super Chat 只在原有四位小数进度或秒级文字变化时写 DOM。保留原帧率、进度精度、动效、CSS 与静态 DOM。原始 CSS 摘要 `84cee46750f3c1178dffdb7ccf30fbae9b665de974d42cddf15ce8381e9bca1f`、静态 DOM 摘要 `77ad5f9cf0bcedcdbd46e4a67087de815bda97bc0440a86abc4daa5daa53ca41` 继续通过。
+- 修正回归计数器：Playwright 的时钟会替换提前包装的 requestAnimationFrame，旧断言可能没有计到真实生产回调；现在直接统计生产 frame 回调。新增原生可见性回归读取实际 HWND 和进程创建时间。
+
+测量条件与结果：
+- RTX 5090 D，驱动 610.88；DXGI 将实际计数器 LUID `0x00000000_0x0001603c` 映射到该显卡。记录 PID + 创建时间、父子树、引擎与 LUID，OBS 主进程和 CEF 分开，专用/共享显存分开。原始数据、统计定义和阶段标识保留在 `gpu-summary.json` 与 evidence 包。
+- 主界面测量使用离线空白数据与合成快照；浏览器和原生渲染代码保持原样。WebView2 154.0.4258.62；测量主界面视口 1040×740、DPR 2。OBS 32.2.2 / obs-browser 2.26.9 / Chromium 127，独立便携配置，仅本地合成浏览器源，1920×1080、60 fps；移除测试副本中的采集及第三方账号插件，没有采集桌面/麦克风、推流、录制或付费调用。
+
+| 复现条件 | 修复前 | 修复后 | 解释 |
+| --- | ---: | ---: | --- |
+| 未获系统前台但 UI 误判活动，3D 引擎占用中位数 / P95 | 2.933% / 4.334% | 0% / 0% | 各 14 个有效样本，前台属于本进程的样本均 0；只证明该后台错误路径改善 |
+| 同路径专用显存中位数 | 103.89 MiB | 125.53 MiB | 没有证实显存下降，缓存仍保留 |
+| 实际前台默认界面，3D 引擎占用中位数 | 1.247% | 1.249% | 各 11 个有效样本均属于本进程；未显示前台 GPU 改善 |
+| OBS 等待朗读，16 秒生产动画回调 | 960 | 0 | 截止时间等待不再逐帧空转 |
+| OBS 普通弹幕动画，16 秒生产动画回调 | 960 | 960 | 保留原动画节奏 |
+| OBS 恢复可见后的 Super Chat，16 秒 DOM 变更 | 976 | 549 | 避免相同进度样式写入 |
+
+真实原生窗口最小化后，独立 OBS 可见叠加层仍在 16 秒内执行 960 次动画回调，接收新演示弹幕；恢复后仍为 960 次。三个阶段均未推流或录制，OBS 报告的渲染跳帧增量为 0。隐藏 OBS 来源时，CEF 本身已经停止动画帧，但显存缓存并未立即释放；这不是本轮新增成果。OBS 各阶段 GPU 计数器受运行条件波动，未形成整体下降证据，不能宣称减少游戏卡顿或适用于低端显卡。
+
+证据纠偏：原有 CDP Browser.setWindowBounds 操作的是嵌入浏览器，不足以证明原生主窗口最小化。准确验证改用本次进程的 Windows HWND，并断言 IsIconic。旧记录的 phase 名称只是意图，必须以系统前台 PID / HWND 状态为准；`native-baseline-final` 对 `native-visibility-final` 的前三个阶段用于上述后台错误路径，旧“minimized”阶段不作原生最小化证据；`visibility-gpu-before/after` 实际取得系统前台，作为正常前台对照。`visibility-native-after` 和 `obs-native-accurate` 才包含真实原生最小化验证。所有 RAF 数值是回调计数或帧间隔，不是 GPU 单帧耗时；历史 8.7 ms 不作为 GPU 优化证据。
+
+已撤回实验：把 Super Chat 进度变量移到两个叶节点未产生明确收益，单轮 OBS 主进程专用显存增长至约 1.4 GiB，因此没有交付该改动；这也不足以断言 OBS 存在稳定泄漏。保留 `obs-candidate-2` 仅供审查，不计入最终验收。最初一次 OBS 就绪等待、原生夹具首次刷新及嵌入脚本时序失败均记录为测试夹具失败，最终通过记录另列。
+
+验证：fmt 通过；clippy `--workspace --all-targets -- -D warnings` 通过；桌面完整回归 196 通过、4 忽略；UI Node 单元测试 172 通过；叠加层行为/美术 18 项通过；重连 10 项 VM + 4 项真实 EventSource 通过；原生 HWND 回归修复前失败、修复后通过，另有正常前台状态检查；独立 OBS 联动通过。4 项忽略分别为物理音频播放、真实 dots、真实 GPT-SoVITS、已发布 GitHub 版本检查，未视为通过。未重复运行无改动的 engine 全量测试，未开展实播、游戏场景竞争、低端硬件或长时间显存稳定性验收。
+
+生产候选重新构建并校验不含 `--remote-debugging-port=59493`；曾因恢复文件保留旧 mtime 而命中测量版缓存，已强制重建排除。最终 EXE SHA256 `d2d530d647c0a86f4dcd6fb64b95c18dc24071fab248a8333aec0a7f036134f1`。无调试端口 EXE 在全新离线数据目录启动/正常退出通过，按 PID + 创建时间核对 7 个所属进程，遗留 0。此包是本地审查候选，不是发布声明。
+
+交付：`target/gpu-20261010/deliverables/` 下包含独立离线启动器、候选程序、最新完整源码、相对于本轮脏工作区基线的补丁与证据包。原 index SHA256 保持 `544fce1a51bd564467423c5fa3b29e28b8823b4ac4c428923c36183e17dbadbe`。源码回填仅本轮四个代码/回归文件，并追加本节；其余原有修改逐文件校验保留。
+
+最小人工验收：用候选离线启动器检查前台动效和设置；在自己的固定游戏场景与 OBS 预览/录制组合下另测帧时间及显存，切换焦点、真正最小化和恢复主窗口，观察可见叠加层。自动化没有启动游戏或实际直播。
+
+OBS 架构依据：[Browser Source](https://obsproject.com/kb/browser-source)、[obs-browser](https://github.com/obsproject/obs-browser)。本项目通过本机 HTTP/SSE 向 OBS 浏览器源提供页面，由 OBS 合成，不向游戏进程注入。
+
+
+## 2026-10-10 第二轮可见界面 / OBS 局部渲染优化
+
+本轮以第一轮最新本地源码摘要 `63ff1bac4a4b249a4badfa94bd1450941cbaf27abd1addd1f64167d8b93753f3`、198 个文件为基线；工作区、未提交差异和 Git index 先备份至 `target/gpu-round2-20261010/`，在独立副本实施。只保留两项经测量的 CSS 局部修改，没有重命名、重新设计、降低分辨率/动画频率、关闭硬件加速或引入生产模拟服务。
+
+- 水面反光：原来的逐帧 background-position 导致空闲 16 秒中 1,653 次反光绘制及 1,653 次页面绘制。改为同一遮罩下平移两个原高度纹理块，保留原渐变平铺接缝、3 秒周期、18px 位移、模糊和深浅色。最终嵌入版 CSS 与源代码解析规则一致，空闲绘制降为 0。两个尺寸/DPR、深浅色和四个动画时刻共 16 组截图，最大通道差 2/255，最大平均通道差约 0.053/255；后台暂停、前台恢复和减少动态效果通过。
+- OBS Super Chat：纸卡和折叠条的实色进度线使用 scaleX 保持显示长度，避免反复改变布局宽度。旧版在新增的布局宽度回归上失败；新版验证 0/25/50/100% 进度的起点、长度、纸卡/折叠条切换及原倒计时、收起和到期行为。其他 CSS 与静态 DOM 字节保留，测试只放行这两条明确的样式变化。
+
+同机 RTX 5090 D / 驱动 610.88；沿用第一轮 DXGI/PDH LUID 映射 `0x00000000_0x0001603c` 的物理 0、3D 引擎 0。原生 WebView2 154：1040×740、DPR 2、系统显示刷新率 120Hz；普通输入 2 条/秒、密集输入 20 条/秒，合成快照保持 100 条，生产轮询机制不变。每阶段 2.5 秒预热 + 16 秒采样，剔除计数器首 2 秒/末 1 秒，每组 10–11 个有效样本；所有有效主界面样本均由 OS 确認测试进程在前台，页面活动状态一致。
+
+| 主界面场景 | 第一轮 3D 占用中位数 | 第二轮 | 备注 |
+| --- | ---: | ---: | --- |
+| 可见前台空闲 | 1.376% | 1.008% | 原绘制 3,306 次→0，均保留动画 |
+| 普通合成弹幕 | 2.515% | 2.159% | 16 秒渲染线程 TaskDuration 1,460→1,361 ms |
+| 密集合成弹幕 | 1.815% | 1.386% | 16 秒 TaskDuration 1,463→1,341 ms |
+| 密集短复核 | 1.770% | 1.410% | 逆序运行，8 秒预热 + 16 秒采样 |
+
+主界面短样本专用显存分别为 97.41→86.35、115.18→105.93、115.47→102.78 MiB；这是本机短测分配状态，不是长期显存承诺。进程树 CPU 用“单个逻辑核百分比”单独记录；密集首轮为 26.37→30.34，逆序复核为 32.85→30.85，未形成稳定的整体 CPU 降幅。3D 计数器是引擎忙碌占比，TaskDuration 是渲染线程时间，均不是 GPU 单帧耗时或游戏 FPS。
+
+OBS 32.2.2 / CEF Chromium 127：独立便携副本、1920×1080、60 fps，仅合成本地 SSE 预览。空闲/普通/密集/SC 各 16 秒，隐藏/恢复各 8 秒，均有 2.5 秒预热。SC 可见阶段布局 539→7 次、布局时间 32.3→2.4 ms，恢复阶段布局 271→8 次；可见回调保持约 60 fps，所有阶段 OBS 渲染丢帧增量为 0。SC CEF 3D 中位数 1.122→1.107%，OBS 主进程约 0.65%，差值很小，不宣称整体 OBS GPU 明显下降。原生主窗口真实最小化与恢复使用同一 Tauri HWND，IsIconic true→false；独立 OBS 三个 16 秒阶段均为 960 次回调，最小化期间新弹幕到达并显示，没有推流或录制。
+
+测量纠偏：Process.MainWindowHandle 在最小化后可能变为隐藏的 Tao Thread Event Target；SetForegroundWindow 也不一定把输入焦点交给实际主窗口。测试现在枚举本次进程的 Tauri Window，保存/比较 HWND 与进程出生时间，并验证输入焦点。此前 UI inactive=true 的低 GPU 数据及早期窗口探针不作为性能/冻结缺陷证据。没有因此修改生产焦点代码；第一轮的原生恢复证据由本轮稳定 HWND 检查补充。最初反光试验使用无限延伸条纹，边缘与原图不一致，已撤销，最终采用两块原高度纹理；`reflection-trial-rejected.css` 和 `native-reflection-trial` 不是最终版本。
+
+最终检查：fmt、clippy workspace/all-targets/-D warnings、桌面 Rust 196 通过/4 忽略、UI Node 172 通过、湖面 UI 20 通过、叠加层 18 通过、真实 HWND 五阶段和原生→OBS 生命周期通过。4 项忽略仍为物理音频、真实 dots、真实 GPT-SoVITS、已发布 GitHub 版本检查；没有把它们算作通过。本轮未重跑无修改的 engine 全套或未受改动的重连专项。生产候选已去掉调试参数，独立数据目录启动/WM_CLOSE 退出通过，拥有的子进程全部退出。没有运行游戏、实播/录制、麦克风、真实付费服务、低端硬件或长期显存浸泡，没有改动用户 OBS 配置或现有安装/发行包。
+
+候选 EXE SHA256 `2353dbe5403faf773fb844108cd865f41f8289c25e2357c0dd1f6be7cf4d457c`；ZIP SHA256 `5c3a7b91667ef3c203a688e54563cf38ba2636b433dfafa9b36d01f558c23704`。候选、完整源码、相对本轮基线补丁、统计和证据在 `target/gpu-round2-20261010/deliverables/`。Git index 原始摘要 `544fce1a51bd564467423c5fa3b29e28b8823b4ac4c428923c36183e17dbadbe` 保持；回填前再次核对完整工作区基线，保护其他未提交修改。
+
+Library 上传阻塞：已按 Library 技能为第一轮 ZIP 与 HTML 报告做同一批上传。沙箱请求在 tools/list DNS 失败；授权联网重试到达服务但辅助程序返回 `Library prepare_uploads is not available`。没有创建任何 library_file_id 或 version，也没有可保留的 Library 身份元数据。原第一轮 ZIP 和报告仍在本地，不能把本地链接说成已上传附件；第二轮交付同样明确标为本地文件。
+
+最小人工验收：从候选包使用独立离线启动器查看深浅色、水面运动、前后台/最小化恢复；由用户在自己的固定游戏场景中比较 OBS 预览/帧时间与显存，检查 SC 进度与主窗口隐藏时独立叠加层。真实服务、硬件和直播操作仍需按用户选择实际验收。
+
+
 ## 2026-10-10 0.3.2 渲染与商店权限小更新
 
 - 用户明确授权修复后发布 GitHub 与 Microsoft Store。在远端 `7a782be01e72e7881da535d9065814f70aa82393` 的独立副本工作，只移入两轮渲染修复、必要测试和版本/权限说明；原工作区 198 个文件及 Git index 先备份，未 reset 或覆盖其他未提交内容。
@@ -666,3 +753,115 @@ CPU 为采样到的原生窗口和独立引擎进程合计；相邻采样的 CPU
 - 本发布副本已通过 fmt、clippy workspace/all-targets/-D warnings、Rust 全工作区 481 通过/10 显式忽略、Node 172、Python 28、湖面浏览器 20、叠加层浏览器 18；跨 0.3.0→0.3.2 隔离数据探针通过。日志位于 target/release-20261010。
 - 尚未验收：同 PFN 的真实签名 MSIX 升级/卸载/重装、商店签名安装与 SAC、真实服务和物理音频。本机开发者模式关闭、Windows Sandbox 不可用、查询未找到产品测试实例；没有为测试启用安全例外、安装证书、卸载应用或自动搬导凭据。隔离 --data-dir 测试不能冒充默认路径的 OS 虚拟化验收。
 - 应用版本 0.3.2 对应商店包 1.3.2.0。对应提交的 CI、干净二进制/完整源码配对、实际 MSIX 清单与提交回执在发布流程中分别核实；本记录不预先宣称已上架，提交后不定期轮询认证。
+
+Library 状态纠正：第二轮 ZIP 与 HTML 已经成功保存至 Library，版本均为 0；Windows xattr 辅助程序不受支持，完整身份保存在本地回执及 sidecar。此前的上传阻塞描述是历史状态，不再代表当前结果。
+
+
+### 2026-10-10 0.3.2 发布门槛与自动审批阻塞
+
+- 独立发布提交 `1ae27e52e62978acbf5438786a227ec4660e9d09` 已推送至远端 main；精确提交 CI [38049650293](https://github.com/Ghou133/DanmakuVoice/actions/runs/38049650293) 全部成功，包含 FFmpeg 源码校验、fmt、Clippy、完整离线回归、发行包/源码配对、空 Cargo 缓存离线重建和 MSIX 打包。实际结果保存在 `target/release-20261010/ci-final.json`。
+- 本地实际 MSIX 1.3.2.0 只有 `runFullTrust`，无文件系统/注册表虚拟化退出声明；应用身份保持，CurePrism 显示名保持。MakeAppx 验证、包内 EXE 与便携 EXE 配对、源码匹配和 CRC 均通过；不是 Store 签名后的 OS 升级验收。
+- GitHub `v0.3.2`（发行 ID 408919600）和 `store-v1.3.2.0`（408920153）附件已逐项验证哈希，仍为草稿。公开发行调用被自动审批在执行前拒绝，理由是当前可信上下文只有最初的禁止发布指令、未看到后续发布授权。上下文摘要记录了后续授权，但 Personal Context 检索不可用；已请求将授权补入当前上下文，没有绕过拒绝。
+- Store 草稿 `1152921505702060881` 仍为旧 1.3.1.0：本轮尚未上传 1.3.2.0、保存新说明或重新提交。新包、两种语言更新说明、认证备注、带精确提交/版本/哈希门槛的发布脚本均已准备在 `target/release-20261010/`。正式提交后应记录回执并停止轮询认证。
+- 原工作区的 Git HEAD 与 index 未改；全部发布修复回填后仅追加本记录。真实签名包同 PFN 升级/卸载重装、SAC、实播、真实付费云服务与音频硬件仍未验收。
+
+
+### 2026-10-10 GitHub 0.3.2 已正式发行
+
+- 主对话逐字授权及当前用户“继续公开发行并提交商店”已补入上下文。仅重试一次先前被拒的同一公开发行调用，本次成功；此前自动审批阻塞现已解除。
+- 已公开 [v0.3.2](https://github.com/Ghou133/DanmakuVoice/releases/tag/v0.3.2) 并设为 Latest；[store-v1.3.2.0 对应完整源码](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.2.0) 保持非 Latest。两个标签均为 `1ae27e52e62978acbf5438786a227ec4660e9d09`，远端附件大小与 SHA256 对齐本地产物。
+- 商店新包已通过本地实际清单复核（仅 runFullTrust，无被拒能力和虚拟化退出声明），已上传草稿并由页面识别为 1.3.2.0；此时仍在服务端包分析阶段，尚未保存替换或提交审核。后续提交回执另行追加。
+
+
+### 2026-10-10 Microsoft Store 1.3.2.0 重新提交已受理
+
+- Microsoft Store 产品 `9P4DFD8HGN03` 的 Submission 3（`1152921505702060881`）已重新提交一次。直接回执时间 `2026-10-10T12:51:07.9706909Z`，页面显示 **Update in certification / Product update: In certification**。这表示已进入认证，不代表认证通过或新版本已上架。取得回执后停止查看认证状态，未创建周期性监测，等待微软邮件。
+- 新包上传完成后，原标签的“Analyzing package”显示停滞；保留原上传并在独立标签重新加载草稿，服务器返回新包验证完成、Save 可用。正常保存后再次加载，确认仅保留 `1.3.2.0`、旧 `1.3.1.0` 已移除、被拒权限警告消失；提交选项中的 `unvirtualizedResources` 申请也消失。没有取消任何认证或其他提交。
+- 中英文商店页各仅更新 `releaseNotes`，服务器读回确认各 19 个其他文本字段保持原值、7 张截图保留。认证备注完整读回匹配，包含移除能力及配套退出声明、版本/精确提交和已公开对应源码；没有提供凭据。原“认证通过后自动发布”选项保持选中，价格、市场、属性与年龄分级未变更。
+- 正式发行 [v0.3.2](https://github.com/Ghou133/DanmakuVoice/releases/tag/v0.3.2) 为 Latest；[商店 1.3.2.0 完整源码](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.2.0) 已公开。两者对应 `1ae27e52e62978acbf5438786a227ec4660e9d09`，精确提交 [CI 38049650293](https://github.com/Ghou133/DanmakuVoice/actions/runs/38049650293) 成功。上传 MSIX SHA256：`9c980053205dda59f53e8f493c36a8fec316ea9ac8058982038d7f080b7f63cd`。
+- 完整回执、字段保护验证、包清单/源码配对和本地测试证据位于 `target/release-20261010/`；主回执是 `store-submitted-receipt.json`。原 Git index SHA256 `544fce1a51bd564467423c5fa3b29e28b8823b4ac4c428923c36183e17dbadbe` 保持，根工作区原 HEAD 不变，未 reset/checkout 覆盖用户内容，既有发行包与个人配置未改。
+- 未做真实同 PFN 签名商店包升级/卸载重装、SAC、实播、付费云服务和音频硬件验收。当前执行环境没有可用的同身份测试安装，开发者模式关闭且 Windows Sandbox 不可用；没有安装证书、调整安全设置或卸载用户应用来绕过这些限制。0.3.0→0.3.2 的隔离真实 IPC 数据兼容回归仅验证应用读写，不能代替 OS 虚拟化路径下的签名升级验收。
+- 最小后续人工验收：收到微软通过并可更新的通知后，在既有商店安装上正常更新，核对预设/用户绑定、已管理素材与外部参考音频路径；本轮不建议用卸载重装代替升级验收。
+
+
+## 2026-10-14 仓库维护与全面审查
+
+用户要求审查并维护项目，为后续开发做准备。本轮未提交、推送或发布；未操作真实账号、OBS、TTS 服务或音频设备。日志位于 `target/maintenance-20261014/`（基线）与 `target/maintenance-20261014/after-fixes/`（修复后）。
+
+### Git 基线对齐
+
+- 发现本地 `main`（`8568e13`，0.2.3 旧历史）与 `origin/main`（`1ae27e5`，已发布 0.3.2）**没有共同祖先**。此前各轮均在隔离副本中发布，本地分支从未跟进，导致 `git status` 显示 102 个“改动”，实际不可 pull/push。
+- 用临时 index 比较确认：工作区内容等于 `origin/main`，仅多出本地 `AGENTS.md`（按约定不公开）和本文件的 6 个本地追加章节（0.3.1/0.3.2 回执与两轮 GPU 记录）。原 index 与旧 HEAD 一致，无已暂存内容。
+- 已建备份分支 `backup/local-main-pre-realign-20261014` → `8568e13`，随后 `git reset --mixed origin/main` 并设置上游；工作区文件未改动。现在 `git status` 仅为 `M PROGRESS.md`、`?? AGENTS.md`。如需撤销：`git reset --mixed backup/local-main-pre-realign-20261014`。
+- 未清理、留待用户决定：分支 `codex/github-sync-20261003`（`a407b78`，已含于 origin/main）、无对应远端配置的陈旧引用 `refs/remotes/github/main`、工作树 `target/github-sync-20261007/workspace`（分支 `codex/review-sync-20261007`，`7a782be` 为 origin/main 祖先，无未提交改动）。约 20 个工作区文件仍为 CRLF，按 `.gitattributes` 提交时会转为 LF，不影响内容。
+- 磁盘：`target/` 约 119 GB（`debug` 72 GB、`audit-20261007` 17 GB、`release` 14 GB、`gpu-20261010` 12 GB），`dist/` 约 20 GB；均为本地证据或构建缓存，未删除。
+
+### 基线回归（修复前）
+
+fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通过；Rust **481 通过／0 失败／10 忽略**（与此前记录一致）；Node **172/172**；Python **28 项，3 项跳过**（本机未安装 PowerShell 7，CI 上执行）。
+
+### 审查方式
+
+按模块并行只读审查约 6 万行：直播接收与协议、音频/TTS 管线、存储与迁移、开播台/OBS/发送/房管、桌面宿主与叠加层、前端。每条结论由审查方读取完整调用链；下列“已修复”项由本轮亲自复核并补回归，其余为代码阅读结论，**未在线复现**。
+
+### 本轮已修复（均有新增或扩展回归）
+
+| 问题 | 修复 | 证据 |
+| --- | --- | --- |
+| 直播接收：事件通道满时（逐条准备慢于弹幕速率）读循环停在发送等待中，30 s 心跳不再发出，B 站约 70 s 后断开并丢消息 | 事件解析与投递拆分；投递等待期间继续按时发送心跳；本地等待时间不计入对端静默超时 | `bilibili::tests::heartbeat_continues_while_events_wait_for_channel_capacity`（暂停时钟）；临时去掉修复时该测试失败，恢复后通过。engine 仅为测试启用 tokio `test-util`，`Cargo.lock` 不变 |
+| “清除全部数据”后叠加层令牌为空：界面地址带空令牌无法连接，旧 OBS 地址的令牌仍被服务端接受 | 清除后立即签发并保存新令牌、通知旧页面 reset | `clear_data_issues_new_overlay_token_and_revokes_previous_address` |
+| “清除全部数据”遗留 `logs/{dots,gpt-sovits}-stderr-<uuid>.log`；中断的 FFmpeg 解出临时文件（带连字符 UUID）使 `cache/ffmpeg` 被保留 | 复用本地服务日志命名规则；临时文件匹配接受带/不带连字符的 UUID；近似名称仍保留 | 扩展 `clear_data_requires_confirmation_and_preserves_unrelated_files` |
+| 一次音量保存失败后，静音按钮每次点击都重抛旧错误 | 失败时滑块已回退到已保存值，静音前丢弃该失败草稿 | `a failed volume save does not block later mute clicks` |
+| GPT-SoVITS 模型文件名含 `$` 加反引号、`$&` 等时，`String.replace` 替换模式把表单前缀插入下拉选项，表单结构损坏 | 改用函数替换 | `GPT-SoVITS model names with replacement patterns stay literal in the editor` |
+
+修复后：fmt、clippy 零警告；Rust **483 通过／0 失败／10 忽略**（desktop 197、engine 285、proxy 1）；Node **174/174**；Python 28（3 跳过同上）。10 项忽略与上文表格相同，仍未执行。
+
+### 待办清单（未修复，按建议优先级）
+
+**P1**
+1. **TTS 总超时截断长语音**：`playback.rs` 把连接超时封顶为 30 s（344/413/432/551），并作为 reqwest 总超时（`fish.rs:273`、`dots.rs:107`、`sovits.rs:171`）或豆包整体 `timeout`（`dobao.rs:341`）。响应体按播放速度被背压读取，约 30 s 以上的语音（长醒目留言、低语速、长试听）会中途失败；用户设置的 5–600 s 被静默封顶。建议：连接/首包截止 + 每次读取空闲超时。
+2. **输出设备已断开仍发起付费合成**：`playback.rs` `execute` 不检查 `writer.disconnected()`；非默认设备不会自动恢复，排队与新事件持续消耗 Fish/豆包额度。现有测试 `output_device_failure_does_not_retry_at_default` 反而要求发出请求。
+3. **命令进行中主界面停止刷新**：`helpers.mjs:250` 在有命令未完成时暂停快照轮询；开播等待 OBS 最长 45 s、发送/房管最长 30 s 期间弹幕与队列冻结。建议轮询带序号、丢弃早于命令完成的回复。
+4. **登出后凭据残留在备份中**：`backups/*.sqlite3` 是整库副本（含 DPAPI 保护的 Cookie 与 API Key），登出/清除凭据只删活动库行，备份无保留上限（`storage.rs:544`、`767`）。
+5. **发送/房管的 30 s 总时限包含最终 POST**：`desktop/src/chat_send.rs:186`、`moderation.rs:202`。慢网下 POST 已送达却判超时，用户重试造成重复发送或重复操作。
+6. **永久性房间错误无限重连**：房间不存在等 API 错误被当作网络中断（`bilibili.rs:956`、`862`），界面一直显示“正在重连”。
+
+**P2**
+7. 切换音频输出设备无确认即停止并清空队列：确认分支在自动保存路径下不可达（`app.js:2135`、`4729`、`4879`），对应测试覆盖的是不可达路径。
+8. 本程序发起开播时以本地时钟作为本场开始，首次刷新取得 B 站 `live_time` 后本场统计被重置（`broadcast_sessions.rs:113`、`276`）。
+9. 只有本次点击启动 OBS 时才等待就绪；人脸验证后“继续开播”或刚手动打开 OBS 时推流配置失败（`desktop/src/broadcast.rs:301`、`416`）。
+10. 房管状态检查全有或全无，单次打开卡片最多约 300 个顺序请求（`engine/src/moderation.rs:188`、`217`）。
+11. 豆包：用旧 Cookie 排队的任务在重新登录后再次触发进程级暂停（`dobao.rs:237`、`540`）。
+12. 观众列表“加载更多”的页在约 28 s 后定时刷新时被清空（`audience.rs:264`）。
+13. 旧配置预览直接访问 UNC/设备路径（`legacy.rs:700`），预览他人分享的 config.json 可能发起 SMB 连接。
+14. 扫码登录的若干错误返回未复位 `qr_busy`，扫码卡片停住（`app.rs` 2085 起）。
+15. 停止本地 TTS 服务时在全局 `Controller` 锁内同步等待进程树退出（最长约 4 s），其间所有命令与叠加层 tick 阻塞（`local_service.rs:125`、`154`）。
+16. 叠加层令牌重置后，已建立的 SSE 流在订阅竞态或 `Lagged` 跳过 reset 帧时不断开（`overlay.rs:608`、`768`）。
+17. 诊断日志轮转失败后日志保持关闭，且每次重试挤掉一份旧日志（`diagnostics.rs:106`）。
+
+**P3／需确认产品意图**
+- 上舰 `GUARD_BUY` 价格固定为 0，模板 `{price}` 恒为 0（`bilibili.rs:1603`）；修复会让历史列表显示上舰金额。
+- 纯表情弹幕：直播路径的过滤结果与解析器测试断言不一致（`received_emotes.rs:100` 对 `bilibili.rs` 中 dm_type 0 测试）。
+- 下播无条件停止 OBS 任意推流，且先于 B 站会话校验（BROADCAST.md 记为现行设计，与开播时“不打扰已有推流”不对称）。
+- 远程 OBS 未设密码时推流码经明文 WebSocket 发送，与 BROADCAST.md“只经本机”描述不符。
+- WSS 不走系统代理而 HTTP 走；未获取 buvid3、鉴权包使用随机 buvid，可能与 2026-10-05 记录的 `-352` 相关（未在线验证）。
+- `capabilities/main.json` 的 `core:default` 范围大于界面所需（纵深防御）。
+- 四声道设备上语音可能只从左后声道输出（FFmpeg 默认 4.0 布局，未实测）。
+- 存储：`save_rules` 不校验音效素材存在；手写 SAVEPOINT 失败路径可能残留事务；两实例同时启动时 schema 升级可能失败；预览未应用规则长度上限导致导入整体失败；单个音效不可读使整个预览失败；Fish `Voices` 无数量上限且导入为二次方；替换素材后的旧文件永不回收。
+- 桌面：WebView 数据先于应用层预检清除（`main.rs:279`）；叠加层重放边界用墙钟时间；下播 `obs::stop` 无总时限；OBS 启动非单飞且部分在全局锁内；后端未强制开播台开关；`LiveController::stop` 与已在途提交的窄窗口竞态。
+- 前端：别名保存持续失败时抽屉无法关闭；发送后输入框失焦；音色芯片快速双击丢失第二次选择；过期轮询短暂回退运行状态；历史弹窗阅读位置漂移；聊天长度 UTF-16 与码点混用；湖面时钟定时器在非主界面继续运行。
+- 文档：`UI-IPC.md` 缺 `external.open` 的 `bili_broadcast_room`、`live.save` 的 `gift_merge`、`bili.use_account`。
+
+### 可维护性热点（后续开发参考）
+
+- 超大文件：`app.js` 5.1k 行（约 150 个模块级可变状态，`handleAction` 约 550 行）、`app.rs` 4.0k、`storage.rs` 3.6k、`playback.rs` 2.7k、`bilibili.rs` 2.7k、`desktop/src/broadcast.rs` 2.1k。
+- 单个 `std::Mutex<Controller>`（约 60 字段）同时守护 SQLite、进程、文件与 WinRT 调用，任一慢操作拖住全部命令。
+- 约十个手写代次计数器；busy 标志部分用 Drop guard、部分手动复位（P2-14 的根源）。字符串动作名需在 `main.rs`、`app.rs` 多处、`error_codes`、`UI-IPC.md` 手工同步。
+- 每条直播事件新开 SQLite 连接并解密凭据，每个任务新建 reqwest Client（无连接复用）；控制流依赖显示文案（`classify_readiness_error` 匹配“无法连接服务”）。
+- 四种事务写法并存；三份 B 站请求构造与 `id()`／`api_ok` 重复实现；两套 OBS 测试假服务。
+- 前端不可达代码：旧 feed 渲染器（`app.js` 约 1110–1390）、多个未渲染的动作、`handleForm` 中自动保存类型的分支、`styles.css` 旧选择器。`SpeechJob.generation` 未被读取，注释与实际的 job id 标记机制不符。
+
+### 本轮边界
+
+- 新修复均为离线单元/集成回归，未在真实直播间、真实 OBS、真实 TTS 或音频设备上验收；未重跑浏览器脚本、原生窗口与性能测试（本轮改动未触及布局、CSS 和叠加层页面）。
+- 待办项来自代码阅读，未逐一复现；P1-1、P1-2 建议先补失败测试再修。
