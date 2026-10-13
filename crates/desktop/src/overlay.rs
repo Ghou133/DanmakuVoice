@@ -337,7 +337,7 @@ impl OverlayHub {
         (state.obs_clients.len(), state.obs_generation)
     }
 
-    fn token_matches(&self, candidate: &str) -> bool {
+    pub(crate) fn token_matches(&self, candidate: &str) -> bool {
         let state = self.lock();
         let expected = state.token.as_bytes();
         let candidate = candidate.as_bytes();

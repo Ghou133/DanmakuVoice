@@ -928,6 +928,20 @@ async fn clear_data_requires_confirmation_and_preserves_unrelated_files() {
     )
     .unwrap();
     std::fs::write(directory.path().join("desktop-paths.json"), b"{}").unwrap();
+    // Files created by local services and an interrupted FFmpeg extraction.
+    let service_logs = [
+        format!("logs/dots-stderr-{}.log", Uuid::new_v4()),
+        format!("logs/gpt-sovits-stderr-{}.log", Uuid::new_v4()),
+    ];
+    let ffmpeg_temp = embedded_ffmpeg::path(directory.path())
+        .with_file_name(format!(".ffmpeg-{}.tmp", Uuid::new_v4()));
+    std::fs::create_dir_all(ffmpeg_temp.parent().unwrap()).unwrap();
+    std::fs::write(&ffmpeg_temp, b"partial").unwrap();
+    for name in &service_logs {
+        std::fs::write(directory.path().join(name), b"service stderr").unwrap();
+    }
+    let near_miss_log = "logs/dots-stderr-not-a-uuid.log";
+    std::fs::write(directory.path().join(near_miss_log), b"unrelated user data").unwrap();
     let scheduler = scheduler::spawn(Arc::new(WaitingExecutor));
     app.lock().unwrap().scheduler = Some(scheduler.clone());
     app.dispatch(
@@ -961,10 +975,14 @@ async fn clear_data_requires_confirmation_and_preserves_unrelated_files() {
         embedded_ffmpeg::path(directory.path()),
         directory.path().join("desktop-paths.json"),
         directory.path().join("logs/previous-1.jsonl"),
-    ] {
+        ffmpeg_temp,
+    ]
+    .into_iter()
+    .chain(service_logs.iter().map(|name| directory.path().join(name)))
+    {
         assert!(!path.exists(), "managed path remained: {}", path.display());
     }
-    for name in sentinels {
+    for name in sentinels.into_iter().chain([near_miss_log]) {
         assert_eq!(
             std::fs::read(directory.path().join(name)).unwrap(),
             b"unrelated user data"
@@ -979,6 +997,30 @@ async fn clear_data_requires_confirmation_and_preserves_unrelated_files() {
     assert_eq!(reopened["onboarding_done"], false);
     assert!(reopened["connections"].as_array().unwrap().is_empty());
     assert!(reopened["rules"]["default_preset_id"].is_null());
+}
+
+#[tokio::test]
+async fn clear_data_issues_new_overlay_token_and_revokes_previous_address() {
+    let (_directory, app) = isolated(true);
+    let (previous, hub) = {
+        let state = app.lock().unwrap();
+        (
+            state.overlay_settings.token.clone(),
+            state.overlay_hub.clone(),
+        )
+    };
+    assert!(hub.token_matches(&previous));
+    app.dispatch("data.clear", json!({"confirmed":true}))
+        .await
+        .unwrap();
+    let state = app.lock().unwrap();
+    let token = state.overlay_settings.token.clone();
+    assert_eq!(token.len(), 32);
+    assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_ne!(token, previous);
+    assert!(!hub.token_matches(&previous));
+    assert!(hub.token_matches(&token));
+    assert_eq!(state.store.load_overlay_settings().unwrap().token, token);
 }
 
 #[tokio::test]

@@ -3466,7 +3466,8 @@ function renderPresetEditor(id) {
   if (provider === 'fish_audio' && connection) return renderFishPresetEditor(id, preset, connection);
   const selected = selectedModelPair(preset);
   let html = renderPresetCore(id);
-  if (provider === 'gpt_sovits') html = html.replace(t('<details class="details"><summary>语速与其他选项'), ui`${modelPairPicker(preset)}<details class="details"><summary>语速与其他选项`);
+  // A function replacement keeps `$` in model file names literal.
+  if (provider === 'gpt_sovits') html = html.replace(t('<details class="details"><summary>语速与其他选项'), () => ui`${modelPairPicker(preset)}<details class="details"><summary>语速与其他选项`);
   if (provider === 'gpt_sovits') html += renderReferenceEditor(provider, preset, selected.pair);
   return html;
 }
@@ -3927,6 +3928,9 @@ async function handleAction(action, id, target) {
   }
   if (action === 'queue.jump') return command('queue.jump', { id: Number(id) }, { quiet: true });
   if (action === 'audio.mute') {
+    // onError already reverted the slider to the saved gain; a stale failure
+    // must not block every later mute click.
+    if (volumeSave.error) volumeSave.cancel();
     await volumeSave.flush();
     const volume = snapshot.preferences?.master_volume ?? 1;
     const unmute = !!snapshot.preferences?.muted || volume === 0;

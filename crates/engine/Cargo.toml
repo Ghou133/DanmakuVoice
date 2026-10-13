@@ -34,6 +34,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 
 [dev-dependencies]
 tempfile = "3"
+# Paused-clock tests for heartbeat and timeout paths; no extra crates.
+tokio = { version = "1.53.1", features = ["test-util"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_System_Registry"] }

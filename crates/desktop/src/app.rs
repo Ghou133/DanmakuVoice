@@ -2489,6 +2489,9 @@ impl Application {
         state.overlay_server = None;
         state.overlay_error = None;
         state.overlay_settings = state.store.load_overlay_settings().unwrap_or_default();
+        // Cleared settings carry no token. Issue a new one now so the previous
+        // OBS address stops working and the address shown in the UI is valid.
+        state.ensure_overlay_token()?;
         let overlay_config = overlay_config(&state.overlay_settings);
         state.overlay_hub.set_config(overlay_config);
         state.overlay_hub.clear_items();
@@ -3505,21 +3508,27 @@ impl DataResetPlan {
                     for child in std::fs::read_dir(&path).map_err(display)? {
                         let child = child.map_err(display)?.path();
                         let child_name = child.file_name().unwrap_or_default().to_string_lossy();
+                        let service_log =
+                            name == "logs" && local_service::is_service_log_name(&child_name);
                         let owned = match name.as_ref() {
                             "assets" => managed_asset_name(&child_name),
                             "backups" => managed_backup_name(&child_name),
-                            _ => matches!(
-                                child_name.as_ref(),
-                                "current.jsonl"
-                                    | "previous-1.jsonl"
-                                    | "previous-2.jsonl"
-                                    | "previous-3.jsonl"
-                                    | "previous-4.jsonl"
-                            ),
+                            _ => {
+                                service_log
+                                    || matches!(
+                                        child_name.as_ref(),
+                                        "current.jsonl"
+                                            | "previous-1.jsonl"
+                                            | "previous-2.jsonl"
+                                            | "previous-3.jsonl"
+                                            | "previous-4.jsonl"
+                                    )
+                            }
                         };
                         if owned {
                             checked_data_entry(&child, &path, false)?;
-                            if name != "logs" {
+                            // diagnostics::clear removes its own JSONL files.
+                            if name != "logs" || service_log {
                                 plan.remove.push(child);
                             }
                         } else {
@@ -3571,10 +3580,13 @@ impl DataResetPlan {
             let temporary_id = name
                 .strip_prefix(".ffmpeg-")
                 .and_then(|name| name.strip_suffix(".tmp"));
+            // embedded_ffmpeg names its temporary file with a hyphenated UUID.
             let owned = binary_hash.is_some_and(|hash| {
                 hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
             }) || temporary_id.is_some_and(|id| {
-                id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                Uuid::parse_str(id).is_ok_and(|parsed| {
+                    parsed.hyphenated().to_string() == id || parsed.simple().to_string() == id
+                })
             });
             if owned {
                 checked_data_entry(&child, path, false)?;

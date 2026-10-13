@@ -737,6 +737,27 @@ test('mute click preserves gain, unmutes on the next click and restores a zero s
   assert.equal(calls.length, 3);
 });
 
+test('a failed volume save does not block later mute clicks', async () => {
+  const context = appContext();
+  const calls = [];
+  context.saveOrFail = async (action, payload) => {
+    assert.equal(action, 'preferences.save');
+    calls.push(structuredClone(payload.preferences));
+    context.nextPreferences = payload.preferences;
+    vm.runInContext('Object.assign(snapshot.preferences, nextPreferences)', context);
+  };
+  // The harness stubs the queue; model the real one's retained failure.
+  vm.runInContext(`snapshot.preferences = {master_volume: 0.65, muted: false}; command = saveOrFail;
+    volumeSave.error = new Error('保存失败');
+    volumeSave.cancel = () => { volumeSave.error = null; };
+    volumeSave.flush = async () => { if (volumeSave.error) throw volumeSave.error; };`, context);
+  await vm.runInContext('handleAction', context)('audio.mute');
+  assert.equal(vm.runInContext('snapshot.preferences.muted', context), true);
+  assert.equal(vm.runInContext('snapshot.preferences.master_volume', context), 0.65);
+  assert.equal(vm.runInContext('volumeSave.error', context), null);
+  assert.deepEqual(calls.map(preferences => preferences.muted), [true]);
+});
+
 test('muted volume control has a different icon and accessible toggle state', () => {
   const context = appContext();
   const slider = {value: ''};
@@ -1137,6 +1158,21 @@ test('Doubao names stay readable while saving exact internal voice IDs', () => {
   const result = vm.runInContext('collectAutosave', context)(form);
   assert.equal(result.payload.preset.name, '温柔桃子');
   assert.equal(result.payload.preset.voice_id, 'zh_female_test_bigtts');
+});
+
+test('GPT-SoVITS model names with replacement patterns stay literal in the editor', () => {
+  const context = appContext();
+  vm.runInContext(`snapshot.connections = [{ id: 'gpt', settings: { provider: 'gpt_sovits' } }];
+    snapshot.presets = [{ id: 'voice', provider: 'gpt_sovits', connection_id: 'gpt', voice_id: '', speed: 1, volume: 1 }];
+    modelScan = { pairs: [{ name: 'a$\`b$&', version: 'v2', gpt_path: 'C:/m/a.ckpt', sovits_path: 'C:/m/a.pth' }], issues: [] };
+    editor = { type: 'preset', id: 'voice' };`, context);
+  const special = vm.runInContext('renderPresetEditor("voice")', context);
+  vm.runInContext(`modelScan.pairs[0].name = 'plain';`, context);
+  const plain = vm.runInContext('renderPresetEditor("voice")', context);
+  // Field IDs come from a global counter, so compare the markup without them.
+  const normalized = html => html.replace(/field-\d+/g, 'field-N');
+  assert.equal(special.split('class="model-pair-picker"').length - 1, 1);
+  assert.equal(normalized(special), normalized(plain).split('plain · v2').join('a$`b$&amp; · v2'));
 });
 
 test('number fields suppress f32 noise and preserve text identifiers', () => {

@@ -680,11 +680,25 @@ fn redirected(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
+/// Recognizes a stderr capture created by [`create_service_log`].
+fn is_provider_service_log(name: &str, provider: &str) -> bool {
+    name.strip_prefix(provider)
+        .and_then(|rest| rest.strip_prefix("-stderr-"))
+        .and_then(|rest| rest.strip_suffix(".log"))
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id))
+}
+
+/// Data reset removes exactly the logs this module creates.
+pub(crate) fn is_service_log_name(name: &str) -> bool {
+    ["dots", "gpt-sovits"]
+        .into_iter()
+        .any(|provider| is_provider_service_log(name, provider))
+}
+
 fn prune_service_logs(directory: &Path, provider: &str, current: &Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
-    let prefix = format!("{provider}-stderr-");
     let mut old = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
@@ -692,9 +706,7 @@ fn prune_service_logs(directory: &Path, provider: &str, current: &Path) {
             if path == current {
                 return None;
             }
-            let name = entry.file_name();
-            let id = name.to_str()?.strip_prefix(&prefix)?.strip_suffix(".log")?;
-            if !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id) {
+            if !is_provider_service_log(entry.file_name().to_str()?, provider) {
                 return None;
             }
             let metadata = std::fs::symlink_metadata(&path).ok()?;

@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant as TokioInstant, MissedTickBehavior, interval_at, timeout};
+use tokio::time::{Instant as TokioInstant, Interval, MissedTickBehavior, interval_at, timeout};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{
@@ -1276,11 +1276,12 @@ where
         + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + Unpin,
 {
-    if let Err(end) = send_event_packets(initial_packets, room_id, events, cancel, audience).await {
-        return end;
-    }
     let mut heartbeat = interval_at(TokioInstant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let initial = live_events_from_packets(initial_packets, room_id, audience);
+    if let Err(end) = deliver_events(&mut socket, &mut heartbeat, initial, events, cancel).await {
+        return end;
+    }
     let mut last_received = Instant::now();
     loop {
         tokio::select! {
@@ -1291,7 +1292,7 @@ where
             _ = events.closed() => return ConnectionEnd::ReceiverClosed,
             _ = heartbeat.tick() => {
                 if last_received.elapsed() >= RECEIVE_TIMEOUT { return ConnectionEnd::Failed(ConnectionFailureStage::Stream); }
-                if socket.send(Message::Binary(encode_packet(2, 1, b"[object Object]").into())).await.is_err() {
+                if socket.send(heartbeat_message()).await.is_err() {
                     return ConnectionEnd::Failed(ConnectionFailureStage::Stream);
                 }
             }
@@ -1301,9 +1302,13 @@ where
                 match message {
                     Message::Binary(bytes) => {
                         let Ok(packets) = decode_packets(&bytes) else { return ConnectionEnd::Failed(ConnectionFailureStage::Stream); };
-                        if let Err(end) = send_event_packets(packets, room_id, events, cancel, audience).await {
+                        let batch = live_events_from_packets(packets, room_id, audience);
+                        if let Err(end) = deliver_events(&mut socket, &mut heartbeat, batch, events, cancel).await {
                             return end;
                         }
+                        // Time spent waiting for local consumers says nothing
+                        // about the peer, so it must not count as silence.
+                        last_received = Instant::now();
                     }
                     Message::Ping(payload) => {
                         if socket.send(Message::Pong(payload)).await.is_err() { return ConnectionEnd::Failed(ConnectionFailureStage::Stream); }
@@ -1316,13 +1321,17 @@ where
     }
 }
 
-async fn send_event_packets(
+fn heartbeat_message() -> Message {
+    Message::Binary(encode_packet(2, 1, b"[object Object]").into())
+}
+
+/// Applies audience packets and returns the frame's live events in order.
+fn live_events_from_packets(
     packets: Vec<Packet>,
     room_id: u64,
-    events: &mpsc::Sender<LiveEvent>,
-    cancel: &CancellationToken,
     audience: &watch::Sender<AudienceSnapshot>,
-) -> Result<(), ConnectionEnd> {
+) -> Vec<LiveEvent> {
+    let mut events = Vec::new();
     for packet in packets {
         if packet.op != 5 {
             continue;
@@ -1334,12 +1343,41 @@ async fn send_event_packets(
             audience.send_modify(|snapshot| snapshot.apply_packet(&value));
         }
         if let Some(event) = parse_live_event(room_id, now_ms(), &value) {
-            let sent = tokio::select! {
+            events.push(event);
+        }
+    }
+    events
+}
+
+/// Waits for channel capacity without starving the platform heartbeat. A slow
+/// consumer otherwise stops heartbeats and the server drops the room.
+async fn deliver_events<S>(
+    socket: &mut S,
+    heartbeat: &mut Interval,
+    batch: Vec<LiveEvent>,
+    events: &mpsc::Sender<LiveEvent>,
+    cancel: &CancellationToken,
+) -> Result<(), ConnectionEnd>
+where
+    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    for event in batch {
+        let send = events.send(event);
+        tokio::pin!(send);
+        loop {
+            tokio::select! {
                 _ = cancel.cancelled() => return Err(ConnectionEnd::Cancelled),
-                result = events.send(event) => result,
-            };
-            if sent.is_err() {
-                return Err(ConnectionEnd::ReceiverClosed);
+                result = &mut send => {
+                    if result.is_err() {
+                        return Err(ConnectionEnd::ReceiverClosed);
+                    }
+                    break;
+                }
+                _ = heartbeat.tick() => {
+                    if socket.send(heartbeat_message()).await.is_err() {
+                        return Err(ConnectionEnd::Failed(ConnectionFailureStage::Stream));
+                    }
+                }
             }
         }
     }
@@ -1747,9 +1785,8 @@ mod tests {
     use reqwest::header::HeaderValue;
     use std::io::Write;
 
-    #[tokio::test]
-    async fn watched_packets_update_audience_without_becoming_speech_events() {
-        let (events, mut receiver) = mpsc::channel(1);
+    #[test]
+    fn watched_packets_update_audience_without_becoming_speech_events() {
         let (audience, _) = watch::channel(AudienceSnapshot::default());
         let packets = vec![
             Packet {
@@ -1762,12 +1799,72 @@ mod tests {
                     .unwrap(),
             },
         ];
-        send_event_packets(packets, 42, &events, &CancellationToken::new(), &audience)
-            .await
-            .unwrap();
+        let events = live_events_from_packets(packets, 42, &audience);
         assert_eq!(audience.borrow().watched_count, Some(123));
         assert_eq!(audience.borrow().rank_count, None);
-        assert!(receiver.try_recv().is_err());
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_continues_while_events_wait_for_channel_capacity() {
+        let danmaku = |text: &str| {
+            encode_packet(
+                5,
+                1,
+                &serde_json::to_vec(&json!({"cmd":"DANMU_MSG","info":[[],text,[7,"Alice"]]}))
+                    .unwrap(),
+            )
+        };
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            server,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        // Capacity 1 and no reader: the second event waits for capacity.
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let stream_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let (audience, _) = watch::channel(AudienceSnapshot::default());
+            stream_room(
+                socket,
+                42,
+                &events_tx,
+                &stream_cancel,
+                Vec::new(),
+                &audience,
+            )
+            .await
+        });
+        let frame = [danmaku("first"), danmaku("second")].concat();
+        server.send(Message::Binary(frame.into())).await.unwrap();
+        let reply = timeout(HEARTBEAT_INTERVAL * 2, server.next())
+            .await
+            .expect("heartbeat while the event channel is full")
+            .unwrap()
+            .unwrap();
+        let Message::Binary(bytes) = reply else {
+            panic!("unexpected reply: {reply:?}");
+        };
+        assert_eq!(u32::from_be_bytes(bytes[8..12].try_into().unwrap()), 2);
+        assert_eq!(events_rx.recv().await.unwrap().message, "first");
+        assert_eq!(events_rx.recv().await.unwrap().message, "second");
+        cancel.cancel();
+        assert_eq!(
+            timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap(),
+            ConnectionEnd::Cancelled
+        );
     }
 
     #[test]
