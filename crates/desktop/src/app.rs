@@ -114,6 +114,49 @@ impl Drop for ReconfigurationGuard {
     }
 }
 
+/// The one in-flight QR request. An early return, including through `?`,
+/// releases it and expires the code so later polls cannot stall silently.
+/// A newer QR generation owns its own request and display.
+struct QrRequest {
+    app: Application,
+    generation: u64,
+    armed: bool,
+}
+
+impl QrRequest {
+    fn new(app: &Application, generation: u64) -> Self {
+        Self {
+            app: app.clone(),
+            generation,
+            armed: true,
+        }
+    }
+
+    /// Releases the request after its result is shown, under the caller's lock.
+    fn finish(mut self, state: &mut Controller) {
+        self.armed = false;
+        if state.qr_generation == self.generation {
+            state.qr_busy = false;
+        }
+    }
+}
+
+impl Drop for QrRequest {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(mut state) = self.app.lock()
+            && state.qr_generation == self.generation
+        {
+            state.qr_busy = false;
+            state.qr.status = "expired";
+            state.qr.message = "二维码已过期，点击刷新".into();
+            state.qr.image_data_url = None;
+            state.bili_qr = None;
+            state.doubao_qr = None;
+        }
+    }
+}
+
 #[derive(Default, Serialize)]
 struct QrView {
     provider: Option<&'static str>,
@@ -2056,13 +2099,13 @@ impl Application {
     async fn begin_bili(&self) -> Result<(), String> {
         self.require_network()?;
         let (generation, cancel) = self.lock()?.begin_qr("bilibili");
+        let request = QrRequest::new(self, generation);
         let client = QrLoginClient::new().map_err(display)?;
         let result = tokio::select! {_=cancel.cancelled()=>return Ok(()),result=client.begin()=>result.map_err(display)};
         let mut state = self.lock()?;
         if state.qr_generation != generation {
             return Ok(());
         }
-        state.qr_busy = false;
         match result {
             Ok(challenge) => {
                 state.qr.image_data_url = Some(qr_url_png(challenge.qr_url())?);
@@ -2072,9 +2115,11 @@ impl Application {
             Err(error) => {
                 state.qr.message = error.clone();
                 state.qr.status = "expired";
+                request.finish(&mut state);
                 return Err(error);
             }
         }
+        request.finish(&mut state);
         Ok(())
     }
 
@@ -2091,12 +2136,34 @@ impl Application {
                 state.bili_qr.clone().expect("checked QR"),
             )
         };
+        let request = QrRequest::new(self, generation);
         let client = QrLoginClient::new().map_err(display)?;
         let result = tokio::select! {
             _=cancel.cancelled()=>return Ok(()),
             result=async {let mut challenge=challenge.lock().await;client.poll(&mut challenge).await}=>result.map_err(display),
         };
+        self.apply_bili_poll(request, &cancel, result, |session| async move {
+            client.own_room_id(&session).await.map_err(display)
+        })
+        .await
+    }
+
+    /// Applies one poll result; split from the request so the login commit
+    /// can be exercised without a live QR code.
+    async fn apply_bili_poll<F, Fut>(
+        &self,
+        request: QrRequest,
+        cancel: &CancellationToken,
+        result: Result<QrPoll, String>,
+        own_room: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(BiliSession) -> Fut,
+        Fut: std::future::Future<Output = Result<u64, String>>,
+    {
+        let generation = request.generation;
         if let Ok(QrPoll::Complete(session)) = result {
+            let uid = session.user_id();
             {
                 let mut state = self.lock()?;
                 if state.qr_generation != generation || cancel.is_cancelled() {
@@ -2118,31 +2185,31 @@ impl Application {
             tokio::spawn(async move {
                 application.refresh_bili_profile().await;
             });
-            let room = tokio::select! {_=cancel.cancelled()=>return Ok(()),result=client.own_room_id(&session)=>result.map_err(display)};
+            let room = tokio::select! {_=cancel.cancelled()=>return Ok(()),result=own_room(session)=>result};
             match room {
                 Ok(room) => {
                     if !self
-                        .commit_room_resolution(generation, &cancel, session.user_id(), room)
+                        .commit_room_resolution(generation, cancel, uid, room)
                         .await?
                     {
                         return Ok(());
                     }
                     let mut state = self.lock()?;
-                    state.qr_busy = false;
                     state.qr.status = "complete";
                     state.qr.message = "登录成功".into();
                     state.status.clear();
                     state.status_error = false;
+                    request.finish(&mut state);
                 }
                 Err(error) => {
                     let mut state = self.lock()?;
                     if state.qr_generation != generation || cancel.is_cancelled() {
                         return Ok(());
                     }
-                    state.qr_busy = false;
                     state.qr.status = "expired";
                     state.qr.message =
                         "登录成功，但未找到本账号直播间；可以在下方填写主播 UID".into();
+                    request.finish(&mut state);
                     return Err(error);
                 }
             }
@@ -2152,7 +2219,6 @@ impl Application {
         if state.qr_generation != generation {
             return Ok(());
         }
-        state.qr_busy = false;
         match result {
             Ok(QrPoll::WaitingForScan) => {
                 state.qr.status = "waiting";
@@ -2170,10 +2236,12 @@ impl Application {
             }
             Err(error) => {
                 state.qr.message = error.clone();
+                request.finish(&mut state);
                 return Err(error);
             }
             Ok(QrPoll::Complete(_)) => unreachable!(),
         }
+        request.finish(&mut state);
         Ok(())
     }
 
@@ -2201,13 +2269,13 @@ impl Application {
             state.doubao_connection = Some(id);
             token
         };
+        let request = QrRequest::new(self, generation);
         let auth = DoubaoQrAuth::new().map_err(display)?;
         let result = auth.start_qr_login(&cancel).await.map_err(display);
         let mut state = self.lock()?;
         if state.qr_generation != generation || cancel.is_cancelled() {
             return Ok(());
         }
-        state.qr_busy = false;
         match result {
             Ok(session) => {
                 state.qr.image_data_url = Some(qr_visual_png(session.qr_visual())?);
@@ -2217,9 +2285,11 @@ impl Application {
             Err(error) => {
                 state.qr.status = "expired";
                 state.qr.message = error.clone();
+                request.finish(&mut state);
                 return Err(error);
             }
         }
+        request.finish(&mut state);
         Ok(())
     }
 
@@ -2236,6 +2306,7 @@ impl Application {
                 state.doubao_qr.clone().expect("checked QR"),
             )
         };
+        let request = QrRequest::new(self, generation);
         let auth = DoubaoQrAuth::new().map_err(display)?;
         let (result, cookie) = {
             let mut session = session.lock().await;
@@ -2254,7 +2325,6 @@ impl Application {
         if state.qr_generation != generation || cancel.is_cancelled() {
             return Ok(());
         }
-        state.qr_busy = false;
         match result {
             Ok(QrStatus::Waiting) => {
                 state.qr.status = "waiting";
@@ -2297,9 +2367,11 @@ impl Application {
             }
             Err(error) => {
                 state.qr.message = error.clone();
+                request.finish(&mut state);
                 return Err(error);
             }
         }
+        request.finish(&mut state);
         Ok(())
     }
 

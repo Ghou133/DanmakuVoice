@@ -2228,6 +2228,51 @@ fn qr_cancel_invalidates_pending_results_and_clears_display() {
 }
 
 #[tokio::test]
+async fn failed_login_commit_releases_the_qr_request_and_expires_the_code() {
+    let (_directory, app) = isolated(true);
+    let (generation, cancel) = app.lock().unwrap().begin_qr("bilibili");
+    let session = BiliSession::from_secret_payload(
+        br#"{"user_id":42,"sessdata":"qr-fixture-secret","bili_jct":"csrf"}"#,
+    )
+    .unwrap();
+    let applying = app.begin_reconfiguration().unwrap();
+    let request = QrRequest::new(&app, generation);
+    let error = app
+        .apply_bili_poll(request, &cancel, Ok(QrPoll::Complete(session)), |_| async {
+            Ok(900)
+        })
+        .await
+        .unwrap_err();
+    assert!(error.contains("正在应用设置"), "{error}");
+    drop(applying);
+    let mut state = app.lock().unwrap();
+    assert!(!state.qr_busy);
+    assert_eq!(state.qr.status, "expired");
+    assert!(state.bili_qr.is_none());
+    state.qr_last_poll = None;
+    assert!(state.qr_poll_ready("bilibili"));
+}
+
+#[test]
+fn abandoned_qr_request_expires_only_its_own_generation() {
+    let (_directory, app) = isolated(true);
+    let stale = app.lock().unwrap().begin_qr("doubao").0;
+    let stale = QrRequest::new(&app, stale);
+    let current = app.lock().unwrap().begin_qr("bilibili").0;
+    drop(stale);
+    {
+        let state = app.lock().unwrap();
+        assert!(state.qr_busy);
+        assert_eq!(state.qr.status, "waiting");
+    }
+    drop(QrRequest::new(&app, current));
+    let state = app.lock().unwrap();
+    assert!(!state.qr_busy);
+    assert_eq!(state.qr.status, "expired");
+    assert_eq!(state.qr.provider, Some("bilibili"));
+}
+
+#[tokio::test]
 async fn committed_room_change_preserves_audition_and_cancelled_resolution_cannot_overwrite() {
     let (_directory, app) = isolated(false);
     install_profile_session(&app);
