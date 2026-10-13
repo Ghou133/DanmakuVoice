@@ -6,7 +6,9 @@ to `snapshot`: when `config_unchanged` is true, merge the returned dynamic field
 into the prior snapshot with the same `config_revision`. Otherwise replace the
 entire snapshot. Late full/delta replies with a lower `config_revision` are ignored;
 a newer delta without a matching base triggers full-state recovery. Initial loads,
-commands and recovery always request full state.
+commands and recovery always request full state. Polling continues while a command
+is pending (OBS start can wait 45 seconds); a poll reply is discarded when the poll
+started before the latest command settled or before a newer poll reply was applied.
 Snapshots are assembled on a blocking worker instead of the window event thread. Normal actions return the current safe
 snapshot; operation-specific data is added as `result`. Rejected commands reject
 the promise with a user-facing error. Secrets never occur in a normal snapshot

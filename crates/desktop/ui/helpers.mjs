@@ -244,10 +244,25 @@ export function runtimeIssue(snapshot) {
   return '';
 }
 
-export function snapshotPollingPolicy(snapshot, { step = 'main', hidden = false, focused = true, busy = false, settingsOpen = false } = {}) {
+// Commands can wait up to 45 seconds (OBS) without pausing the live view; the
+// sequencer below discards replies that could be older than a command's.
+export function snapshotPollingPolicy(snapshot, { step = 'main', hidden = false, focused = true, settingsOpen = false } = {}) {
   const startingLocalService = Object.values(snapshot?.local_services || {}).some(service => ['checking', 'starting'].includes(service?.state));
   const active = !!(snapshot?.live?.running || snapshot?.live?.connecting || snapshot?.queue?.current || snapshot?.queue?.pending?.length || startingLocalService);
-  return { poll: !hidden && focused && !busy && (step === 'main' || settingsOpen || active), delay: hidden || !focused || !active ? 5000 : 800 };
+  return { poll: !hidden && focused && (step === 'main' || settingsOpen || active), delay: hidden || !focused || !active ? 5000 : 800 };
+}
+
+// A poll that started before the latest settled command, or before a newer
+// accepted poll, may describe older runtime state; its reply is dropped.
+export function createSnapshotSequencer() {
+  let issued = 0;
+  let floor = 0;
+  return {
+    poll: () => ++issued,
+    settled() { floor = ++issued; },
+    fresh: ticket => ticket > floor,
+    accept(ticket) { if (ticket > floor) floor = ticket; },
+  };
 }
 
 export function mergeSnapshot(previous, next) {

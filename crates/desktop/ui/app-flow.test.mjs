@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { createAutosaveQueue } from './autosave.mjs';
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, uiIsActive, validUid } from './helpers.mjs';
+import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, snapshotPollingPolicy, createSnapshotSequencer, uiIsActive, validUid } from './helpers.mjs';
 
 function appContext() {
   setLanguage('zh-CN');
@@ -36,6 +36,8 @@ function appContext() {
     playbackIssue,
     qrNeedsRoomFallback,
     safeMediaUrl,
+    snapshotPollingPolicy,
+    createSnapshotSequencer,
     uiIsActive,
     validUid,
     deviceValue,
@@ -1323,6 +1325,35 @@ test('snapshot polling leaves the shell title unchanged until the language chang
   assert.deepEqual(titles, ['超绝可爱弹幕姬', 'DanmakuVoice']);
   accept(vm.runInContext("({...snapshot, config_revision:3, config_unchanged:false, preferences:{language:'zh-CN'}})", context));
   assert.deepEqual(titles, ['超绝可爱弹幕姬', 'DanmakuVoice', '超绝可爱弹幕姬']);
+});
+
+test('chat keeps updating during a long command and polls started before its reply are dropped', async () => {
+  const context = appContext();
+  context.document.querySelectorAll = () => [];
+  const requests = [];
+  context.window.__TAURI__ = { core: { invoke: (command, args) => new Promise(resolve => requests.push({ command, args, resolve })) } };
+  const state = (received, live) => ({ config_revision: 1, live: { running: true, state: 'connected', received }, queue: {}, broadcast: { live } });
+  vm.runInContext("step = 'tts'; scheduleSnapshotPolling = () => {}; refreshLocalServices = async () => {};", context);
+  context.initial = state(1, false);
+  vm.runInContext('snapshot = initial', context);
+  const broadcast = vm.runInContext("command('broadcast.start', {}, { quiet: true })", context);
+  assert.equal(requests.length, 1);
+  const during = vm.runInContext('pollSnapshot()', context);
+  assert.equal(requests[1]?.command, 'snapshot', 'a command waiting for OBS must not freeze danmaku, queue and audience');
+  requests[1].resolve(state(2, false));
+  await during;
+  assert.equal(vm.runInContext('snapshot.live.received', context), 2);
+  const racing = vm.runInContext('pollSnapshot()', context);
+  requests[0].resolve(state(3, true));
+  await broadcast;
+  requests[2].resolve(state(2, false));
+  await racing;
+  assert.equal(vm.runInContext('snapshot.broadcast.live', context), true, 'a poll started before the command reply cannot roll it back');
+  assert.equal(vm.runInContext('snapshot.live.received', context), 3);
+  const after = vm.runInContext('pollSnapshot()', context);
+  requests[3].resolve(state(4, true));
+  await after;
+  assert.equal(vm.runInContext('snapshot.live.received', context), 4);
 });
 
 test('standalone emote filter defaults on, preserves disabled settings, and autosaves either value', () => {

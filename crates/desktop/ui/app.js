@@ -1,6 +1,6 @@
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
+import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, createSnapshotSequencer, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
 import { createAutosaveQueue } from './autosave.mjs';
 import { mountSelects, closeSelect, stripSelects } from './select.mjs';
 import { lakeSceneMarkup } from './lake-scene.mjs';
@@ -476,6 +476,7 @@ let localRefreshSignature = '';
 let fallbackStatus = '';
 let fallbackStatusTimer = null;
 let snapshotTimer = null;
+const snapshotSequence = createSnapshotSequencer();
 let windowFocused = document.hasFocus();
 let nativeActive = null;
 let effectiveActive = null;
@@ -569,7 +570,7 @@ async function command(action, payload = {}, options = {}) {
     } catch { /* Preserve the original command error. */ }
     if (!options.silent) showError(error);
     throw error;
-  } finally { pendingCommands--; if (boot.polling) scheduleSnapshotPolling(); }
+  } finally { pendingCommands--; snapshotSequence.settled(); if (boot.polling) scheduleSnapshotPolling(); }
 }
 
 function setStep(next) {
@@ -5048,17 +5049,20 @@ matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', event 
 function scheduleSnapshotPolling(immediate = false) {
   clearTimeout(snapshotTimer);
   if (disposed || !uiIsActive(nativeActive, windowFocused, document.hidden)) return;
-  const policy = snapshotPollingPolicy(snapshot, { step, hidden: document.hidden, focused: nativeActive ?? windowFocused, busy: pendingCommands > 0, settingsOpen: settingsDialog.open && settingsTab === 'voices' });
+  const policy = snapshotPollingPolicy(snapshot, { step, hidden: document.hidden, focused: nativeActive ?? windowFocused, settingsOpen: settingsDialog.open && settingsTab === 'voices' });
   if (!policy.poll && !pendingCommands) return;
   snapshotTimer = setTimeout(pollSnapshot, immediate ? 0 : policy.delay);
 }
 
 async function pollSnapshot() {
   if (disposed) return;
-  const policy = snapshotPollingPolicy(snapshot, { step, hidden: document.hidden, focused: nativeActive ?? windowFocused, busy: pendingCommands > 0, settingsOpen: settingsDialog.open && settingsTab === 'voices' });
+  const policy = snapshotPollingPolicy(snapshot, { step, hidden: document.hidden, focused: nativeActive ?? windowFocused, settingsOpen: settingsDialog.open && settingsTab === 'voices' });
   if (policy.poll) {
-    try { acceptSnapshot(await invoke('snapshot', { configRevision: snapshot?.config_revision })); }
-    catch (error) { try { acceptSnapshot(await invoke('snapshot')); } catch { showError(error); } }
+    // Polls continue while commands run; a reply that could predate the latest
+    // command reply or a newer poll is dropped instead of rolling state back.
+    const poll = async args => { const ticket = snapshotSequence.poll(); const next = await invoke('snapshot', args); if (!snapshotSequence.fresh(ticket)) return; snapshotSequence.accept(ticket); acceptSnapshot(next); };
+    try { await poll({ configRevision: snapshot?.config_revision }); }
+    catch (error) { try { await poll(); } catch { showError(error); } }
   }
   void refreshLocalServices();
   scheduleSnapshotPolling();

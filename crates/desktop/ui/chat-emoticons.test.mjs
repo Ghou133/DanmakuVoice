@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { escapeHtml as esc, safeMediaUrl, validUid } from './helpers.mjs';
+import { escapeHtml as esc, safeMediaUrl, validUid, createSnapshotSequencer } from './helpers.mjs';
 
 function emoticonContext() {
   setLanguage('zh-CN');
@@ -13,7 +13,7 @@ function emoticonContext() {
   const context = vm.createContext({
     document: { documentElement: { dataset: {} }, hasFocus: () => true, addEventListener() {}, querySelector: selector => selector === '#chat-emoticon-picker' ? picker : surface, querySelectorAll: () => [] },
     window: { addEventListener() {} }, matchMedia: () => ({ addEventListener() {} }),
-    t, ui, getLanguage, setLanguage, esc, safeMediaUrl, validUid, localizeDiagnostic,
+    t, ui, getLanguage, setLanguage, esc, safeMediaUrl, validUid, localizeDiagnostic, createSnapshotSequencer,
     mountSelects() {}, closeSelect() {}, stripSelects() {},
     createAutosaveQueue: () => ({ schedule() {}, flush: async () => {} }), setTimeout, clearTimeout,
   });
