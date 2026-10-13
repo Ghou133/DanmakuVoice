@@ -1544,14 +1544,7 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 .and_then(Value::as_u64)
                 .and_then(|n| u32::try_from(n).ok())
                 .filter(|n| *n > 0)?;
-            let milli_yuan = data
-                .get("price")
-                .and_then(Value::as_f64)
-                .filter(|v| v.is_finite() && *v >= 0.0)?;
-            let price_yuan = milli_yuan / 1000.0 * f64::from(quantity);
-            if !price_yuan.is_finite() {
-                return None;
-            }
+            let price_yuan = gold_total_yuan(data.get("price")?, quantity)?;
             LiveEvent {
                 room_id,
                 user_id: data
@@ -1616,6 +1609,17 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 3 => "舰长",
                 _ => return None,
             };
+            let quantity = data
+                .get("num")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(1);
+            // blivedm's GuardBuyMessage.price is the unit price in gold, like
+            // SEND_GIFT. Payloads without it keep the former zero amount.
+            let price_yuan = match data.get("price") {
+                None | Some(Value::Null) => 0.0,
+                Some(price) => gold_total_yuan(price, quantity)?,
+            };
             LiveEvent {
                 room_id,
                 user_id: data
@@ -1633,12 +1637,8 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 emotes: Vec::new(),
                 is_bilibili_emoticon: false,
                 gift_name: String::new(),
-                quantity: data
-                    .get("num")
-                    .and_then(Value::as_u64)
-                    .and_then(|n| u32::try_from(n).ok())
-                    .unwrap_or(1),
-                price_yuan: 0.0,
+                quantity,
+                price_yuan,
                 coin_type: None,
                 guard_name: guard_name.to_owned(),
                 platform_event_id: json_id(data.get("id")),
@@ -1649,6 +1649,15 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
     };
     event.observed_at_ms = observed_at_ms;
     Some(event)
+}
+
+/// Gold amounts are per unit (1000 gold = 1 yuan). A negative, non-numeric,
+/// or overflowing total is rejected before rule evaluation.
+fn gold_total_yuan(unit_gold: &Value, quantity: u32) -> Option<f64> {
+    let unit_gold = unit_gold
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)?;
+    Some(unit_gold / 1000.0 * f64::from(quantity)).filter(|total| total.is_finite())
 }
 
 /// Image references come only from Bilibili's own CDN. This also keeps a
@@ -1909,6 +1918,40 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn guard_purchase_price_is_unit_gold_times_quantity_without_affecting_thresholds() {
+        use crate::rules::RuleSet;
+        let guard = |data: Value| parse_live_event(1, 2, &json!({"cmd":"GUARD_BUY","data":data}));
+        // blivedm GuardBuyMessage.price is the unit price in gold (1000 = 1 yuan).
+        let captain = guard(json!({
+            "uid":15,"username":"丁","guard_level":3,"num":3,"price":198000
+        }))
+        .unwrap();
+        assert_eq!(captain.quantity, 3);
+        assert_eq!(captain.price_yuan, 594.0);
+        let mut rules = RuleSet::default();
+        rules.templates.guard = "{guard_name}:{price}".into();
+        // Gift and Super Chat thresholds never apply to guard purchases.
+        rules.events.gift_threshold_yuan = 1.0e9;
+        rules.events.super_chat_threshold_yuan = 1.0e9;
+        let preview = rules.preview(&captain, &[], &[]).unwrap();
+        assert_eq!(preview.filtered_reason, None);
+        assert_eq!(preview.final_text, "舰长:594");
+
+        // Older payloads without a price keep the former zero amount.
+        let unpriced = guard(json!({"uid":15,"username":"丁","guard_level":3,"num":1})).unwrap();
+        assert_eq!(unpriced.price_yuan, 0.0);
+        for price in [json!(-1), json!("198000"), json!(f64::MAX)] {
+            assert!(
+                guard(json!({
+                    "uid":15,"username":"丁","guard_level":1,"num":u32::MAX,"price":price
+                }))
+                .is_none(),
+                "{price}"
+            );
+        }
     }
 
     #[tokio::test]
