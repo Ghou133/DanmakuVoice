@@ -71,6 +71,21 @@ impl AudienceSnapshot {
         )
     }
 
+    /// Automatic polling must not discard pages loaded on demand. With later
+    /// pages present, page 1 refreshes the counts but keeps the loaded list.
+    fn apply_idle_refresh(&mut self, response: AudiencePage, now_ms: u64) -> Result<(), BiliError> {
+        if self.page <= 1 || response.live_status != 1 {
+            return self.apply_room_page(1, response, now_ms);
+        }
+        let rank = parse_rank_page(&response.rank.ok_or(BiliError::Protocol("高能榜列表无效"))?)?;
+        self.live_status = Some(response.live_status);
+        self.rank_count = Some(rank.count);
+        self.rank_count_text = Some(rank.text);
+        self.updated_at_ms = Some(now_ms);
+        self.error = None;
+        Ok(())
+    }
+
     pub(crate) fn apply_packet(&mut self, value: &Value) {
         if value.get("cmd").and_then(Value::as_str) == Some("WATCHED_CHANGE")
             && let Some(count) = value.pointer("/data/num").and_then(Value::as_u64)
@@ -80,48 +95,64 @@ impl AudienceSnapshot {
     }
 
     fn apply_page(&mut self, page: usize, value: &Value, now_ms: u64) -> Result<(), BiliError> {
-        require_api_ok(value)?;
-        let count = value
-            .pointer("/data/onlineNum")
-            .and_then(Value::as_u64)
-            .ok_or(BiliError::Protocol("缺少高能榜人数"))?;
-        let items = value
-            .pointer("/data/OnlineRankItem")
-            .and_then(Value::as_array)
-            .filter(|items| items.len() <= PAGE_SIZE)
-            .ok_or(BiliError::Protocol("高能榜列表无效"))?;
-        let users: Vec<_> = items.iter().filter_map(parse_user).collect();
-        let text = value
-            .pointer("/data/onlineNumText")
-            .and_then(Value::as_str)
-            .filter(|text| {
-                !text.is_empty()
-                    && text.len() <= 20
-                    && text
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || byte == b'+')
-            })
-            .map(str::to_owned)
-            .unwrap_or_else(|| count.to_string());
+        let rank = parse_rank_page(value)?;
         // Validate the whole envelope before discarding a previous successful page.
         if page == 1 {
             self.users.clear();
         }
-        for user in users {
+        for user in rank.users {
             if user.user_id.is_none() || !self.users.iter().any(|old| old.user_id == user.user_id) {
                 self.users.push(user);
             }
         }
         self.users.truncate(MAX_USERS);
-        self.rank_count = Some(count);
-        self.rank_count_text = Some(text);
+        self.rank_count = Some(rank.count);
+        self.rank_count_text = Some(rank.text);
         self.page = page;
-        self.limit_reached = items.len() == PAGE_SIZE && page * PAGE_SIZE >= MAX_USERS;
-        self.has_more = items.len() == PAGE_SIZE && !self.limit_reached;
+        self.limit_reached = rank.full_page && page * PAGE_SIZE >= MAX_USERS;
+        self.has_more = rank.full_page && !self.limit_reached;
         self.updated_at_ms = Some(now_ms);
         self.error = None;
         Ok(())
     }
+}
+
+struct RankPage {
+    count: u64,
+    text: String,
+    users: Vec<AudienceUser>,
+    full_page: bool,
+}
+
+fn parse_rank_page(value: &Value) -> Result<RankPage, BiliError> {
+    require_api_ok(value)?;
+    let count = value
+        .pointer("/data/onlineNum")
+        .and_then(Value::as_u64)
+        .ok_or(BiliError::Protocol("缺少高能榜人数"))?;
+    let items = value
+        .pointer("/data/OnlineRankItem")
+        .and_then(Value::as_array)
+        .filter(|items| items.len() <= PAGE_SIZE)
+        .ok_or(BiliError::Protocol("高能榜列表无效"))?;
+    let text = value
+        .pointer("/data/onlineNumText")
+        .and_then(Value::as_str)
+        .filter(|text| {
+            !text.is_empty()
+                && text.len() <= 20
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'+')
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| count.to_string());
+    Ok(RankPage {
+        count,
+        text,
+        users: items.iter().filter_map(parse_user).collect(),
+        full_page: items.len() == PAGE_SIZE,
+    })
 }
 
 fn text(value: Option<&Value>) -> Option<String> {
@@ -233,10 +264,32 @@ pub(crate) async fn run_audience(
     http: Client,
     room_id: u64,
     updates: watch::Sender<AudienceSnapshot>,
-    mut requests: mpsc::Receiver<bool>,
+    requests: mpsc::Receiver<bool>,
     cancel: CancellationToken,
 ) {
+    run_audience_with(
+        |page| {
+            let http = http.clone();
+            async move { fetch_page(&http, room_id, page).await }
+        },
+        updates,
+        requests,
+        cancel,
+    )
+    .await;
+}
+
+async fn run_audience_with<F, Fut>(
+    mut fetch: F,
+    updates: watch::Sender<AudienceSnapshot>,
+    mut requests: mpsc::Receiver<bool>,
+    cancel: CancellationToken,
+) where
+    F: FnMut(usize) -> Fut,
+    Fut: Future<Output = Result<AudiencePage, BiliError>>,
+{
     let mut page = 1;
+    let mut idle_refresh = false;
     loop {
         if cancel.is_cancelled() {
             break;
@@ -244,11 +297,16 @@ pub(crate) async fn run_audience(
         updates.send_modify(|state| state.loading = true);
         let result = tokio::select! {
             _ = cancel.cancelled() => break,
-            result = fetch_page(&http, room_id, page) => result,
+            result = fetch(page) => result,
         };
         updates.send_modify(|state| {
+            let now_ms = crate::bilibili::now_ms();
             let result = result.and_then(|response| {
-                state.apply_room_page(page, response, crate::bilibili::now_ms())
+                if idle_refresh {
+                    state.apply_idle_refresh(response, now_ms)
+                } else {
+                    state.apply_room_page(page, response, now_ms)
+                }
             });
             if let Err(error) = result {
                 state.error = Some(error.to_string());
@@ -261,15 +319,15 @@ pub(crate) async fn run_audience(
             _ = cancel.cancelled() => break,
             _ = tokio::time::sleep(Duration::from_secs(2)) => {},
         }
-        page = tokio::select! {
+        (page, idle_refresh) = tokio::select! {
             _ = cancel.cancelled() => break,
             request = requests.recv() => {
                 let Some(mut more) = request else { break; };
                 while let Ok(next) = requests.try_recv() { more &= next; }
                 let state = updates.borrow();
-                if more && state.has_more { state.page + 1 } else { 1 }
+                (if more && state.has_more { state.page + 1 } else { 1 }, false)
             },
-            _ = tokio::time::sleep(Duration::from_secs(28)) => 1,
+            _ = tokio::time::sleep(Duration::from_secs(28)) => (1, true),
         };
     }
 }
@@ -374,6 +432,64 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_refresh_keeps_pages_loaded_on_demand_and_manual_refresh_resets() {
+        let (updates, mut state) = watch::channel(AudienceSnapshot::default());
+        let (requests, receiver) = mpsc::channel(4);
+        let (fetched_tx, mut fetched) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let mut calls = 0u64;
+        let task = tokio::spawn(run_audience_with(
+            move |page: usize| {
+                calls += 1;
+                fetched_tx.send(page).unwrap();
+                // Each call reports its sequence as the count; users differ per page.
+                let items: Vec<_> = (0..PAGE_SIZE)
+                    .map(|index| json!({"uid":(page - 1) * PAGE_SIZE + index + 1,"name":"Viewer"}))
+                    .collect();
+                let rank = json!({"code":0,"data":{"onlineNum":calls,"OnlineRankItem":items}});
+                async move {
+                    Ok(AudiencePage {
+                        live_status: 1,
+                        rank: Some(rank),
+                    })
+                }
+            },
+            updates,
+            receiver,
+            cancel.clone(),
+        ));
+        let mut applied = async |count: u64| {
+            assert!(fetched.recv().await.is_some());
+            state
+                .wait_for(|snapshot| !snapshot.loading && snapshot.rank_count == Some(count))
+                .await
+                .unwrap()
+                .clone()
+        };
+        let first = applied(1).await;
+        assert_eq!(
+            (first.page, first.users.len(), first.has_more),
+            (1, 50, true)
+        );
+        requests.send(true).await.unwrap();
+        let more = applied(2).await;
+        assert_eq!((more.page, more.users.len()), (2, 100));
+
+        // No request: the ~30 s idle refresh updates counts only.
+        let refreshed = applied(3).await;
+        assert_eq!(refreshed.page, 2);
+        assert_eq!(refreshed.users, more.users);
+        assert!(refreshed.has_more);
+
+        // An explicit refresh still starts again from page 1.
+        requests.send(false).await.unwrap();
+        let reset = applied(4).await;
+        assert_eq!((reset.page, reset.users.len()), (1, 50));
+        cancel.cancel();
+        task.await.unwrap();
     }
 
     #[tokio::test]
