@@ -26,6 +26,9 @@ pub(super) struct BroadcastSessionTracker {
     key: Option<(u64, u64)>,
     record: BroadcastSessionRecord,
     seen_live: bool,
+    /// A locally synthesized start recorded by this observation run. Only the
+    /// next authoritative observation may correct it in place.
+    provisional_start: Option<u64>,
 }
 
 /// Only successful room observations can establish an overlay stream boundary.
@@ -53,6 +56,7 @@ impl Default for BroadcastSessionTracker {
             key: None,
             record: BroadcastSessionRecord::default(),
             seen_live: false,
+            provisional_start: None,
         }
     }
 }
@@ -64,6 +68,7 @@ impl BroadcastSessionTracker {
         self.key = None;
         self.record = BroadcastSessionRecord::default();
         self.seen_live = false;
+        self.provisional_start = None;
         self.observation_run_id = Uuid::new_v4().to_string();
     }
 
@@ -76,6 +81,7 @@ impl BroadcastSessionTracker {
             self.key = Some((uid, room_id));
             self.record = record;
             self.seen_live = false;
+            self.provisional_start = None;
             self.observation_run_id = Uuid::new_v4().to_string();
         }
         Ok(())
@@ -107,13 +113,37 @@ impl BroadcastSessionTracker {
         room: &BroadcastRoom,
         observation: ReceiverObservation<'_>,
     ) -> Result<(), String> {
+        self.observe_room_with_start_authority(store, uid, room, observation, true)
+    }
+
+    /// start() may fill live_since from the local clock. That start is
+    /// provisional: the first authoritative start of the same observation run
+    /// replaces it in place instead of beginning a new session.
+    fn observe_room_with_start_authority(
+        &mut self,
+        store: &mut DataStore,
+        uid: u64,
+        room: &BroadcastRoom,
+        observation: ReceiverObservation<'_>,
+        authoritative_start: bool,
+    ) -> Result<(), String> {
         let now = observation.now;
         self.select(store, uid, room.room_id)?;
         let mut next = self.record.clone();
+        let mut provisional = None;
         if room.live_status == 1 {
             let start = room.live_since.filter(|start| *start > 0 && *start <= now);
-            let replace =
-                next.active
+            let adopt = authoritative_start
+                && start.is_some()
+                && self.provisional_start.is_some_and(|provisional| {
+                    next.active.as_ref().is_some_and(|active| {
+                        active.observation_run_id == self.observation_run_id
+                            && active.started_at == Some(provisional)
+                    })
+                });
+            let replace = !adopt
+                && next
+                    .active
                     .as_ref()
                     .is_none_or(|active| match (active.started_at, start) {
                         (Some(previous), Some(current)) => previous != current,
@@ -132,8 +162,11 @@ impl BroadcastSessionTracker {
                 });
             }
             let active = next.active.as_mut().expect("live observation initialized");
-            if active.started_at.is_none() {
+            if adopt || active.started_at.is_none() {
                 active.started_at = start;
+            }
+            if !authoritative_start && start.is_some() && active.started_at == start {
+                provisional = start;
             }
             active.last_observed_at = active.last_observed_at.max(now);
             self.count(active, room.room_id, &observation);
@@ -163,6 +196,7 @@ impl BroadcastSessionTracker {
             self.record = next;
         }
         self.seen_live = room.live_status == 1;
+        self.provisional_start = provisional;
         Ok(())
     }
 
@@ -273,7 +307,7 @@ impl Controller {
             .as_ref()
             .map(|live| live.snapshot())
             .unwrap_or_else(|| self.last_live.clone());
-        self.broadcast_session.observe_room(
+        self.broadcast_session.observe_room_with_start_authority(
             &mut self.store,
             uid,
             &room,
@@ -283,6 +317,7 @@ impl Controller {
                 started_at: self.broadcast_receiver_started_at,
                 now,
             },
+            authoritative_start,
         )?;
         let target = live.canonical_room_id();
         // Do not clear a different watched room, or infer an ending from a
@@ -1076,6 +1111,81 @@ mod tests {
         state.broadcast.room = Some(room(8, false, None));
         state.observe_broadcast_room(210).unwrap();
         assert_eq!(hub.replay_boundary().0, 3);
+    }
+
+    #[test]
+    fn broadcast_session_app_start_adopts_first_real_start_without_resetting_stats() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = Application::new(directory.path().to_path_buf(), true).unwrap();
+        let mut state = app.lock().unwrap();
+        state.bili_user_id = Some(11);
+        state.prefs.broadcast_console = true;
+        state.broadcast_receiver_epoch = 1;
+        state.broadcast_receiver_started_at = 90;
+        state.last_live = live(8, 5);
+        state.broadcast.room = Some(room(8, false, None));
+        state.observe_broadcast_room(100).unwrap();
+        // start() fills live_since from the local clock.
+        state.broadcast.room = Some(room(8, true, Some(120)));
+        state
+            .observe_broadcast_room_with_start_authority(120, false)
+            .unwrap();
+        state.last_live.received = 25;
+        let last_live = state.last_live.clone();
+        state.observe_broadcast_received(&last_live, 150).unwrap();
+        // The first get_info reports the platform's start a little earlier.
+        state.last_live.received = 30;
+        state.broadcast.room = Some(room(8, true, Some(118)));
+        state.observe_broadcast_room(180).unwrap();
+        let active = state.broadcast_session.record.active.clone().unwrap();
+        assert_eq!(active.started_at, Some(118));
+        assert_eq!(active.observed_started_at, 120);
+        assert_eq!(active.messages, 25);
+        assert!(active.receiver.is_some());
+        // Only that first correction is adopted; a later different real start
+        // is a new stream.
+        state.broadcast.room = Some(room(8, true, Some(400)));
+        state.observe_broadcast_room(410).unwrap();
+        let active = state.broadcast_session.record.active.clone().unwrap();
+        assert_eq!(
+            (active.started_at, active.observed_started_at),
+            (Some(400), 410)
+        );
+        state.broadcast.room = Some(room(8, false, None));
+        state.observe_broadcast_room(450).unwrap();
+        assert_eq!(
+            state
+                .broadcast_session
+                .summary(Some(11), Some(8))
+                .unwrap()
+                .seconds,
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn broadcast_session_provisional_start_is_not_adopted_after_an_observation_gap() {
+        let (_directory, mut store, mut tracker) = isolated();
+        tracker
+            .observe_room_with_start_authority(
+                &mut store,
+                11,
+                &room(8, true, Some(120)),
+                observation(&live(8, 10), 1, 90, 120),
+                false,
+            )
+            .unwrap();
+        tracker.invalidate_observation();
+        tracker
+            .observe_room(
+                &mut store,
+                11,
+                &room(8, true, Some(118)),
+                observation(&live(8, 4), 2, 200, 200),
+            )
+            .unwrap();
+        let active = tracker.record.active.as_ref().unwrap();
+        assert_eq!((active.started_at, active.messages), (Some(118), 4));
     }
 
     #[test]
