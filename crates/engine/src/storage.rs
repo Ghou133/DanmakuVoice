@@ -837,6 +837,16 @@ impl DataStore {
             if !name.to_str().is_some_and(is_database_backup) {
                 continue;
             }
+            let name = name
+                .to_str()
+                .ok_or_else(|| io::Error::other("备份名称无效"))?;
+            let stem = name.trim_end_matches(".sqlite3");
+            let stamp = stem
+                .get(..stem.len() - 37)
+                .and_then(|prefix| prefix.rsplit('-').next())
+                .and_then(|stamp| stamp.parse::<u64>().ok())
+                .ok_or_else(|| io::Error::other("备份时间无效"))?;
+            let modified = entry.metadata()?.modified()?;
             let path = entry.path();
             check_backup_entry(&path, &root)?;
             let source =
@@ -854,10 +864,12 @@ impl DataStore {
                     return Err(error.into());
                 }
             }
-            snapshots.push((entry.metadata()?.modified()?, path));
+            // Sanitizing an old file changes its mtime; retention follows the
+            // original snapshot timestamp, not the order of cleanup writes.
+            snapshots.push((stamp, modified, path));
         }
         snapshots.sort_by(|a, b| b.cmp(a));
-        for (_, path) in snapshots.into_iter().skip(MAX_DATABASE_BACKUPS) {
+        for (_, _, path) in snapshots.into_iter().skip(MAX_DATABASE_BACKUPS) {
             fs::remove_file(path)?;
         }
         Ok(())
@@ -3576,7 +3588,7 @@ mod tests {
             .unwrap();
         let directory = temp.path().join("backups");
         fs::write(directory.join("user.sqlite3"), b"keep user file").unwrap();
-        for stamp in 1..=7 {
+        for stamp in (94..=100).rev() {
             let path = directory.join(format!(
                 "before-legacy-import-{stamp}-{}.sqlite3",
                 Uuid::new_v4()
@@ -3592,6 +3604,18 @@ mod tests {
                 let backup = Connection::open(entry.path()).unwrap();
                 assert!(!backup_has_credentials(&backup).unwrap());
                 assert_eq!(schema_version(&backup).unwrap(), CURRENT_SCHEMA);
+                let name = entry.file_name();
+                let stamp = name
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("before-legacy-import-")
+                    .unwrap()
+                    .split('-')
+                    .next()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                assert!(stamp >= 96, "retained an older snapshot: {stamp}");
             }
         }
         assert_eq!(count, MAX_DATABASE_BACKUPS);
