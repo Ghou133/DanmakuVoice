@@ -707,11 +707,20 @@ function renderLakeHistory(events, keys) {
   if (!document.querySelector('#lake-history-dialog')?.open) return;
   const signature = JSON.stringify([keys, events.map(event => messageParts(event)), viewerOpenIdentity, getLanguage()]);
   if (signature === feedSignature) return;
+  // New messages enter at the top of this newest-first list. Away from the top,
+  // keep the entry being read under the same point instead of letting it drift.
+  const scroll = document.querySelector('#chat-scroll');
+  const scrollTop = scroll?.getBoundingClientRect().top;
+  const anchor = scroll?.scrollTop > 0 ? [...feed.children].find(entry => entry.getBoundingClientRect().bottom > scrollTop) : null;
+  const anchorKey = anchor?.dataset.id;
+  const anchorOffset = anchor ? anchor.getBoundingClientRect().top - scrollTop : 0;
   patchMarkup(feed, events.map((event, index) => {
     const price = event.price_yuan;
     return `<button type="button" class="lake-history-entry${viewerIdentity(event) === viewerOpenIdentity ? ' selected' : ''}" data-action="viewer.open" data-id="${esc(keys[index])}"><span class="lake-history-time${price ? ' gold' : ''}">${esc(price ? `¥${price}` : clockLabel(event.observed_at_ms))}</span><span class="lake-history-body"><b>${renderChatBody(event)}</b><small>${viewerAvatar(event)}${esc(event.user_name || t('访客'))}</small></span></button>`;
   }).reverse().join(''));
   feedSignature = signature;
+  const moved = anchor && [...feed.children].find(entry => entry.dataset.id === anchorKey);
+  if (moved) scroll.scrollTop += moved.getBoundingClientRect().top - scroll.getBoundingClientRect().top - anchorOffset;
 }
 
 function renderLakeTranscript(events, keys) {

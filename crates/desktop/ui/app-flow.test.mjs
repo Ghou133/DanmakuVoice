@@ -1387,6 +1387,28 @@ test('chat keeps updating during a long command and polls started before its rep
   assert.equal(vm.runInContext('snapshot.live.received', context), 4);
 });
 
+test('new messages entering the open history keep the entry being read in place', () => {
+  const context = appContext();
+  const scroll = { scrollTop: 0, getBoundingClientRect: () => ({ top: 100, bottom: 500 }) };
+  const feed = { children: [], set innerHTML(html) {
+    this.children = [...html.matchAll(/data-id="([^"]+)"/g)].map((match, index) => ({ dataset: { id: match[1] },
+      getBoundingClientRect: () => ({ top: 100 + index * 40 - scroll.scrollTop, bottom: 140 + index * 40 - scroll.scrollTop }) }));
+  } };
+  const nodes = new Map([['#chat-feed', feed], ['#chat-scroll', scroll], ['#lake-history-dialog', { open: true }]]);
+  const surface = context.document.querySelector('#surface');
+  context.document.querySelector = selector => nodes.has(selector) ? nodes.get(selector) : surface;
+  const events = count => Array.from({ length: count }, (_, index) => ({ kind: 'danmaku', user_name: `观众${index}`, message: `第${index}句`, observed_at_ms: 1_700_000_000_000 + index }));
+  const render = list => { context.list = list; vm.runInContext('renderLakeHistory(list, list.map((event, index) => `k${event.observed_at_ms}`))', context); };
+  render(events(10));
+  render(events(11));
+  assert.equal(scroll.scrollTop, 0, 'at the top the newest message stays in view');
+  scroll.scrollTop = 200;
+  const reading = feed.children[5].dataset.id;
+  render(events(13));
+  assert.equal(feed.children[7].dataset.id, reading);
+  assert.equal(scroll.scrollTop, 280, 'the entry being read stays under the same point');
+});
+
 test('a second voice chip chosen while the first binding is being created updates that binding', async () => {
   const context = appContext();
   context.requests = [];
