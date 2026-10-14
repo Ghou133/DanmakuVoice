@@ -38,7 +38,9 @@ with a 15 second timeout, 1 MiB metadata limit and 60 second cache. It returns
 `{current_version,latest_version,status,release_url,download_url}`; status is
 `available`, `up_to_date` or `no_release`. It rejects in offline test mode.
 `external.open` accepts `fish_keys`, `fish_discovery`, `project`, `releases`,
-`store_updates`, or `update_download` as `page`. Download URLs must match this repository, the checked
+`store_updates`, `update_download` or `bili_broadcast_room` as `page`. `bili_broadcast_room` opens
+`https://live.bilibili.com/{room_id}` for the signed-in account's loaded own room (the 开播 settings page's
+“打开直播间”); it requires network access, a QR login and a loaded broadcast room. Download URLs must match this repository, the checked
 semantic version and an uploaded `DanmakuVoice-windows-x64.zip` or legacy `DanmakuVoice.exe` asset; ZIP is preferred. Store installations display the Microsoft Store entry instead of invoking GitHub checks. The system browser
 handles downloads; the application never overwrites its running executable.
 
@@ -77,10 +79,11 @@ choice, so adding another connection or voice does not override it.
 | `live.disconnect` | `{}` |
 | `live.audience.refresh` | `{}` refresh public contribution rank from page 1; requires an active room session and network access. The main UI no longer offers a refresh control (page 1 polls automatically); the command is retained |
 | `live.audience.more` | `{}` request the next public contribution-rank page; same session and network gates. The UI sends it once per page when the list scrolls near its end, never while searching |
-| `live.save` | `{room_id:123,authenticated?:true}` local room settings; explicit `false` is rejected. |
+| `live.save` | `{room_id?:123,gift_merge?:GiftMergeSettings,authenticated?:true}` local room settings; each field is optional and omitted fields keep their saved values; explicit `authenticated:false` is rejected; rejected while reception is running or connecting. The room page autosaves only `{gift_merge}` as `{enabled,initial_seconds,increment_seconds,maximum_seconds}` |
 | `queue.skip`, `queue.clear`, `queue.stop` | `{}` |
 | `queue.jump` | `{id:123}` pending job ID from `queue.pending`; skips the current job and earlier pending jobs, keeps later FIFO order; rejects when the job is no longer pending |
 | `bili.logout` | `{confirmed:true}` |
+| `bili.use_account` | `{}` re-resolves the stored QR session's own room and saves it as the reception room; requires network and cancels a pending QR. QR completion already performs this resolution, so the current UI has no control for it |
 
 `live.audience` contains `{active,live_status,loading,error,rank_count,rank_count_text,
 watched_count,updated_at_ms,users,page,has_more,limit_reached}`. Count fields are
