@@ -73,6 +73,8 @@ pub struct ClientSize {
 #[derive(Default)]
 struct HubState {
     token: String,
+    /// Advances with each token change; open streams end once it moves.
+    token_generation: u64,
     config: Value,
     status: Value,
     reading: Value,
@@ -128,6 +130,7 @@ impl OverlayHub {
         }
         let had_token = !state.token.is_empty();
         state.token = token.to_owned();
+        state.token_generation = state.token_generation.wrapping_add(1);
         drop(state);
         if had_token {
             self.send(Frame::new("reset", &json!({})));
@@ -338,17 +341,28 @@ impl OverlayHub {
     }
 
     pub(crate) fn token_matches(&self, candidate: &str) -> bool {
+        self.token_generation_if_matches(candidate).is_some()
+    }
+
+    /// The token generation checked together with the token, so a stream can
+    /// notice a reset that happened before it subscribed or while it lagged.
+    fn token_generation_if_matches(&self, candidate: &str) -> Option<u64> {
         let state = self.lock();
         let expected = state.token.as_bytes();
         let candidate = candidate.as_bytes();
         if expected.is_empty() || expected.len() != candidate.len() {
-            return false;
+            return None;
         }
-        expected
+        (expected
             .iter()
             .zip(candidate)
             .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
+            == 0)
+            .then_some(state.token_generation)
+    }
+
+    fn token_generation(&self) -> u64 {
+        self.lock().token_generation
     }
 
     fn hello(&self) -> Frame {
@@ -571,7 +585,8 @@ enum Route {
         body: Vec<u8>,
         cache: &'static str,
     },
-    Events(ClientSize),
+    /// The size and the token generation that admitted the stream.
+    Events(ClientSize, u64),
 }
 
 fn text(status: &'static str, message: &str) -> Route {
@@ -605,29 +620,29 @@ fn route(request: &Request, port: u16, hub: &OverlayHub, assets: &AssetLoader) -
     if !host_ok || !origin_ok {
         return text("403 Forbidden", "只允许本机 OBS 直接打开");
     }
-    let token_ok = request
+    let token_generation = request
         .query
         .get("token")
-        .is_some_and(|token| hub.token_matches(token));
-    match request.path.as_str() {
-        "/overlay" if token_ok => Route::Respond {
+        .and_then(|token| hub.token_generation_if_matches(token));
+    match (request.path.as_str(), token_generation) {
+        ("/overlay", Some(_)) => Route::Respond {
             status: "200 OK",
             content_type: "text/html; charset=utf-8",
             body: PAGE.as_bytes().to_vec(),
             cache: "no-store",
         },
-        "/overlay/events" if token_ok => Route::Events(request.size()),
-        "/overlay" | "/overlay/events" => text(
+        ("/overlay/events", Some(generation)) => Route::Events(request.size(), generation),
+        ("/overlay" | "/overlay/events", None) => text(
             "403 Forbidden",
             "叠加层地址已失效，请在弹幕姬“设置 → OBS 叠加层”中复制新地址。",
         ),
-        "/favicon.ico" => Route::Respond {
+        ("/favicon.ico", _) => Route::Respond {
             status: "204 No Content",
             content_type: "text/plain",
             body: Vec::new(),
             cache: "max-age=86400",
         },
-        path => match path.strip_prefix("/overlay/fonts/") {
+        (path, _) => match path.strip_prefix("/overlay/fonts/") {
             // Tauri answers unknown asset names with index.html, so only real
             // WOFF2 data is served as a font.
             Some(name) if FONTS.contains(&name) => match assets(name) {
@@ -709,7 +724,9 @@ async fn handle(
             })
             .await;
         }
-        Route::Events(size) => stream_events(stream, hub, size, request.obs_agent, cancel).await,
+        Route::Events(size, generation) => {
+            stream_events(stream, hub, size, generation, request.obs_agent, cancel).await
+        }
     }
 }
 
@@ -724,12 +741,19 @@ async fn stream_events(
     stream: TcpStream,
     hub: Arc<OverlayHub>,
     size: ClientSize,
+    token_generation: u64,
     obs: bool,
     cancel: CancellationToken,
 ) {
     // Subscribe before taking the hello snapshot so no update falls between.
     let mut frames = hub.frames.subscribe();
     let (mut reader, mut writer) = stream.into_split();
+    // A reset sent before the subscription never reaches this stream.
+    if hub.token_generation() != token_generation {
+        let head = response_head("403 Forbidden", "text/plain", Some(0), "no-store");
+        let _ = write_frame(&mut writer, &head).await;
+        return;
+    }
     let Some(id) = hub.register(size, obs) else {
         let head = response_head("503 Service Unavailable", "text/plain", Some(0), "no-store");
         let _ = write_frame(&mut writer, &head).await;
@@ -751,6 +775,10 @@ async fn stream_events(
     }
     let mut discard = [0u8; 256];
     loop {
+        // The reset frame can be skipped when this stream lags behind.
+        if hub.token_generation() != token_generation {
+            break;
+        }
         let next = tokio::select! {
             _ = cancel.cancelled() => break,
             read = reader.read(&mut discard) => match read {
@@ -764,6 +792,11 @@ async fn stream_events(
                         break;
                     }
                     continue;
+                }
+                Err(broadcast::error::RecvError::Lagged(_))
+                    if hub.token_generation() != token_generation =>
+                {
+                    break;
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => hub.hello().encode(),
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -1146,6 +1179,81 @@ mod tests {
         .await
         .unwrap();
         drop(write);
+    }
+
+    #[tokio::test]
+    async fn token_reset_closes_a_stream_that_missed_the_reset_frame() {
+        let (server, hub) = server().await;
+        let port = server.port();
+        let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(
+                format!(
+                    "GET /overlay/events?token=0123456789abcdef0123456789abcdef HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(read).lines();
+        while !timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .starts_with("data: ")
+        {}
+        // Nothing below yields, so the stream task lags past the reset frame.
+        hub.set_token("ffffffffffffffffffffffffffffffff");
+        for index in 0..300 {
+            hub.publish_item(json!({"kind":"danmaku","message":index.to_string()}));
+        }
+        timeout(Duration::from_secs(5), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                assert_ne!(line, "event: hello", "a revoked address received a replay");
+            }
+        })
+        .await
+        .expect("a revoked event stream stayed open");
+        drop(write);
+    }
+
+    #[tokio::test]
+    async fn token_reset_before_subscribe_rejects_the_stream() {
+        let hub = OverlayHub::new();
+        hub.set_token("0123456789abcdef0123456789abcdef");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        let request = Request::parse(&format!(
+            "GET /overlay/events?token=0123456789abcdef0123456789abcdef HTTP/1.1\r\nHost: 127.0.0.1:{port}"
+        ))
+        .unwrap();
+        let Route::Events(size, generation) = route(&request, port, &hub, &assets()) else {
+            panic!("the current token was rejected");
+        };
+        // The address is revoked after its check but before the subscription.
+        hub.set_token("ffffffffffffffffffffffffffffffff");
+        timeout(
+            Duration::from_secs(2),
+            stream_events(
+                accepted,
+                hub.clone(),
+                size,
+                generation,
+                false,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a revoked event stream stayed open");
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        assert!(!response.contains("data:"));
+        assert!(!hub.has_clients());
     }
 
     #[tokio::test]
