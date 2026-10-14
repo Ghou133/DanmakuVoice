@@ -966,7 +966,10 @@ mod tests {
                 requests.push(String::from_utf8(bytes).unwrap());
                 if reply == "hang" {
                     // Received, but the reply never arrives in time.
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        drop(socket);
+                    });
                     continue;
                 }
                 let body = reply.to_string();

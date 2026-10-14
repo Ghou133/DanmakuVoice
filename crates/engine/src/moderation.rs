@@ -17,7 +17,14 @@ const LIVE_API: &str = "https://api.live.bilibili.com";
 const ACCOUNT_API: &str = "https://api.bilibili.com";
 const SILENT_ROOT: &str = "/xlive/web-ucenter/v1/banned/";
 const BLACK_ROOT: &str = "/xlive/app-ucenter/v2/xbanned/banned/";
-const MAX_LIST_PAGES: u64 = 100;
+/// Pages read from one moderation list before its status counts as unknown.
+const STATUS_LIST_PAGES: u64 = 30;
+/// Each status list has its own time budget, so one slow list cannot hold
+/// back the rows that did answer.
+#[cfg(not(test))]
+const STATUS_LIST_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+#[cfg(test)]
+const STATUS_LIST_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 const BLACK_PAGE_SIZE: u64 = 10;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -200,18 +207,18 @@ impl ModerationClient {
             });
         }
         let muted = if room.can_moderate {
-            Some(self.silent_status(session, room.room_id, user_id).await?)
+            list_status(self.silent_status(session, room.room_id, user_id)).await?
         } else {
             None
         };
         let blacklisted = if room.can_blacklist {
-            Some(self.black_status(session, room, user_id).await?)
+            list_status(self.black_status(session, room, user_id)).await?
         } else {
             None
         };
         let can_manage_admins = room.anchor_id == session.user_id();
         let is_admin = if can_manage_admins {
-            Some(self.admin_status(session, room.room_id, user_id).await?)
+            list_status(self.admin_status(session, room.room_id, user_id)).await?
         } else {
             None
         };
@@ -234,7 +241,7 @@ impl ModerationClient {
         room: u64,
         user: u64,
     ) -> Result<bool, BiliError> {
-        for page in 1..=MAX_LIST_PAGES {
+        for page in 1..=STATUS_LIST_PAGES {
             let mut params = csrf_params(session);
             params.extend([
                 ("room_id".into(), room.to_string()),
@@ -265,7 +272,7 @@ impl ModerationClient {
         room: RoomPermission,
         user: u64,
     ) -> Result<bool, BiliError> {
-        for page in 1..=MAX_LIST_PAGES {
+        for page in 1..=STATUS_LIST_PAGES {
             let value = self
                 .get(
                     &format!("{BLACK_ROOT}GetBlackList"),
@@ -296,7 +303,7 @@ impl ModerationClient {
         room: u64,
         user: u64,
     ) -> Result<bool, BiliError> {
-        for page in 1..=MAX_LIST_PAGES {
+        for page in 1..=STATUS_LIST_PAGES {
             let value = self
                 .get(
                     "/xlive/app-ucenter/v1/roomAdmin/get_by_anchor",
@@ -552,6 +559,19 @@ pub(crate) async fn send_write(request: reqwest::RequestBuilder) -> Result<Value
         BiliError::Network => BiliError::Unconfirmed,
         error => error,
     })
+}
+
+/// Status rows are independent: a refused, malformed, oversized or slow list
+/// makes only its own row unknown (`None`), which the UI never treats as
+/// "not muted/blocked". An expired login still fails the whole view.
+async fn list_status(
+    read: impl Future<Output = Result<bool, BiliError>>,
+) -> Result<Option<bool>, BiliError> {
+    match tokio::time::timeout(STATUS_LIST_BUDGET, read).await {
+        Ok(Ok(found)) => Ok(Some(found)),
+        Ok(Err(BiliError::SessionExpired)) => Err(BiliError::SessionExpired),
+        Ok(Err(_)) | Err(_) => Ok(None),
+    }
 }
 
 pub fn validate_target(user: u64, account: u64) -> Result<(), BiliError> {
@@ -815,7 +835,10 @@ mod tests {
                 requests.push(String::from_utf8(bytes).unwrap());
                 if reply == "hang" {
                     // Received, but the reply never arrives in time.
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        drop(socket);
+                    });
                     continue;
                 }
                 let body = reply.to_string();
@@ -945,6 +968,60 @@ mod tests {
                 .iter()
                 .any(|request| request.contains("/x/relation"))
         );
+    }
+
+    #[tokio::test]
+    async fn one_failing_or_oversized_list_is_unknown_without_hiding_the_others() {
+        // A refused mute list leaves only mute unknown.
+        let (client, task) = fixture(vec![
+            nav(),
+            room(42),
+            json!({"code":403,"message":"fictional-private-response"}),
+            list(json!([{"uid":77}]), 1, 0),
+            json!({"code":0,"data":{"data":[],"page":{"total_page":1}}}),
+        ])
+        .await;
+        let view = client.inspect(&session(), 1, 77).await.unwrap();
+        assert_eq!(
+            (view.muted, view.blacklisted, view.is_admin),
+            (None, Some(true), Some(false))
+        );
+        assert_eq!(task.await.unwrap().len(), 5);
+        // An oversized list stops at the page budget instead of reading on.
+        let mut replies = vec![nav(), room(42)];
+        replies.extend((0..STATUS_LIST_PAGES).map(|_| list(json!([{"tuid":55}]), 9999, 9999)));
+        replies.push(list(json!([]), 0, 0));
+        replies.push(json!({"code":0,"data":{"data":[{"uid":77}]}}));
+        let (client, task) = fixture(replies).await;
+        let view = client.inspect(&session(), 1, 77).await.unwrap();
+        assert_eq!(
+            (view.muted, view.blacklisted, view.is_admin),
+            (None, Some(false), Some(true))
+        );
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len() as u64, STATUS_LIST_PAGES + 4);
+        // A list that does not answer in time is unknown too.
+        let (client, task) = fixture(vec![
+            nav(),
+            room(42),
+            list(json!([]), 0, 0),
+            json!("hang"),
+            json!({"code":0,"data":{"data":[]}}),
+        ])
+        .await;
+        let view = client.inspect(&session(), 1, 77).await.unwrap();
+        assert_eq!(
+            (view.muted, view.blacklisted, view.is_admin),
+            (Some(false), None, Some(false))
+        );
+        assert_eq!(task.await.unwrap().len(), 5);
+        // An expired login is never hidden as one unknown row.
+        let (client, task) = fixture(vec![nav(), room(42), json!({"code":-101})]).await;
+        assert_eq!(
+            client.inspect(&session(), 1, 77).await,
+            Err(BiliError::SessionExpired)
+        );
+        assert_eq!(task.await.unwrap().len(), 3);
     }
 
     #[tokio::test]
