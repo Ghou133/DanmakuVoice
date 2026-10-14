@@ -9,7 +9,7 @@ use crate::secrets::{self, SecretBytes, SecretError};
 use crate::tts::dobao::DoubaoDevice;
 use crate::tts::fish::{self, FishPlaybackSettings};
 use crate::voice_library::{ReferenceProfile, ReferenceRole};
-use rusqlite::{Connection, OptionalExtension, backup::Backup, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -47,8 +47,6 @@ pub enum StorageError {
     AssetReferenced(String),
     #[error("素材不存在：{0} [DV-S08]")]
     AssetMissing(String),
-    #[error("备份文件不属于此数据目录 [DV-S09]")]
-    InvalidBackupPath,
     #[error("服务连接不存在：{0} [DV-S10]")]
     ConnectionMissing(String),
     #[error("声音预设不存在：{0} [DV-S11]")]
@@ -525,23 +523,49 @@ impl DataStore {
         fs::create_dir_all(data_dir.join("assets"))?;
         fs::create_dir_all(data_dir.join("backups"))?;
         let db_path = data_dir.join("danmakuvoice.sqlite3");
-        let existed = db_path.metadata().is_ok_and(|metadata| metadata.len() > 0);
-        let mut conn = Connection::open(db_path)?;
+        let mut conn = Connection::open(&db_path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !(0..=CURRENT_SCHEMA).contains(&version) {
-            return Err(StorageError::UnsupportedSchema(version));
+        // Most opens (one per live event) only need this unlocked check.
+        let upgrade_backup = if schema_version(&conn)? < CURRENT_SCHEMA {
+            Self::upgrade(&mut conn, &data_dir, &db_path)?
+        } else {
+            None
+        };
+        Ok(Self {
+            data_dir,
+            conn,
+            upgrade_backup,
+        })
+    }
+
+    /// Create or upgrade the schema under SQLite's write lock. Another
+    /// instance may have finished either step after the unlocked version
+    /// check, so the version is read again inside the transaction.
+    fn upgrade(
+        conn: &mut Connection,
+        data_dir: &Path,
+        db_path: &Path,
+    ) -> Result<Option<PathBuf>, StorageError> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version = schema_version(&tx)?;
+        if version == CURRENT_SCHEMA {
+            return Ok(None);
         }
-        if version == 0 && existed {
-            let has_tables: bool = conn.query_row(
+        if version == 0 {
+            let has_tables: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%')",
                 [], |row| row.get(0))?;
             if has_tables {
                 return Err(StorageError::UnsupportedSchema(0));
             }
         }
-        let upgrade_backup = if existed && version > 0 && version < CURRENT_SCHEMA {
+        let upgrade_backup = if version > 0 {
+            // The backup API cannot read through a connection that holds a
+            // write transaction. The lock keeps the committed state fixed
+            // while a second connection copies it.
+            let source = Connection::open(db_path)?;
+            source.busy_timeout(Duration::from_secs(5))?;
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -550,124 +574,117 @@ impl DataStore {
                 "before-v{version}-to-v{CURRENT_SCHEMA}-{stamp}-{}.sqlite3",
                 Uuid::new_v4()
             ));
-            conn.backup(rusqlite::MAIN_DB, &path, None)?;
+            source.backup(rusqlite::MAIN_DB, &path, None)?;
             Some(path)
         } else {
             None
         };
-        if version < CURRENT_SCHEMA {
-            let tx = conn.transaction()?;
-            if version < 1 {
-                tx.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL);\
-                    CREATE TABLE assets (id TEXT PRIMARY KEY, name TEXT NOT NULL, relative_path TEXT NOT NULL UNIQUE,\
-                    sha256 TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes >= 0));")?;
-            }
-            if version < 2 {
-                tx.execute_batch("CREATE TABLE connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,\
-                    settings_json TEXT NOT NULL, protected_credential BLOB);\
-                    CREATE TABLE presets (id TEXT PRIMARY KEY, name TEXT NOT NULL, connection_id TEXT NOT NULL,\
-                    provider TEXT NOT NULL, settings_json TEXT NOT NULL,\
-                    FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE RESTRICT);\
-                    CREATE TABLE bindings (id TEXT PRIMARY KEY, platform TEXT NOT NULL, user_id TEXT,\
-                    legacy_user_name TEXT, preset_id TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\
-                    FOREIGN KEY(preset_id) REFERENCES presets(id) ON DELETE RESTRICT);")?;
-            }
-            if version < 3 {
-                tx.execute_batch("CREATE TABLE protected_secrets (key TEXT PRIMARY KEY, protected_value BLOB NOT NULL);")?;
-            }
-            if version < 4 {
-                tx.execute_batch("CREATE TABLE reference_profiles (connection_id TEXT NOT NULL, role_key TEXT NOT NULL,
-                    provider TEXT NOT NULL, profile_json TEXT NOT NULL,
-                    PRIMARY KEY(connection_id, role_key),
-                    FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE);")?;
-            } else if version == 4 {
-                // A development-only v4 stored managed copies but not the
-                // original path. Reuse an existing safe copy as a plain path;
-                // missing/unsafe copies remain only in the pre-upgrade backup.
-                // Never delete the old files during this migration.
-                tx.execute_batch("ALTER TABLE reference_profiles RENAME TO reference_profiles_v4;
-                    CREATE TABLE reference_profiles (connection_id TEXT NOT NULL, role_key TEXT NOT NULL,
-                    provider TEXT NOT NULL, profile_json TEXT NOT NULL,
-                    PRIMARY KEY(connection_id, role_key),
-                    FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE);")?;
-                let previous = {
-                    let mut statement = tx.prepare(
-                        "SELECT connection_id,role_key,provider,profile_json FROM reference_profiles_v4",
-                    )?;
-                    let rows = statement.query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    })?;
-                    rows.collect::<Result<Vec<_>, _>>()?
+        if version < 1 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, json TEXT NOT NULL);\
+                CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, name TEXT NOT NULL, relative_path TEXT NOT NULL UNIQUE,\
+                sha256 TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes >= 0));")?;
+        }
+        if version < 2 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,\
+                settings_json TEXT NOT NULL, protected_credential BLOB);\
+                CREATE TABLE IF NOT EXISTS presets (id TEXT PRIMARY KEY, name TEXT NOT NULL, connection_id TEXT NOT NULL,\
+                provider TEXT NOT NULL, settings_json TEXT NOT NULL,\
+                FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE RESTRICT);\
+                CREATE TABLE IF NOT EXISTS bindings (id TEXT PRIMARY KEY, platform TEXT NOT NULL, user_id TEXT,\
+                legacy_user_name TEXT, preset_id TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\
+                FOREIGN KEY(preset_id) REFERENCES presets(id) ON DELETE RESTRICT);")?;
+        }
+        if version < 3 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS protected_secrets (key TEXT PRIMARY KEY, protected_value BLOB NOT NULL);")?;
+        }
+        if version < 4 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS reference_profiles (connection_id TEXT NOT NULL, role_key TEXT NOT NULL,
+                provider TEXT NOT NULL, profile_json TEXT NOT NULL,
+                PRIMARY KEY(connection_id, role_key),
+                FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE);")?;
+        } else if version == 4 {
+            // A development-only v4 stored managed copies but not the
+            // original path. Reuse an existing safe copy as a plain path;
+            // missing/unsafe copies remain only in the pre-upgrade backup.
+            // Never delete the old files during this migration.
+            tx.execute_batch("ALTER TABLE reference_profiles RENAME TO reference_profiles_v4;
+                CREATE TABLE reference_profiles (connection_id TEXT NOT NULL, role_key TEXT NOT NULL,
+                provider TEXT NOT NULL, profile_json TEXT NOT NULL,
+                PRIMARY KEY(connection_id, role_key),
+                FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE);")?;
+            let previous = {
+                let mut statement = tx.prepare(
+                    "SELECT connection_id,role_key,provider,profile_json FROM reference_profiles_v4",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for (connection_id, role_key, provider, json) in previous {
+                let mut profile: serde_json::Value = serde_json::from_str(&json)?;
+                let fields = profile
+                    .as_object_mut()
+                    .ok_or(StorageError::InvalidReferenceProfile)?;
+                let audio_id = fields
+                    .remove("audio_id")
+                    .and_then(|value| value.as_str().map(str::to_owned));
+                let file_name: Option<String> = audio_id
+                    .as_deref()
+                    .map(|id| {
+                        tx.query_row(
+                            "SELECT file_name FROM reference_audio WHERE id=?1",
+                            params![id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                    })
+                    .transpose()?
+                    .flatten();
+                let Some(audio_path) = file_name
+                    .as_deref()
+                    .and_then(|name| existing_legacy_reference_path(data_dir, name))
+                else {
+                    continue;
                 };
-                for (connection_id, role_key, provider, json) in previous {
-                    let mut profile: serde_json::Value = serde_json::from_str(&json)?;
-                    let fields = profile
-                        .as_object_mut()
-                        .ok_or(StorageError::InvalidReferenceProfile)?;
-                    let audio_id = fields
-                        .remove("audio_id")
-                        .and_then(|value| value.as_str().map(str::to_owned));
-                    let file_name: Option<String> = audio_id
-                        .as_deref()
-                        .map(|id| {
-                            tx.query_row(
-                                "SELECT file_name FROM reference_audio WHERE id=?1",
-                                params![id],
-                                |row| row.get(0),
-                            )
-                            .optional()
-                        })
-                        .transpose()?
-                        .flatten();
-                    let Some(audio_path) = file_name
-                        .as_deref()
-                        .and_then(|name| existing_legacy_reference_path(&data_dir, name))
-                    else {
-                        continue;
-                    };
-                    fields.insert(
-                        "audio_path".into(),
-                        serde_json::Value::String(audio_path.to_string_lossy().into_owned()),
-                    );
-                    tx.execute(
-                        "INSERT INTO reference_profiles(connection_id,role_key,provider,profile_json) VALUES(?1,?2,?3,?4)",
-                        params![connection_id, role_key, provider, serde_json::to_string(&profile)?],
-                    )?;
-                }
-                tx.execute_batch("DROP TABLE reference_profiles_v4; DROP TABLE reference_audio;")?;
-            }
-            if version < 6 {
-                // Older development databases may report an earlier version
-                // while already carrying the column. Keep this upgrade
-                // idempotent for those databases as well as released v5.
-                let has_user_name: Option<i64> = tx
-                    .query_row(
-                        "SELECT 1 FROM pragma_table_info('bindings') WHERE name='user_name' LIMIT 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if has_user_name.is_none() {
-                    tx.execute_batch("ALTER TABLE bindings ADD COLUMN user_name TEXT;")?;
-                }
-                tx.execute_batch(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS bindings_exact_name ON bindings(platform,user_name)
-                     WHERE user_id IS NULL AND user_name IS NOT NULL;",
+                fields.insert(
+                    "audio_path".into(),
+                    serde_json::Value::String(audio_path.to_string_lossy().into_owned()),
+                );
+                tx.execute(
+                    "INSERT INTO reference_profiles(connection_id,role_key,provider,profile_json) VALUES(?1,?2,?3,?4)",
+                    params![connection_id, role_key, provider, serde_json::to_string(&profile)?],
                 )?;
             }
-            tx.pragma_update(None, "user_version", CURRENT_SCHEMA)?;
-            tx.commit()?;
+            tx.execute_batch("DROP TABLE reference_profiles_v4; DROP TABLE reference_audio;")?;
         }
-        Ok(Self {
-            data_dir,
-            conn,
-            upgrade_backup,
-        })
+        if version < 6 {
+            // Older development databases may report an earlier version
+            // while already carrying the column. Keep this upgrade
+            // idempotent for those databases as well as released v5.
+            let has_user_name: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info('bindings') WHERE name='user_name' LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if has_user_name.is_none() {
+                tx.execute_batch("ALTER TABLE bindings ADD COLUMN user_name TEXT;")?;
+            }
+            tx.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS bindings_exact_name ON bindings(platform,user_name)
+                 WHERE user_id IS NULL AND user_name IS NOT NULL;",
+            )?;
+        }
+        tx.pragma_update(None, "user_version", CURRENT_SCHEMA)?;
+        tx.commit()?;
+        Ok(upgrade_backup)
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -740,25 +757,44 @@ impl DataStore {
         &mut self,
         write: impl FnOnce(&mut Self) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        self.conn.execute_batch("SAVEPOINT application_write")?;
-        let result = write(self).and_then(|value| {
+        self.in_savepoint("application_write", write)
+    }
+
+    /// The one savepoint helper for writes that call other store methods.
+    /// A failure, including a failed RELEASE (the commit of an outermost
+    /// savepoint), rolls the savepoint back. If an outermost savepoint still
+    /// cannot be closed, the whole transaction is rolled back so the
+    /// connection never stays inside an abandoned transaction.
+    fn in_savepoint<T>(
+        &mut self,
+        name: &'static str,
+        write: impl FnOnce(&mut Self) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let outermost = self.conn.is_autocommit();
+        self.conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+        let write = match write(self).and_then(|value| {
             self.conn
-                .execute_batch("RELEASE SAVEPOINT application_write")?;
+                .execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
             Ok(value)
-        });
-        match result {
-            Ok(value) => Ok(value),
-            Err(write) => {
-                if let Err(rollback) = self.conn.execute_batch(
-                    "ROLLBACK TO SAVEPOINT application_write; RELEASE SAVEPOINT application_write",
-                ) {
-                    return Err(StorageError::WriteRollback {
-                        write: Box::new(write),
-                        rollback,
-                    });
-                }
+        }) {
+            Ok(value) => return Ok(value),
+            Err(write) => write,
+        };
+        match self.conn.execute_batch(&format!(
+            "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
+        )) {
+            Ok(()) => Err(write),
+            Err(_)
+                if outermost
+                    && (self.conn.is_autocommit()
+                        || self.conn.execute_batch("ROLLBACK").is_ok()) =>
+            {
                 Err(write)
             }
+            Err(rollback) => Err(StorageError::WriteRollback {
+                write: Box::new(write),
+                rollback,
+            }),
         }
     }
 
@@ -1539,27 +1575,28 @@ impl DataStore {
     }
 
     pub fn delete_preset(&mut self, id: &str) -> Result<(), StorageError> {
-        let mut rules = self.load_rules()?;
-        if rules.default_preset_id.as_deref() == Some(id) {
-            return Err(StorageError::PresetIsDefault);
-        }
-        let references: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM bindings WHERE preset_id=?1",
-            params![id],
-            |row| row.get(0),
-        )?;
-        if references > 0 {
-            return Err(StorageError::PresetReferenced(references));
-        }
-        self.conn.execute_batch("SAVEPOINT delete_preset")?;
-        let result = (|| {
-            let changed = self
+        // Check the default choice and bindings in the same transaction as
+        // the delete, so another connection cannot add a reference between.
+        self.in_savepoint("delete_preset", |store| {
+            let mut rules = store.load_rules()?;
+            if rules.default_preset_id.as_deref() == Some(id) {
+                return Err(StorageError::PresetIsDefault);
+            }
+            let references: i64 = store.conn.query_row(
+                "SELECT COUNT(*) FROM bindings WHERE preset_id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            if references > 0 {
+                return Err(StorageError::PresetReferenced(references));
+            }
+            let changed = store
                 .conn
                 .execute("DELETE FROM presets WHERE id=?1", params![id])?;
             if changed == 0 {
                 return Err(StorageError::PresetMissing(id.to_owned()));
             }
-            self.conn.execute(
+            store.conn.execute(
                 "DELETE FROM settings WHERE key=?1",
                 params![dots_settings_key(id)],
             )?;
@@ -1568,22 +1605,10 @@ impl DataStore {
                 .preferred_presets
                 .retain(|_, preset_id| preset_id != id);
             if rules.preferred_presets.len() != remembered {
-                self.save_rules(&rules)?;
+                store.save_rules(&rules)?;
             }
             Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.conn.execute_batch("RELEASE SAVEPOINT delete_preset")?;
-                Ok(())
-            }
-            Err(error) => {
-                self.conn.execute_batch(
-                    "ROLLBACK TO SAVEPOINT delete_preset; RELEASE SAVEPOINT delete_preset",
-                )?;
-                Err(error)
-            }
-        }
+        })
     }
 
     pub fn save_binding(&mut self, id: &str, binding: &VoiceBinding) -> Result<(), StorageError> {
@@ -1754,34 +1779,20 @@ impl DataStore {
         {
             return Err(StorageError::InvalidReferenceProfile);
         }
-        self.conn.execute_batch("SAVEPOINT save_dots_voice")?;
-        let result = (|| {
-            self.save_preset(preset)?;
-            self.save_reference_profile(profile)?;
+        self.in_savepoint("save_dots_voice", |store| {
+            store.save_preset(preset)?;
+            store.save_reference_profile(profile)?;
             if make_preferred {
-                let mut rules = self.load_rules()?;
+                let mut rules = store.load_rules()?;
                 rules.default_preset_id = Some(preset.id.clone());
                 rules.default_preset_explicitly_cleared = false;
                 rules
                     .preferred_presets
                     .insert(preset.provider, preset.id.clone());
-                self.save_rules(&rules)?;
+                store.save_rules(&rules)?;
             }
             Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.conn
-                    .execute_batch("RELEASE SAVEPOINT save_dots_voice")?;
-                Ok(())
-            }
-            Err(error) => {
-                self.conn.execute_batch(
-                    "ROLLBACK TO SAVEPOINT save_dots_voice; RELEASE SAVEPOINT save_dots_voice",
-                )?;
-                Err(error)
-            }
-        }
+        })
     }
 
     /// Remember the user's original reference file path, text and languages
@@ -2035,21 +2046,14 @@ impl DataStore {
         // policy that accounts for both lifetimes.
         Ok(())
     }
+}
 
-    /// Restore a SQLite snapshot from this store's backup directory. The
-    /// caller must stop any live engine tasks before invoking this method.
-    pub fn restore_backup(&mut self, backup_path: &Path) -> Result<(), StorageError> {
-        let expected_parent = self.data_dir.join("backups").canonicalize()?;
-        let path = backup_path.canonicalize()?;
-        if path.parent() != Some(expected_parent.as_path()) {
-            return Err(StorageError::InvalidBackupPath);
-        }
-        let source =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let backup = Backup::new(&source, &mut self.conn)?;
-        backup.run_to_completion(64, Duration::from_millis(5), None)?;
-        Ok(())
+fn schema_version(conn: &Connection) -> Result<i64, StorageError> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if !(0..=CURRENT_SCHEMA).contains(&version) {
+        return Err(StorageError::UnsupportedSchema(version));
     }
+    Ok(version)
 }
 
 fn provider_name(provider: Provider) -> &'static str {
@@ -2651,6 +2655,92 @@ mod tests {
     }
 
     #[test]
+    fn failed_savepoint_release_never_leaves_an_open_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("reference.wav");
+        fs::write(&original, b"RIFF reference recording WAVE").unwrap();
+        let mut store = DataStore::open(temp.path().join("app")).unwrap();
+        store
+            .save_connection(&ServiceConnection {
+                id: "dots".into(),
+                name: "dots".into(),
+                settings: ConnectionSettings::Dots {
+                    endpoint: "http://127.0.0.1:9881".into(),
+                    timeout_secs: 30,
+                },
+                has_credential: false,
+            })
+            .unwrap();
+        let preset = VoicePreset {
+            id: "voice".into(),
+            name: "声音".into(),
+            connection_id: "dots".into(),
+            provider: Provider::Dots,
+            voice_id: "角色 A".into(),
+            speed: 1.0,
+            volume: 1.0,
+            sovits: None,
+        };
+        store.save_preset(&preset).unwrap();
+        // A deferred foreign-key violation makes the outermost RELEASE
+        // (the commit) fail while the savepoint is still open.
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE release_probe (preset_id TEXT REFERENCES presets(id)
+                     DEFERRABLE INITIALLY DEFERRED);
+                 CREATE TRIGGER release_probe_delete AFTER DELETE ON presets BEGIN
+                     INSERT INTO release_probe VALUES ('missing-preset'); END;
+                 CREATE TRIGGER release_probe_update AFTER UPDATE ON presets BEGIN
+                     INSERT INTO release_probe VALUES ('missing-preset'); END;",
+            )
+            .unwrap();
+        let other = DataStore::open(temp.path().join("app")).unwrap();
+
+        assert!(matches!(
+            store.delete_preset("voice"),
+            Err(StorageError::Sql(_))
+        ));
+        assert!(store.conn.is_autocommit());
+        assert_eq!(other.presets().unwrap(), vec![preset.clone()]);
+
+        let profile = ReferenceProfile {
+            connection_id: "dots".into(),
+            role: ReferenceRole::Dots {
+                role: "角色 A".into(),
+            },
+            audio_path: original.to_string_lossy().into_owned(),
+            reference_text: String::new(),
+            reference_language: String::new(),
+            text_language: String::new(),
+            text_free: false,
+        };
+        let mut renamed = preset.clone();
+        renamed.name = "改名".into();
+        assert!(matches!(
+            store.save_dots_voice_with_preference(&renamed, &profile, true),
+            Err(StorageError::Sql(_))
+        ));
+        assert!(store.conn.is_autocommit());
+        assert_eq!(other.presets().unwrap(), vec![preset.clone()]);
+        assert!(other.reference_profiles("dots").unwrap().is_empty());
+
+        assert!(
+            store
+                .with_savepoint(|store| store.save_preset(&renamed))
+                .is_err()
+        );
+        assert!(store.conn.is_autocommit());
+        assert_eq!(other.presets().unwrap(), vec![preset]);
+
+        // Later writes commit normally and are visible to other connections.
+        let mut rules = RuleSet::default();
+        rules.templates.danmaku = "之后的写入".into();
+        store.save_rules(&rules).unwrap();
+        assert_eq!(other.load_rules().unwrap(), rules);
+    }
+
+    #[test]
     fn original_reference_path_is_remembered_and_missing_file_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("selected.wav");
@@ -3145,7 +3235,53 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_is_backed_up_and_can_restore() {
+    fn first_start_waits_for_another_instance_creating_the_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let template = DataStore::open(temp.path().join("template")).unwrap();
+        let schema = template
+            .conn
+            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(template);
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        // Another instance has switched the new file to WAL and is creating
+        // the schema; its transaction is still open when this one starts.
+        let other = Connection::open(data_dir.join("danmakuvoice.sqlite3")).unwrap();
+        other
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; CREATE TABLE warmup(x); DROP TABLE warmup;
+                 BEGIN IMMEDIATE;",
+            )
+            .unwrap();
+        for sql in &schema {
+            other.execute_batch(sql).unwrap();
+        }
+        other
+            .pragma_update(None, "user_version", CURRENT_SCHEMA)
+            .unwrap();
+        let opening = std::thread::spawn({
+            let data_dir = data_dir.clone();
+            move || DataStore::open(data_dir).map(|store| store.upgrade_backup().is_none())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        other.execute_batch("COMMIT").unwrap();
+        assert!(opening.join().unwrap().unwrap());
+        let store = DataStore::open(&data_dir).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA);
+        assert_eq!(store.load_rules().unwrap(), RuleSet::default());
+    }
+
+    #[test]
+    fn upgrade_backup_keeps_the_previous_schema_for_manual_recovery() {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("data");
         fs::create_dir_all(&data_dir).unwrap();
@@ -3154,9 +3290,10 @@ mod tests {
         conn.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL);\
             CREATE TABLE assets (id TEXT PRIMARY KEY, name TEXT NOT NULL, relative_path TEXT NOT NULL UNIQUE,\
             sha256 TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes >= 0));\
+            INSERT INTO settings(key,json) VALUES('marker','{}');\
             PRAGMA user_version = 1;").unwrap();
         drop(conn);
-        let mut store = DataStore::open(&data_dir).unwrap();
+        let store = DataStore::open(&data_dir).unwrap();
         let snapshot = store.upgrade_backup().unwrap().to_path_buf();
         assert!(snapshot.exists());
         let version: i64 = store
@@ -3164,12 +3301,20 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA);
-        store.restore_backup(&snapshot).unwrap();
-        let restored: i64 = store
-            .conn
+        // The snapshot is only for manual recovery; nothing restores it.
+        let backup =
+            Connection::open_with_flags(&snapshot, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let previous: i64 = backup
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(restored, 1);
+        assert_eq!(previous, 1);
+        let marker: String = backup
+            .query_row("SELECT json FROM settings WHERE key='marker'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(marker, "{}");
     }
 
     #[cfg(windows)]
