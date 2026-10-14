@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
     sync::{Mutex, mpsc},
-    time::{Instant, timeout},
+    time::{Instant, sleep_until, timeout},
 };
 use tokio_tungstenite::{
     connect_async_with_config,
@@ -244,6 +244,7 @@ struct Inner {
     endpoint: Url,
     gate: SharedGate,
     interval: Duration,
+    idle_timeout: Duration,
     pause: Arc<AtomicU8>,
 }
 
@@ -288,6 +289,7 @@ impl DoubaoClient {
                 endpoint,
                 gate,
                 interval,
+                idle_timeout: IDLE_TIMEOUT,
                 pause,
             }),
         })
@@ -337,21 +339,14 @@ impl DoubaoClient {
                     }
                 }
                 gate.next_start = Some(Instant::now() + inner.interval);
-                // The guard covers the entire synthesis, not just connection setup.
-                let result = timeout(
-                    Duration::from_secs(inner.config.timeout_secs),
-                    run_request(&inner, &text, &sender, &cancellation),
-                )
-                .await;
+                // The guard covers the entire synthesis, not just connection
+                // setup. The configured limit applies until the first audio
+                // frame: later frames are read only as fast as they play, so
+                // a long utterance is bounded by the idle timeout instead.
+                let first_audio = Instant::now() + Duration::from_secs(inner.config.timeout_secs);
+                let result = run_request(&inner, &text, &sender, &cancellation, first_audio).await;
                 drop(gate);
-                match result {
-                    Ok(value) => value,
-                    Err(_) => Err(TtsError::Network {
-                        service: SERVICE,
-                        stage: "",
-                        reason: "合成总时间超过上限",
-                    }),
-                }
+                result
             },
         ))
     }
@@ -361,6 +356,13 @@ fn configuration(reason: &'static str) -> TtsError {
     TtsError::Configuration {
         service: SERVICE,
         reason,
+    }
+}
+fn first_audio_timeout() -> TtsError {
+    TtsError::Network {
+        service: SERVICE,
+        stage: "",
+        reason: "连接或接收超时",
     }
 }
 fn protocol(reason: &'static str) -> TtsError {
@@ -408,6 +410,7 @@ async fn run_request(
     text: &str,
     sender: &mpsc::Sender<Result<Vec<u8>, TtsError>>,
     cancellation: &CancellationToken,
+    first_audio: Instant,
 ) -> Result<(), TtsError> {
     let url = websocket_url(inner);
     let mut request = url
@@ -437,6 +440,7 @@ async fn run_request(
     let connected = tokio::select! {
         biased;
         _ = cancellation.cancelled() => return Ok(()),
+        _ = sleep_until(first_audio) => return Err(first_audio_timeout()),
         result = timeout(CONNECT_TIMEOUT, connect_async_with_config(request, Some(ws_config), false)) => result,
     };
     let (mut socket, _) = match connected {
@@ -457,6 +461,7 @@ async fn run_request(
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Ok(()),
+            _ = sleep_until(first_audio) => return Err(first_audio_timeout()),
             result = socket.send(Message::Text(event.to_string().into())) => {
                 result.map_err(|error| ws_error(inner, error, "发送"))?;
             },
@@ -464,22 +469,29 @@ async fn run_request(
     }
     let mut adts = AdtsDecoder::default();
     loop {
+        // Time spent while playback takes earlier frames is not counted.
+        let idle = Instant::now() + inner.idle_timeout;
+        let awaiting_first_audio = !adts.has_audio && first_audio < idle;
         let message = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Ok(()),
-            result = timeout(IDLE_TIMEOUT, socket.next()) => result,
-        };
-        let message = match message {
-            Err(_) => {
-                return Err(TtsError::Network {
-                    service: SERVICE,
-                    stage: "接收",
-                    reason: "服务响应超时",
+            _ = sleep_until(if awaiting_first_audio { first_audio } else { idle }) => {
+                return Err(if awaiting_first_audio {
+                    first_audio_timeout()
+                } else {
+                    TtsError::Network {
+                        service: SERVICE,
+                        stage: "接收",
+                        reason: "服务响应超时",
+                    }
                 });
             }
-            Ok(Some(Ok(message))) => message,
-            Ok(Some(Err(error))) => return Err(ws_error(inner, error, "接收")),
-            Ok(None) => return Err(protocol("连接在完成事件之前关闭")),
+            result = socket.next() => result,
+        };
+        let message = match message {
+            Some(Ok(message)) => message,
+            Some(Err(error)) => return Err(ws_error(inner, error, "接收")),
+            None => return Err(protocol("连接在完成事件之前关闭")),
         };
         match message {
             Message::Text(text) => {
@@ -847,6 +859,111 @@ mod tests {
         );
         DoubaoClient::resume_after_confirmed_login();
         assert_eq!(client.pause_reason(), None);
+    }
+
+    fn local_client(listener: &TcpListener, timeout_secs: u64) -> DoubaoClient {
+        let endpoint = Url::parse(&format!(
+            "ws://{}/samantha/audio/tts",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let mut config = config();
+        config.timeout_secs = timeout_secs;
+        DoubaoClient::with_endpoint(
+            config,
+            endpoint,
+            Arc::new(Mutex::new(GateState::default())),
+            Arc::new(AtomicU8::new(0)),
+            Duration::ZERO,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn audio_streamed_for_longer_than_the_timeout_is_not_cut_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(&listener, 1);
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            for _ in 0..2 {
+                socket.next().await.unwrap().unwrap();
+            }
+            // 1.5 s of steady audio against a 1 s first-audio limit.
+            for _ in 0..6 {
+                socket
+                    .send(Message::Binary(FRAME.to_vec().into()))
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            socket
+                .send(Message::Text(r#"{"event":"finish"}"#.into()))
+                .await
+                .unwrap();
+        });
+        let mut stream = client.stream("长文本", &CancellationToken::new()).unwrap();
+        let mut frames = 0;
+        while let Some(packet) = stream.recv().await {
+            assert_eq!(packet.unwrap(), FRAME);
+            frames += 1;
+        }
+        assert_eq!(frames, 6);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_first_audio_fails_at_the_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(&listener, 1);
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            for _ in 0..2 {
+                socket.next().await.unwrap().unwrap();
+            }
+            let _ = released.await;
+        });
+        let mut stream = client.stream("测试", &CancellationToken::new()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+            .await
+            .expect("first-audio deadline was not applied")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("连接或接收超时"), "{error}");
+        let _ = release.send(());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_audio_fails_after_the_idle_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = local_client(&listener, 60);
+        Arc::get_mut(&mut client.inner).unwrap().idle_timeout = Duration::from_millis(300);
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            for _ in 0..2 {
+                socket.next().await.unwrap().unwrap();
+            }
+            socket
+                .send(Message::Binary(FRAME.to_vec().into()))
+                .await
+                .unwrap();
+            let _ = released.await;
+        });
+        let mut stream = client.stream("测试", &CancellationToken::new()).unwrap();
+        assert_eq!(stream.recv().await.unwrap().unwrap(), FRAME);
+        let error = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+            .await
+            .expect("stalled audio was not cut off")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("服务响应超时"), "{error}");
+        let _ = release.send(());
+        server.await.unwrap();
     }
 
     #[tokio::test]

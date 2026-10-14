@@ -11,8 +11,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    AudioEncoding, AudioStream, TtsError, confirmed_loopback_offline, forward_wav_response,
-    network_error, network_error_at, read_limited, spawn_stream,
+    AudioEncoding, AudioStream, ResponseTimeouts, TtsError, confirmed_loopback_offline,
+    forward_wav_response, network_error, network_error_at, read_limited, response_timeout,
+    spawn_stream,
 };
 
 const SERVICE: &str = "GPT-SoVITS";
@@ -158,20 +159,32 @@ pub struct SovitsClient {
     config: SovitsConfig,
     base: Url,
     http: Client,
+    timeouts: ResponseTimeouts,
 }
 
 impl SovitsClient {
     pub fn new(config: SovitsConfig) -> Result<Self, TtsError> {
+        let timeouts = ResponseTimeouts::configured(config.timeout_secs);
+        Self::with_timeouts(config, timeouts)
+    }
+
+    fn with_timeouts(config: SovitsConfig, timeouts: ResponseTimeouts) -> Result<Self, TtsError> {
         validate_config(&config)?;
         let base = normalize_base(&config.endpoint)?;
+        // No total timeout: a long utterance is read at playback speed.
         let http = Client::builder()
             .no_proxy()
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(config.timeout_secs))
+            .read_timeout(timeouts.read_limit())
             .build()
             .map_err(|_| configuration("无法创建 HTTP 客户端"))?;
-        Ok(Self { config, base, http })
+        Ok(Self {
+            config,
+            base,
+            http,
+            timeouts,
+        })
     }
 
     /// Fresh capability negotiation. A 404 or 405 means standard `api_v2.py`.
@@ -232,12 +245,20 @@ impl SovitsClient {
         let config = self.config.clone();
         let client = self.http.clone();
         let base = self.base.clone();
+        let timeouts = self.timeouts;
         Ok(spawn_stream(
             AudioEncoding::Wav,
             parent,
             move |sender, cancellation| async move {
-                let response = send_tts(&client, &base, &config, request, &cancellation).await?;
-                forward_wav_response(response, &sender, &cancellation, SERVICE).await
+                let deadline = timeouts.start();
+                let response = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep_until(deadline.next_wait(false)) =>
+                        return Err(response_timeout(SERVICE, false)),
+                    result = send_tts(&client, &base, &config, request, &cancellation) => result?,
+                };
+                forward_wav_response(response, &sender, &cancellation, SERVICE, deadline).await
             },
         ))
     }
@@ -660,6 +681,39 @@ mod tests {
         assert_eq!(body["text_split_method"], "cut0");
         assert_eq!(body["streaming_mode"], true);
         assert!(body.get("gpt_weights_path").is_none());
+    }
+
+    #[tokio::test]
+    async fn wav_arriving_for_longer_than_the_timeout_is_not_cut_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            chunked_start(&mut socket, "audio/wav").await;
+            chunk(&mut socket, &wav_fixture()[..44]).await;
+            for sample in 1..=12u8 {
+                tokio::time::sleep(Duration::from_millis(75)).await;
+                chunk(&mut socket, &[sample, 0]).await;
+            }
+            chunked_end(&mut socket).await;
+        });
+        let limit = Duration::from_millis(300);
+        let client = SovitsClient::with_timeouts(
+            SovitsConfig::new(format!("http://{address}"), "server/voice.wav"),
+            ResponseTimeouts {
+                first_audio: limit,
+                idle: limit,
+            },
+        )
+        .unwrap();
+        let mut audio = client.stream("你好", &CancellationToken::new()).unwrap();
+        let mut output = Vec::new();
+        while let Some(next) = audio.recv().await {
+            output.extend_from_slice(&next.unwrap());
+        }
+        assert_eq!(output.len(), 44 + 24);
+        server.await.unwrap();
     }
 
     #[tokio::test]

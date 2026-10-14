@@ -288,7 +288,9 @@ impl PreparedPlayback {
     /// Read the selected connection and protected credential once. Sound asset
     /// IDs are resolved now, so later rule, connection or asset edits cannot
     /// redirect a queued job. `dobao_device` must be stable and persisted by
-    /// the caller; no device ID is regenerated for each utterance.
+    /// the caller; no device ID is regenerated for each utterance. A
+    /// connection's timeout limits the wait for each request's first audio,
+    /// never the length of an utterance that is still streaming.
     pub fn from_store(
         store: &DataStore,
         preview: &RulePreview,
@@ -341,7 +343,7 @@ impl PreparedPlayback {
                         } else {
                             config.voice = Some(preset.voice_id.clone());
                         }
-                        config.timeout_secs = timeout_secs.min(30);
+                        config.timeout_secs = timeout_secs;
                         (
                             PreparedProvider::Dots(DotsClient::new(config)?),
                             preset.speed,
@@ -410,7 +412,7 @@ impl PreparedPlayback {
                             }
                         }
                         config.speed_factor = preset.speed;
-                        config.timeout_secs = timeout_secs.min(30);
+                        config.timeout_secs = timeout_secs;
                         (PreparedProvider::GptSovits(SovitsClient::new(config)?), 1.0)
                     }
                     ConnectionSettings::FishAudio { timeout_secs } => {
@@ -429,7 +431,7 @@ impl PreparedPlayback {
                         )?;
                         config.voice_id = preset.voice_id.clone();
                         config.speed = preset.speed;
-                        config.timeout_secs = timeout_secs.min(30);
+                        config.timeout_secs = timeout_secs;
                         (PreparedProvider::Doubao(DoubaoClient::new(config)?), 1.0)
                     }
                 };
@@ -547,7 +549,7 @@ fn fish_config_from_store(
     // `streaming: false` is ignored by the client.
     config.apply_playback_settings(&store.fish_audio_settings(connection_id)?);
     config.speed = preset.speed;
-    config.timeout_secs = timeout_secs.min(30);
+    config.timeout_secs = timeout_secs;
     Ok(config)
 }
 
@@ -2638,7 +2640,8 @@ mod tests {
         assert_eq!(config.volume_db, -4.0);
         assert_eq!(config.temperature, 0.3);
         assert_eq!(config.top_p, 0.6);
-        assert_eq!(config.timeout_secs, 30);
+        // The saved limit is used as is, not silently capped.
+        assert_eq!(config.timeout_secs, 75);
         assert!(!format!("{config:?}").contains("sk-test-only-secret"));
     }
 

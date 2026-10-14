@@ -11,16 +11,86 @@ pub mod dots;
 pub mod fish;
 pub mod sovits;
 
-use std::future::Future;
+use std::{future::Future, time::Duration};
 
 use thiserror::Error;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 /// Maximum queued network chunks per synthesis request.
 pub const STREAM_CHANNEL_CAPACITY: usize = 8;
 /// A large HTTP packet is split before entering the bounded channel.
 pub const MAX_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Time limits for one HTTP synthesis request. `first_audio` bounds the whole
+/// wait for the response and its first audio bytes. The body is then read only
+/// as fast as it plays (bounded channel, FFmpeg pipes and a two-second device
+/// ring), so a total limit would cut every long utterance; afterwards only a
+/// wait longer than `idle` for the next packet fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResponseTimeouts {
+    pub first_audio: Duration,
+    pub idle: Duration,
+}
+
+impl ResponseTimeouts {
+    /// Both limits use the connection's configured timeout.
+    pub(crate) fn configured(timeout_secs: u64) -> Self {
+        let limit = Duration::from_secs(timeout_secs);
+        Self {
+            first_audio: limit,
+            idle: limit,
+        }
+    }
+
+    /// Per-read limit for the HTTP client. It also bounds the service's
+    /// non-synthesis requests and is never tighter than an explicit limit.
+    pub(crate) fn read_limit(self) -> Duration {
+        self.first_audio.max(self.idle)
+    }
+
+    pub(crate) fn start(self) -> ResponseDeadline {
+        ResponseDeadline {
+            first_audio: Instant::now() + self.first_audio,
+            idle: self.idle,
+        }
+    }
+}
+
+/// The running limits of one request, started before it is sent.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResponseDeadline {
+    first_audio: Instant,
+    idle: Duration,
+}
+
+impl ResponseDeadline {
+    /// End of the next network wait. Time spent waiting for playback to take
+    /// earlier audio is not counted.
+    pub(crate) fn next_wait(&self, audio_received: bool) -> Instant {
+        if audio_received {
+            Instant::now() + self.idle
+        } else {
+            self.first_audio
+        }
+    }
+}
+
+pub(crate) fn response_timeout(service: &'static str, audio_received: bool) -> TtsError {
+    TtsError::Network {
+        service,
+        stage: audio_stage(audio_received),
+        reason: "连接或接收超时",
+    }
+}
+
+fn audio_stage(received: bool) -> &'static str {
+    if received {
+        "收到部分音频后"
+    } else {
+        "尚未收到音频时"
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AudioEncoding {
@@ -216,12 +286,7 @@ pub(crate) fn network_error(
     error: &reqwest::Error,
     received: bool,
 ) -> TtsError {
-    let stage = if received {
-        "收到部分音频后"
-    } else {
-        "尚未收到音频时"
-    };
-    network_error_at(service, error, stage)
+    network_error_at(service, error, audio_stage(received))
 }
 
 pub(crate) fn network_error_at(
@@ -301,6 +366,7 @@ pub(crate) async fn forward_wav_response(
     sender: &mpsc::Sender<Result<Vec<u8>, TtsError>>,
     cancellation: &CancellationToken,
     service: &'static str,
+    deadline: ResponseDeadline,
 ) -> Result<(), TtsError> {
     use futures_util::StreamExt;
 
@@ -330,6 +396,8 @@ pub(crate) async fn forward_wav_response(
         let packet = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Ok(()),
+            _ = tokio::time::sleep_until(deadline.next_wait(emitted)) =>
+                return Err(response_timeout(service, emitted)),
             result = packets.next() => result,
         };
         let Some(packet) = packet else { break };
