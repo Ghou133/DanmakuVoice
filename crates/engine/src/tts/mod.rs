@@ -1,8 +1,9 @@
 //! Transport clients for the supported speech services.
 //!
 //! A stream owns one synthesis request. Dropping it closes the request and its
-//! bounded channel. The audio worker must still discard samples tagged with an
-//! older playback generation after a skip or stop.
+//! bounded channel. Decoded samples are tagged with their job id; after a skip
+//! or stop the output callback discards samples of a job that is no longer
+//! active.
 
 pub mod dobao;
 pub mod dobao_auth;

@@ -543,10 +543,9 @@ fn fish_config_from_store(
         secret.as_str().map_err(StorageError::from)?.to_owned(),
         preset.voice_id.clone(),
     );
+    // Product playback is always incremental; a persisted legacy
+    // `streaming: false` is ignored by the client.
     config.apply_playback_settings(&store.fish_audio_settings(connection_id)?);
-    // Product playback is always incremental. Persisted legacy `false` is
-    // ignored now that the user-facing mode switch has been removed.
-    config.streaming = true;
     config.speed = preset.speed;
     config.timeout_secs = timeout_secs.min(30);
     Ok(config)
@@ -942,7 +941,6 @@ mod tests {
         let executor = PlaybackExecutor::new(writer.clone(), path).unwrap();
         let job = SpeechJob {
             id: 1,
-            generation: 0,
             origin: crate::scheduler::JobOrigin::Audition,
             preview,
             prepared: Some(prepared),
@@ -2408,7 +2406,7 @@ mod tests {
             .await
             .unwrap();
         timeout(Duration::from_secs(5), async {
-            while !writer.has_queued_audio(id) {
+            while writer.progress().job_id != id || writer.progress().queued_ms == 0 {
                 sleep(Duration::from_millis(10)).await;
             }
         })
@@ -2640,7 +2638,6 @@ mod tests {
         assert_eq!(config.volume_db, -4.0);
         assert_eq!(config.temperature, 0.3);
         assert_eq!(config.top_p, 0.6);
-        assert!(config.streaming);
         assert_eq!(config.timeout_secs, 30);
         assert!(!format!("{config:?}").contains("sk-test-only-secret"));
     }

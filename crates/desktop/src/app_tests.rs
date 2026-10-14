@@ -3408,7 +3408,6 @@ fn overlay_new_session_rejects_previous_stream_audio_still_playing_locally() {
         event.observed_at_ms = at;
         SpeechJob {
             id: 7,
-            generation: 0,
             origin,
             preview: RulePreview {
                 event,

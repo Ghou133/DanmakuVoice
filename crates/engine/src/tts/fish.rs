@@ -18,7 +18,6 @@ const SERVICE: &str = "Fish Audio";
 const TTS_URL: &str = "https://api.fish.audio/v1/tts";
 const CREDIT_URL: &str = "https://api.fish.audio/wallet/self/api-credit";
 const SAMPLE_RATE: u32 = 44_100;
-const MAX_BUFFERED_PCM_BYTES: usize = 64 * 1024 * 1024;
 
 pub const API_KEYS_URL: &str = "https://fish.audio/zh-CN/app/api-keys/";
 pub const DISCOVERY_URL: &str = "https://fish.audio/zh-CN/app/discovery/";
@@ -135,6 +134,8 @@ pub struct FishPlaybackSettings {
     pub volume_db: f32,
     pub temperature: f32,
     pub top_p: f32,
+    /// Legacy mode switch, still stored and migrated so older settings load.
+    /// Playback always streams PCM and ignores this value.
     pub streaming: bool,
 }
 
@@ -183,7 +184,6 @@ pub struct FishConfig {
     pub temperature: f32,
     pub top_p: f32,
     pub normalize_text: bool,
-    pub streaming: bool,
     pub timeout_secs: u64,
 }
 
@@ -202,7 +202,6 @@ impl FishConfig {
             temperature: 0.7,
             top_p: 0.7,
             normalize_text: true,
-            streaming: true,
             timeout_secs: 180,
         }
     }
@@ -213,7 +212,6 @@ impl FishConfig {
         self.volume_db = settings.volume_db;
         self.temperature = settings.temperature;
         self.top_p = settings.top_p;
-        self.streaming = settings.streaming;
     }
 }
 
@@ -230,7 +228,6 @@ impl fmt::Debug for FishConfig {
             .field("temperature", &self.temperature)
             .field("top_p", &self.top_p)
             .field("normalize_text", &self.normalize_text)
-            .field("streaming", &self.streaming)
             .field("timeout_secs", &self.timeout_secs)
             .finish()
     }
@@ -373,7 +370,6 @@ impl FishClient {
                 let mut packets = response.bytes_stream();
                 let mut odd_byte = None;
                 let mut received = false;
-                let mut buffered = (!config.streaming).then(Vec::new);
                 loop {
                     let packet = tokio::select! {
                         biased;
@@ -386,16 +382,7 @@ impl FishClient {
                     let mut data = packet.as_ref();
                     if let Some(previous) = odd_byte.take() {
                         if let Some((&first, remainder)) = data.split_first() {
-                            if let Some(buffer) = buffered.as_mut() {
-                                if buffer.len() > MAX_BUFFERED_PCM_BYTES - 2 {
-                                    return Err(TtsError::InvalidAudio {
-                                        service: SERVICE,
-                                        reason: "完整音频超过 64 MiB 限制",
-                                    });
-                                }
-                                buffer.extend_from_slice(&[previous, first]);
-                            } else if !send_bytes(&sender, &cancellation, &[previous, first]).await
-                            {
+                            if !send_bytes(&sender, &cancellation, &[previous, first]).await {
                                 return Ok(());
                             }
                             received = true;
@@ -407,15 +394,7 @@ impl FishClient {
                     }
                     let complete = data.len() & !1;
                     if complete > 0 {
-                        if let Some(buffer) = buffered.as_mut() {
-                            if complete > MAX_BUFFERED_PCM_BYTES.saturating_sub(buffer.len()) {
-                                return Err(TtsError::InvalidAudio {
-                                    service: SERVICE,
-                                    reason: "完整音频超过 64 MiB 限制",
-                                });
-                            }
-                            buffer.extend_from_slice(&data[..complete]);
-                        } else if !send_bytes(&sender, &cancellation, &data[..complete]).await {
+                        if !send_bytes(&sender, &cancellation, &data[..complete]).await {
                             return Ok(());
                         }
                         received = true;
@@ -435,11 +414,6 @@ impl FishClient {
                         service: SERVICE,
                         reason: "服务未返回音频",
                     });
-                }
-                if let Some(buffer) = buffered
-                    && !send_bytes(&sender, &cancellation, &buffer).await
-                {
-                    return Ok(());
                 }
                 Ok(())
             },
@@ -740,18 +714,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn whole_response_mode_waits_for_completion_before_emitting_pcm() {
+    async fn saved_generation_options_reach_the_streaming_request() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (first_sender, first_receiver) = oneshot::channel();
-        let (finish_sender, finish_receiver) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_request(&mut socket).await;
             chunked_start(&mut socket, "audio/pcm").await;
             chunk(&mut socket, &[1, 0]).await;
-            first_sender.send(()).unwrap();
-            finish_receiver.await.unwrap();
             chunk(&mut socket, &[2, 0]).await;
             chunked_end(&mut socket).await;
             request
@@ -760,24 +730,23 @@ mod tests {
             "sk-test-only-secret-key-12345678901234567890",
             DEFAULT_VOICE_ID,
         );
-        config.streaming = false;
-        config.model = FishModel::S2Pro;
-        config.latency = FishLatency::Balanced;
-        config.volume_db = -2.0;
-        config.temperature = 0.3;
-        config.top_p = 0.6;
+        // A legacy whole-response setting no longer changes playback.
+        config.apply_playback_settings(&FishPlaybackSettings {
+            model: FishModel::S2Pro,
+            latency: FishLatency::Balanced,
+            volume_db: -2.0,
+            temperature: 0.3,
+            top_p: 0.6,
+            streaming: false,
+        });
         let endpoint = Url::parse(&format!("http://{address}/v1/tts")).unwrap();
         let client = FishClient::with_endpoint(config, endpoint).unwrap();
         let mut audio = client.stream("测试", &CancellationToken::new()).unwrap();
-        first_receiver.await.unwrap();
-        assert!(
-            timeout(Duration::from_millis(100), audio.recv())
-                .await
-                .is_err()
-        );
-        finish_sender.send(()).unwrap();
-        assert_eq!(audio.recv().await.unwrap().unwrap(), [1, 0, 2, 0]);
-        assert!(audio.recv().await.is_none());
+        let mut output = Vec::new();
+        while let Some(next) = audio.recv().await {
+            output.extend_from_slice(&next.unwrap());
+        }
+        assert_eq!(output, [1, 0, 2, 0]);
         let request = server.await.unwrap();
         let headers_end = request
             .windows(4)
