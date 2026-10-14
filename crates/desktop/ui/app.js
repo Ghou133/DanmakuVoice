@@ -452,14 +452,20 @@ let voiceBrowse = '';
 let auditionPresetId = '';
 let auditionStartedAt = 0;
 let viewerOpenIdentity = '';
+// Unsaved viewer aliases by user name. Every write carries all of them, so a
+// failed alias stays recoverable after another viewer's alias is edited.
+const viewerAliasDrafts = new Map();
 const viewerAliasSave = createAutosaveQueue({
   delay: 600,
-  save: pending => {
+  save: drafts => {
     const rules = structuredClone(snapshot.rules);
-    rules.user_words = (rules.user_words || []).filter(row => row.from !== pending.name);
-    if (pending.to && pending.to !== pending.name) rules.user_words.push({ from: pending.name, to: pending.to });
+    for (const [name, to] of drafts) {
+      rules.user_words = (rules.user_words || []).filter(row => row.from !== name);
+      if (to && to !== name) rules.user_words.push({ from: name, to });
+    }
     return command('rules.save', { rules }, { quiet: true, silent: true });
   },
+  onSaved: (_, drafts) => { for (const [name, to] of drafts) if (viewerAliasDrafts.get(name) === to) viewerAliasDrafts.delete(name); },
   onError: showError,
 });
 const markupCache = new WeakMap();
@@ -1512,7 +1518,7 @@ function renderViewerDrawer() {
     return;
   }
   if (layer.hidden) layer.viewerReturnFocus = document.activeElement;
-  const alias = viewerAlias(event);
+  const alias = viewerAliasValue(event);
   const voiceMarkup = viewerChipsHtml(event);
   const mentionDisabled = !snapshot.account?.user_id || snapshot.network_disabled || !String(event.user_name || '').trim();
   const saidView = viewerSaidMarkup(event);
@@ -1812,12 +1818,22 @@ function scheduleViewerAlias(value) {
   const spoken = document.querySelector('#viewer-spoken');
   if (spoken) spoken.textContent = value.trim() || event.user_name || t('访客');
   const name = String(event.user_name || '');
-  if (name) viewerAliasSave.schedule({ name, to: value.trim() });
+  if (!name) return;
+  viewerAliasDrafts.set(name, value.trim());
+  viewerAliasSave.schedule([...viewerAliasDrafts]);
 }
 
+function viewerAliasValue(event) {
+  const name = String(event?.user_name || '');
+  return viewerAliasDrafts.has(name) ? viewerAliasDrafts.get(name) : viewerAlias(event);
+}
+
+// A failed save must not trap the viewer card or settings. Its error is shown;
+// the draft stays in the card and is written again by the next flush.
 async function flushViewerAlias() {
   if (viewerAliasSave.error) viewerAliasSave.retry();
-  await viewerAliasSave.flush();
+  try { await viewerAliasSave.flush(); return true; }
+  catch { return false; }
 }
 
 async function bindViewerVoice(presetId) {
@@ -4116,7 +4132,7 @@ async function handleAction(action, id, target) {
     const presetId = (viewerBinding(event)?.binding?.enabled && viewerBinding(event).binding.preset_id) || snapshot.rules?.default_preset_id;
     if (!presetId) throw new Error(t('请先添加一个声音预设'));
     await flushViewerAlias();
-    const spoken = viewerAlias(event) || event.user_name || t('访客');
+    const spoken = viewerAliasValue(event) || event.user_name || t('访客');
     return command('audition', { preset_id: presetId, text: `${spoken}：${eventText(event) || t('你好，欢迎来到直播间。')}` }, { quiet: true });
   }
   if (action === 'viewer.manage') {
@@ -4148,8 +4164,12 @@ async function handleAction(action, id, target) {
   if (action === 'draft.resume') { const draft = formDrafts.get(id); if (draft) { editor = draft.editor; renderSettings(); } return; }
   if (action === 'settings.open' || action === 'settings.room') {
     closeVoicePanel();
-    if (viewerContext) { await flushViewerAlias(); viewerContext = null; viewerOpenIdentity = ''; renderViewerDrawer(); }
-    return openSettings(action === 'settings.room' ? 'room' : 'voices');
+    const aliasSaved = !viewerContext || await flushViewerAlias();
+    if (viewerContext) { viewerContext = null; viewerOpenIdentity = ''; renderViewerDrawer(); }
+    await openSettings(action === 'settings.room' ? 'room' : 'voices');
+    // The failure toast sits beneath modal settings; repeat it inside them.
+    if (!aliasSaved && viewerAliasSave.error) showError(viewerAliasSave.error);
+    return;
   }
   if (action === 'settings.close') return closeSettings();
   if (action === 'broadcast.refresh') {
@@ -4480,7 +4500,7 @@ async function handleAction(action, id, target) {
     if (!await confirmAction(t('清除全部应用数据？'), t('将删除本机保存的账号和语音服务凭据、声音预设、播报规则、界面设置、已导入的音效及应用备份。\n当前接收和播报会停止，随后回到首次设置。'), t('清除应用数据'))) return;
     stopQrPolling();
     await command('data.clear', { confirmed: true });
-    unmountAutosaves(); formDrafts.clear(); tabEditors.clear();
+    unmountAutosaves(); formDrafts.clear(); tabEditors.clear(); viewerAliasSave.cancel(); viewerAliasDrafts.clear();
     editor = null; migrationPreview = null; settingsTab = 'voices'; settingsDirty = false; setupTts = true;
     settingsDialog.close(); settingsDialog.replaceChildren();
     showToast(t('应用数据已清除')); setStep('welcome'); return;

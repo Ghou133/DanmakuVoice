@@ -193,11 +193,11 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
     assert.equal(await page.locator('#viewer-alias').inputValue(),'重试别名');
     assert.equal(await viewer.evaluate(node=>node.hidden),false);
     rejectNextRules=true;
-    await page.keyboard.press('Escape');
-    await page.waitForTimeout(100);
-    assert.equal(await viewer.evaluate(node=>node.hidden),false,'failed close must preserve the unsaved input');
+    await closeViewer();
+    assert.equal(state.rules.user_words.length,0,'a failed retry does not claim a save');
+    await openViewer();assert.equal(await page.locator('#viewer-alias').inputValue(),'重试别名','the unsaved alias returns with the card');
     await closeViewer();assert.equal(state.rules.user_words[0].to,'重试别名');
-    check('failed automatic save keeps the draft, reports the error and retries on close');
+    check('failed automatic save keeps the draft, reports the error, lets the card close and retries on the next navigation');
 
     await openViewer();holdNextRules=true;await fillAlias('第一稿');
     assert.equal(await page.locator('#viewer-alias').inputValue(),'第一稿');

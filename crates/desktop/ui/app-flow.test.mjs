@@ -7,7 +7,8 @@ import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
 import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, snapshotPollingPolicy, createSnapshotSequencer, uiIsActive, validUid } from './helpers.mjs';
 
-function appContext() {
+// overrides replace harness stubs before app.js runs (for example the real autosave queue).
+function appContext(overrides = {}) {
   setLanguage('zh-CN');
   const surface = { listeners: {}, classList: { add() {}, remove() {}, toggle() {} }, addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }, querySelector() { return null; }, querySelectorAll() { return []; } };
   const document = { querySelector(selector) { return selector?.startsWith('[data-brand') ? null : surface; }, addEventListener() {}, hasFocus() { return true; }, documentElement: { dataset: {} } };
@@ -43,6 +44,7 @@ function appContext() {
     deviceValue,
     setTimeout,
     clearTimeout,
+    ...overrides,
   });
   const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '')
@@ -1383,6 +1385,33 @@ test('chat keeps updating during a long command and polls started before its rep
   requests[3].resolve(state(4, true));
   await after;
   assert.equal(vm.runInContext('snapshot.live.received', context), 4);
+});
+
+test('a failing viewer alias save is shown but never traps the card or settings, and its draft survives', async () => {
+  const context = appContext({ createAutosaveQueue });
+  context.saved = [];
+  context.opened = [];
+  vm.runInContext(`step = 'main'; snapshot.rules = { user_words: [{ from: 'Bob', to: '老鲍' }] }; snapshot.account = {};
+    renderViewerDrawer = () => {}; updateLive = () => {}; closeVoicePanel = () => {}; openSettings = async tab => { opened.push(tab); };
+    command = async () => { throw new Error('rules save failed'); };
+    viewerContext = { user_name: 'Alice', user_id: 7 }; viewerOpenIdentity = 'uid:7';`, context);
+  vm.runInContext("scheduleViewerAlias('小A')", context);
+  await vm.runInContext("handleAction('viewer.close', '', null)", context);
+  assert.equal(vm.runInContext('viewerContext', context), null, 'the card closes even though the save failed');
+  assert.match(vm.runInContext('errorText', context), /rules save failed/);
+  assert.equal(vm.runInContext("viewerAliasValue({ user_name: 'Alice' })", context), '小A', 'reopening the card shows the unsaved alias');
+
+  vm.runInContext("viewerContext = { user_name: 'Bob', user_id: 8 }; errorText = ''; scheduleViewerAlias('鲍勃')", context);
+  await vm.runInContext("handleAction('settings.open', '', null)", context);
+  assert.deepEqual(context.opened, ['voices'], 'settings still open');
+  assert.equal(vm.runInContext('viewerContext', context), null);
+  assert.match(vm.runInContext('errorText', context), /rules save failed/);
+
+  vm.runInContext('command = async (action, payload) => { saved.push(payload.rules.user_words); snapshot.rules = payload.rules; return snapshot; }', context);
+  assert.equal(await vm.runInContext('flushViewerAlias()', context), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.saved.at(-1))), [{ from: 'Alice', to: '小A' }, { from: 'Bob', to: '鲍勃' }], 'both drafts are kept until a save succeeds');
+  assert.equal(vm.runInContext("viewerAliasValue({ user_name: 'Alice' })", context), '小A');
+  assert.equal(vm.runInContext('viewerAliasDrafts.size', context), 0);
 });
 
 test('standalone emote filter defaults on, preserves disabled settings, and autosaves either value', () => {
