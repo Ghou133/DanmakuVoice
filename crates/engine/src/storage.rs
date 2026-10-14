@@ -9,7 +9,7 @@ use crate::secrets::{self, SecretBytes, SecretError};
 use crate::tts::dobao::DoubaoDevice;
 use crate::tts::fish::{self, FishPlaybackSettings};
 use crate::voice_library::{ReferenceProfile, ReferenceRole};
-use rusqlite::{Connection, OptionalExtension, backup::Backup, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -47,8 +47,6 @@ pub enum StorageError {
     AssetReferenced(String),
     #[error("素材不存在：{0} [DV-S08]")]
     AssetMissing(String),
-    #[error("备份文件不属于此数据目录 [DV-S09]")]
-    InvalidBackupPath,
     #[error("服务连接不存在：{0} [DV-S10]")]
     ConnectionMissing(String),
     #[error("声音预设不存在：{0} [DV-S11]")]
@@ -2035,21 +2033,6 @@ impl DataStore {
         // policy that accounts for both lifetimes.
         Ok(())
     }
-
-    /// Restore a SQLite snapshot from this store's backup directory. The
-    /// caller must stop any live engine tasks before invoking this method.
-    pub fn restore_backup(&mut self, backup_path: &Path) -> Result<(), StorageError> {
-        let expected_parent = self.data_dir.join("backups").canonicalize()?;
-        let path = backup_path.canonicalize()?;
-        if path.parent() != Some(expected_parent.as_path()) {
-            return Err(StorageError::InvalidBackupPath);
-        }
-        let source =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let backup = Backup::new(&source, &mut self.conn)?;
-        backup.run_to_completion(64, Duration::from_millis(5), None)?;
-        Ok(())
-    }
 }
 
 fn provider_name(provider: Provider) -> &'static str {
@@ -3145,7 +3128,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_is_backed_up_and_can_restore() {
+    fn upgrade_backup_keeps_the_previous_schema_for_manual_recovery() {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("data");
         fs::create_dir_all(&data_dir).unwrap();
@@ -3154,9 +3137,10 @@ mod tests {
         conn.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL);\
             CREATE TABLE assets (id TEXT PRIMARY KEY, name TEXT NOT NULL, relative_path TEXT NOT NULL UNIQUE,\
             sha256 TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes >= 0));\
+            INSERT INTO settings(key,json) VALUES('marker','{}');\
             PRAGMA user_version = 1;").unwrap();
         drop(conn);
-        let mut store = DataStore::open(&data_dir).unwrap();
+        let store = DataStore::open(&data_dir).unwrap();
         let snapshot = store.upgrade_backup().unwrap().to_path_buf();
         assert!(snapshot.exists());
         let version: i64 = store
@@ -3164,12 +3148,20 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA);
-        store.restore_backup(&snapshot).unwrap();
-        let restored: i64 = store
-            .conn
+        // The snapshot is only for manual recovery; nothing restores it.
+        let backup =
+            Connection::open_with_flags(&snapshot, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let previous: i64 = backup
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(restored, 1);
+        assert_eq!(previous, 1);
+        let marker: String = backup
+            .query_row("SELECT json FROM settings WHERE key='marker'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(marker, "{}");
     }
 
     #[cfg(windows)]

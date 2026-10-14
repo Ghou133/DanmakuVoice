@@ -32,7 +32,7 @@
 | `DV-S06` | `storage.rs / StorageError::AssetTooLarge` | 音频素材超过 128 MiB 限制 |
 | `DV-S07` | `storage.rs / StorageError::AssetReferenced` | 素材仍被规则引用：{0} |
 | `DV-S08` | `storage.rs / StorageError::AssetMissing` | 素材不存在：{0} |
-| `DV-S09` | `storage.rs / StorageError::InvalidBackupPath` | 备份文件不属于此数据目录 |
+| `DV-S09` | 已停用（原 `StorageError::InvalidBackupPath`，应用内恢复备份已移除） | 不再出现；代码不重用 |
 | `DV-S10` | `storage.rs / StorageError::ConnectionMissing` | 服务连接不存在：{0} |
 | `DV-S11` | `storage.rs / StorageError::PresetMissing` | 声音预设不存在：{0} |
 | `DV-S12` | `storage.rs / StorageError::BindingMissing` | 用户声音绑定不存在：{0} |
