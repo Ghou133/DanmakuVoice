@@ -6,7 +6,9 @@ to `snapshot`: when `config_unchanged` is true, merge the returned dynamic field
 into the prior snapshot with the same `config_revision`. Otherwise replace the
 entire snapshot. Late full/delta replies with a lower `config_revision` are ignored;
 a newer delta without a matching base triggers full-state recovery. Initial loads,
-commands and recovery always request full state.
+commands and recovery always request full state. Polling continues while a command
+is pending (OBS start can wait 45 seconds); a poll reply is discarded when the poll
+started before the latest command settled or before a newer poll reply was applied.
 Snapshots are assembled on a blocking worker instead of the window event thread. Normal actions return the current safe
 snapshot; operation-specific data is added as `result`. Rejected commands reject
 the promise with a user-facing error. Secrets never occur in a normal snapshot
@@ -36,7 +38,9 @@ with a 15 second timeout, 1 MiB metadata limit and 60 second cache. It returns
 `{current_version,latest_version,status,release_url,download_url}`; status is
 `available`, `up_to_date` or `no_release`. It rejects in offline test mode.
 `external.open` accepts `fish_keys`, `fish_discovery`, `project`, `releases`,
-`store_updates`, or `update_download` as `page`. Download URLs must match this repository, the checked
+`store_updates`, `update_download` or `bili_broadcast_room` as `page`. `bili_broadcast_room` opens
+`https://live.bilibili.com/{room_id}` for the signed-in account's loaded own room (the 开播 settings page's
+“打开直播间”); it requires network access, a QR login and a loaded broadcast room. Download URLs must match this repository, the checked
 semantic version and an uploaded `DanmakuVoice-windows-x64.zip` or legacy `DanmakuVoice.exe` asset; ZIP is preferred. Store installations display the Microsoft Store entry instead of invoking GitHub checks. The system browser
 handles downloads; the application never overwrites its running executable.
 
@@ -75,10 +79,11 @@ choice, so adding another connection or voice does not override it.
 | `live.disconnect` | `{}` |
 | `live.audience.refresh` | `{}` refresh public contribution rank from page 1; requires an active room session and network access. The main UI no longer offers a refresh control (page 1 polls automatically); the command is retained |
 | `live.audience.more` | `{}` request the next public contribution-rank page; same session and network gates. The UI sends it once per page when the list scrolls near its end, never while searching |
-| `live.save` | `{room_id:123,authenticated?:true}` local room settings; explicit `false` is rejected. |
+| `live.save` | `{room_id?:123,gift_merge?:GiftMergeSettings,authenticated?:true}` local room settings; each field is optional and omitted fields keep their saved values; explicit `authenticated:false` is rejected; rejected while reception is running or connecting. The room page autosaves only `{gift_merge}` as `{enabled,initial_seconds,increment_seconds,maximum_seconds}` |
 | `queue.skip`, `queue.clear`, `queue.stop` | `{}` |
 | `queue.jump` | `{id:123}` pending job ID from `queue.pending`; skips the current job and earlier pending jobs, keeps later FIFO order; rejects when the job is no longer pending |
 | `bili.logout` | `{confirmed:true}` |
+| `bili.use_account` | `{}` re-resolves the stored QR session's own room and saves it as the reception room; requires network and cancels a pending QR. QR completion already performs this resolution, so the current UI has no control for it |
 
 `live.audience` contains `{active,live_status,loading,error,rank_count,rank_count_text,
 watched_count,updated_at_ms,users,page,has_more,limit_reached}`. Count fields are
@@ -307,4 +312,4 @@ The transient `chat_send` snapshot is `{busy,account_id,room_id,message_limit,em
 
 All cards use `bili.chat.emoticon.send` immediately on selection and leave the composer draft and selection intact. Sending and metadata reads require login and network availability, independently of `broadcast_console`. `kind:"text"` sends the exact original `text` as a separate ordinary message; account image entries still display their pictures. Their `account:{package_id}:{emote_id}` identifier selects the current account item and is never a standalone live send token. The backend freshly reads the personal panel and verifies that item before sending. The official comment component renders returned entries without checking `flags.unlocked`; the app likewise does not disable ordinary text sending based on that unrelated flag. `kind:"emoticon"` uses the live standalone command with a refreshed exact token and permission check. Locked live entries remain disabled. Each pack retains its real name and icon in data and nonvisual accessibility labels. The picker displays only cover/item images, without visible labels, counts, tooltips, or pagination; every item in the selected pack is rendered in one continuous scroll area. Missing covers use the first valid item image or a text-free missing-image graphic. A failed source produces a visible `warnings` entry in the composer status and a text-free picker indicator while retaining the successful source; both sources failing returns an error. Any expired session fails the whole read and invalidates the cached account. Warnings share the account context and cannot survive an account switch.
 
-The composer reads its limit and packs once per logged-in account/room context if no metadata is available. Background/focus updates preserve its nodes and draft; failed metadata reads require an explicit picker refresh. The send POST signs its WBI query with keys from the authenticated nav response and includes CSRF in the form. No unsigned fallback or automatic write retries. Failed sends retain the draft; accepted sends do not create local feed events. Input composition confirmation does not submit. Account/room changes cancel pending work and invalidate cached permissions; toggling broadcast mode preserves the chat context. Stale UI replies cannot replace current identity or clear another draft. State and credentials never enter configuration exports.
+The composer reads its limit and packs once per logged-in account/room context if no metadata is available. Its `maxlength`, visible counter and the avatar card's `@` prefill all count UTF-16 units like the platform; the prefill is cut on whole code points so it never leaves half of a surrogate pair. Background/focus updates preserve its nodes and draft; failed metadata reads require an explicit picker refresh. The send POST signs its WBI query with keys from the authenticated nav response and includes CSRF in the form. No unsigned fallback or automatic write retries. Failed sends retain the draft; accepted sends do not create local feed events. Input composition confirmation does not submit. Account/room changes cancel pending work and invalidate cached permissions; toggling broadcast mode preserves the chat context. Stale UI replies cannot replace current identity or clear another draft. State and credentials never enter configuration exports.

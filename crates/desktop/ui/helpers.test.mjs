@@ -1,4 +1,4 @@
-import { errorMessage, mergeSnapshot, audienceUsers, audienceDisplayCount } from './helpers.mjs';
+import { errorMessage, mergeSnapshot, audienceUsers, audienceDisplayCount, createSnapshotSequencer, truncateUtf16 } from './helpers.mjs';
 
 test('audience list searches confirmed viewers safely and clears when the room stops', () => {
   const snapshot = { live: { running: true, audience: { active: true, live_status: 1, rank_count: 9999, users: [{ user_id: 42, user_name: '<Viewer>' }, { user_id: null, user_name: '神秘人', mystery: true }] }, events: [
@@ -248,7 +248,7 @@ test('snapshot polling sleeps during setup and stays responsive for live playbac
   assert.deepEqual(snapshotPollingPolicy({ ...idle, local_services: { dots: { state: 'stopped' } } }, { step: 'tts' }), { poll: false, delay: 5000 });
   assert.deepEqual(snapshotPollingPolicy({ ...idle, local_services: { dots: { state: 'starting' } } }, { hidden: true, step: 'tts' }), { poll: false, delay: 5000 });
   assert.deepEqual(snapshotPollingPolicy({ ...idle, queue: { pending: [{ id: 1 }] } }, { hidden: true }), { poll: false, delay: 5000 });
-  assert.equal(snapshotPollingPolicy({ live: { connecting: true } }, { busy: true }).poll, false);
+  assert.equal(snapshotPollingPolicy({ live: { connecting: true } }, { busy: true }).poll, true, 'a command in flight must not freeze the live view');
   assert.deepEqual(snapshotPollingPolicy({ live: { running: true } }, { focused: false }), { poll: false, delay: 5000 });
   assert.equal(uiIsActive(true, false, false), true, 'native title-bar activation overrides stale DOM focus');
   assert.equal(uiIsActive(false, true, false), false, 'native minimization overrides stale DOM focus');
@@ -270,6 +270,31 @@ test('incremental snapshots retain settings, drop transient results and reject s
   assert.equal(mergeSnapshot(config, replacement), replacement);
 });
 
+
+test('chat text is cut to the platform UTF-16 limit without splitting a character', () => {
+  assert.equal(truncateUtf16('ab😀', 3), 'ab');
+  assert.equal(truncateUtf16('ab😀', 4), 'ab😀');
+  assert.equal(truncateUtf16('你好世界', 2), '你好');
+  assert.equal(truncateUtf16('@' + '😀'.repeat(10) + ' ', 20), '@' + '😀'.repeat(9));
+  assert.equal(truncateUtf16('短', 20), '短');
+});
+
+test('poll replies that started before a settled command or a newer poll are dropped', () => {
+  const sequence = createSnapshotSequencer();
+  const beforeCommand = sequence.poll();
+  const duringCommand = sequence.poll();
+  assert.equal(sequence.fresh(duringCommand), true, 'polls keep landing while a command is in flight');
+  sequence.accept(duringCommand);
+  assert.equal(sequence.fresh(beforeCommand), false, 'an older poll cannot replace a newer poll');
+  const racingCommand = sequence.poll();
+  sequence.settled();
+  assert.equal(sequence.fresh(racingCommand), false, 'a poll started before the command reply can describe older runtime state');
+  const afterCommand = sequence.poll();
+  assert.equal(sequence.fresh(afterCommand), true);
+  const overlapping = sequence.poll();
+  sequence.accept(afterCommand);
+  assert.equal(sequence.fresh(overlapping), true, 'a newer overlapping poll still lands');
+});
 
 test('late poll replies cannot roll back a newer saved configuration or its runtime', () => {
   const current = { config_revision: 7, preferences: { language: 'en' }, rules: { user_words: [{ from: '观众', to: '新读音' }] }, live: { state: 'connected' }, result: 'old operation' };

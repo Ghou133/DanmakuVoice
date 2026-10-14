@@ -1,6 +1,6 @@
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
+import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, createSnapshotSequencer, truncateUtf16, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
 import { createAutosaveQueue } from './autosave.mjs';
 import { mountSelects, closeSelect, stripSelects } from './select.mjs';
 import { lakeSceneMarkup } from './lake-scene.mjs';
@@ -278,7 +278,7 @@ function updateChatCompose() {
     host.querySelector('#chat-message').addEventListener('input', inputEvent => {
       const count = host.querySelector('.lake-compose-count');
       count.hidden = !inputEvent.target.value;
-      count.textContent = `${Array.from(inputEvent.target.value).length}/${inputEvent.target.maxLength}`;
+      count.textContent = `${inputEvent.target.value.length}/${inputEvent.target.maxLength}`;
       updateChatCompose();
     });
   }
@@ -296,7 +296,8 @@ function updateChatCompose() {
   noteHost.hidden = !diagnostic;
   const count = host.querySelector('.lake-compose-count');
   count.hidden = !input.value;
-  count.textContent = `${Array.from(input.value).length}/${input.maxLength}`;
+  // maxlength and the platform limit both count UTF-16 units; so does the counter.
+  count.textContent = `${input.value.length}/${input.maxLength}`;
   const emoteButton = host.querySelector('[data-action="chat.emoticons"]');
   emoteButton.setAttribute('aria-expanded', String(chatEmoticonsOpen));
   emoteButton.classList.toggle('on', chatEmoticonsOpen);
@@ -322,11 +323,26 @@ function updateChatCompose() {
   renderChatEmoticons(picker, view, disabled);
 }
 
+// Busy requests disable the composer, which drops keyboard focus. Return it to
+// the same control (or the field) unless the person has moved focus elsewhere.
+function composerFocus() {
+  const active = document.activeElement;
+  return active && document.querySelector('#chat-compose form')?.contains(active) ? active : null;
+}
+
+function restoreComposerFocus(previous) {
+  const active = document.activeElement;
+  if (!previous || (active && active !== document.body && active !== previous)) return;
+  const target = previous.isConnected && !previous.disabled ? previous : document.querySelector('#chat-message');
+  if (target && !target.disabled) target.focus({ preventScroll: true });
+}
+
 async function refreshChatEmoticons(automatic = false) {
   syncChatEmoticonContext();
   if (chatSendBusy || !snapshot.account?.user_id || snapshot.network_disabled) return;
   const context = chatEmoteContext;
   const sequence = ++chatRequestSequence;
+  const focused = composerFocus();
   chatSendBusy = true;
   updateChatCompose();
   try {
@@ -336,7 +352,7 @@ async function refreshChatEmoticons(automatic = false) {
     if (sequence === chatRequestSequence && context === chatEmoteContext) chatEmoticonError = errorMessage(error);
     throw error;
   }
-  finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); }
+  finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); restoreComposerFocus(focused); }
 }
 
 async function sendChatMessage(emoticon_unique = '') {
@@ -349,6 +365,7 @@ async function sendChatMessage(emoticon_unique = '') {
   const room = String(snapshot.setup?.room_id || '');
   const submittedDraft = chatMessageDraft;
   const sequence = ++chatRequestSequence;
+  const focused = composerFocus();
   if (emoticon_unique) chatEmoticonsOpen = false;
   chatSendBusy = true;
   updateChatCompose();
@@ -361,7 +378,7 @@ async function sendChatMessage(emoticon_unique = '') {
       if (input) input.value = '';
     }
     if (String(snapshot.account?.user_id) === account && String(snapshot.setup?.room_id || '') === room) showToast(t('已发送'));
-  } finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); }
+  } finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); restoreComposerFocus(focused); }
 }
 
 function chatResponseGuard() {
@@ -452,14 +469,20 @@ let voiceBrowse = '';
 let auditionPresetId = '';
 let auditionStartedAt = 0;
 let viewerOpenIdentity = '';
+// Unsaved viewer aliases by user name. Every write carries all of them, so a
+// failed alias stays recoverable after another viewer's alias is edited.
+const viewerAliasDrafts = new Map();
 const viewerAliasSave = createAutosaveQueue({
   delay: 600,
-  save: pending => {
+  save: drafts => {
     const rules = structuredClone(snapshot.rules);
-    rules.user_words = (rules.user_words || []).filter(row => row.from !== pending.name);
-    if (pending.to && pending.to !== pending.name) rules.user_words.push({ from: pending.name, to: pending.to });
+    for (const [name, to] of drafts) {
+      rules.user_words = (rules.user_words || []).filter(row => row.from !== name);
+      if (to && to !== name) rules.user_words.push({ from: name, to });
+    }
     return command('rules.save', { rules }, { quiet: true, silent: true });
   },
+  onSaved: (_, drafts) => { for (const [name, to] of drafts) if (viewerAliasDrafts.get(name) === to) viewerAliasDrafts.delete(name); },
   onError: showError,
 });
 const markupCache = new WeakMap();
@@ -476,6 +499,7 @@ let localRefreshSignature = '';
 let fallbackStatus = '';
 let fallbackStatusTimer = null;
 let snapshotTimer = null;
+const snapshotSequence = createSnapshotSequencer();
 let windowFocused = document.hasFocus();
 let nativeActive = null;
 let effectiveActive = null;
@@ -569,7 +593,7 @@ async function command(action, payload = {}, options = {}) {
     } catch { /* Preserve the original command error. */ }
     if (!options.silent) showError(error);
     throw error;
-  } finally { pendingCommands--; if (boot.polling) scheduleSnapshotPolling(); }
+  } finally { pendingCommands--; snapshotSequence.settled(); if (boot.polling) scheduleSnapshotPolling(); }
 }
 
 function setStep(next) {
@@ -684,11 +708,20 @@ function renderLakeHistory(events, keys) {
   if (!document.querySelector('#lake-history-dialog')?.open) return;
   const signature = JSON.stringify([keys, events.map(event => messageParts(event)), viewerOpenIdentity, getLanguage()]);
   if (signature === feedSignature) return;
+  // New messages enter at the top of this newest-first list. Away from the top,
+  // keep the entry being read under the same point instead of letting it drift.
+  const scroll = document.querySelector('#chat-scroll');
+  const scrollTop = scroll?.getBoundingClientRect().top;
+  const anchor = scroll?.scrollTop > 0 ? [...feed.children].find(entry => entry.getBoundingClientRect().bottom > scrollTop) : null;
+  const anchorKey = anchor?.dataset.id;
+  const anchorOffset = anchor ? anchor.getBoundingClientRect().top - scrollTop : 0;
   patchMarkup(feed, events.map((event, index) => {
     const price = event.price_yuan;
     return `<button type="button" class="lake-history-entry${viewerIdentity(event) === viewerOpenIdentity ? ' selected' : ''}" data-action="viewer.open" data-id="${esc(keys[index])}"><span class="lake-history-time${price ? ' gold' : ''}">${esc(price ? `¥${price}` : clockLabel(event.observed_at_ms))}</span><span class="lake-history-body"><b>${renderChatBody(event)}</b><small>${viewerAvatar(event)}${esc(event.user_name || t('访客'))}</small></span></button>`;
   }).reverse().join(''));
   feedSignature = signature;
+  const moved = anchor && [...feed.children].find(entry => entry.dataset.id === anchorKey);
+  if (moved) scroll.scrollTop += moved.getBoundingClientRect().top - scroll.getBoundingClientRect().top - anchorOffset;
 }
 
 function renderLakeTranscript(events, keys) {
@@ -867,6 +900,8 @@ function renderApp() {
     updateLive();
     return;
   }
+  // The clock only exists on the main screen; welcome and setup must not keep ticking.
+  clearInterval(lakeClockTimer); lakeClockTimer = null;
   const note = snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : '';
   if (step === 'welcome') {
     app.innerHTML = ui`<div class="app-shell onboard-shell">${note}<div class="onboard-aura one" aria-hidden="true"></div><div class="onboard-aura two" aria-hidden="true"></div><main class="welcome"><div class="welcome-mark" aria-hidden="true"><span></span><span></span><span></span><img src="./logo.png" width="148" height="148" alt="" draggable="false"></div><h1>超绝可爱弹幕姬</h1><p>接收 B 站直播弹幕，用你喜欢的声音读出来。</p><button type="button" class="onboard-cta" data-action="setup.start">开始设置${icon('arrow')}</button><p class="welcome-foot">${icon('shield')}登录凭据仅加密保存在这台电脑</p></main></div>`;
@@ -1511,7 +1546,7 @@ function renderViewerDrawer() {
     return;
   }
   if (layer.hidden) layer.viewerReturnFocus = document.activeElement;
-  const alias = viewerAlias(event);
+  const alias = viewerAliasValue(event);
   const voiceMarkup = viewerChipsHtml(event);
   const mentionDisabled = !snapshot.account?.user_id || snapshot.network_disabled || !String(event.user_name || '').trim();
   const saidView = viewerSaidMarkup(event);
@@ -1811,17 +1846,39 @@ function scheduleViewerAlias(value) {
   const spoken = document.querySelector('#viewer-spoken');
   if (spoken) spoken.textContent = value.trim() || event.user_name || t('访客');
   const name = String(event.user_name || '');
-  if (name) viewerAliasSave.schedule({ name, to: value.trim() });
+  if (!name) return;
+  viewerAliasDrafts.set(name, value.trim());
+  viewerAliasSave.schedule([...viewerAliasDrafts]);
 }
 
+function viewerAliasValue(event) {
+  const name = String(event?.user_name || '');
+  return viewerAliasDrafts.has(name) ? viewerAliasDrafts.get(name) : viewerAlias(event);
+}
+
+// A failed save must not trap the viewer card or settings. Its error is shown;
+// the draft stays in the card and is written again by the next flush.
 async function flushViewerAlias() {
   if (viewerAliasSave.error) viewerAliasSave.retry();
-  await viewerAliasSave.flush();
+  try { await viewerAliasSave.flush(); return true; }
+  catch { return false; }
 }
 
-async function bindViewerVoice(presetId) {
+// Chips for one viewer save in order: a choice made while the first binding is
+// still being created must update that binding instead of creating another.
+const viewerBindings = new Map();
+function bindViewerVoice(presetId) {
   const event = viewerContext;
   if (!event) return;
+  const identity = viewerIdentity(event);
+  const saved = (viewerBindings.get(identity) || Promise.resolve()).then(() => saveViewerVoice(event, presetId));
+  const settled = saved.catch(() => {});
+  viewerBindings.set(identity, settled);
+  void settled.then(() => { if (viewerBindings.get(identity) === settled) viewerBindings.delete(identity); });
+  return saved;
+}
+
+async function saveViewerVoice(event, presetId) {
   const hasUid = validUid(event.user_id);
   if (!hasUid && !String(event.user_name || '').trim()) throw new Error(t('这条弹幕没有可用用户名或 UID，无法指定声音。'));
   const record = viewerBinding(event);
@@ -2132,7 +2189,8 @@ function collectAutosave(form) {
     rules.sounds = [...form.querySelectorAll('[data-dictionary="sounds"] .dict-row')].map(row => ({ trigger: row.querySelector('[data-key="from"]').value, asset_id: row.querySelector('[data-key="to"]').value }));
     return { action: 'rules.save', payload: { rules } };
   }
-  if (type === 'audio') return { action: 'preferences.save', payload: { preferences: { output: value('output') ? { named: value('output') } : 'default' }, confirmed: true } };
+  // Consent to stop playback is asked when this draft is written (confirmOutputChange).
+  if (type === 'audio') return { action: 'preferences.save', payload: { preferences: { output: value('output') ? { named: value('output') } : 'default' } } };
   if (type === 'appearance') return { action: 'preferences.save', payload: { preferences: { appearance: value('appearance'), scale: number('scale') } } };
   if (type === 'startup') return { action: 'startup.set', payload: { enabled: checked('enabled') } };
   if (type === 'overlay') {
@@ -2152,6 +2210,22 @@ function collectAutosave(form) {
   }
   if (type === 'obs-link') return { action: 'obs.save', payload: { settings: { enabled: checked('enabled'), auto_launch: checked('auto_launch') } } };
   throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
+}
+
+// A new output device stops current playback and clears the queue. Ask first
+// when something would be lost; declining restores the device still in use.
+// Exit stops playback anyway and must not wait on a prompt.
+let exitFlushing = false;
+async function confirmOutputChange(form, payload) {
+  if (JSON.stringify(payload.preferences.output) === JSON.stringify(snapshot.preferences?.output)) return true;
+  const playing = !!(snapshot.queue?.current || snapshot.queue?.pending?.length);
+  if (!playing || exitFlushing || await confirmAction(t('应用新的音频输出？'), t('当前播放和待播队列会停止。'), t('应用并停止播放'), false)) {
+    payload.confirmed = true;
+    return true;
+  }
+  const select = form.elements.output;
+  if (select) { select.value = deviceValue(snapshot.preferences?.output); mountSelects(form); }
+  return false;
 }
 
 function showAutoState(form, message = '', state = '') {
@@ -2237,6 +2311,7 @@ function mountAutosaves() {
       },
       save: async ({ action, payload }) => {
         if (form.dataset.form === 'service-local') return saveLocalDirectory(payload.provider, payload.directory);
+        if (form.dataset.form === 'audio' && !await confirmOutputChange(form, payload)) return snapshot;
         return command(action, payload, { quiet: true, silent: true });
       },
       onSaved: async (result, envelope) => {
@@ -3296,7 +3371,9 @@ async function settleVoiceAuditionChoice() {
 async function flushExitEdits() {
   // Exit is one action: flush pending automatic saves, but never prompt about
   // an unsubmitted form or keep an owned service running because a save failed.
-  await Promise.allSettled([volumeSave.flush(), flushViewerAlias(), settleVoiceAuditionChoice(), flushAutosaves()]);
+  exitFlushing = true;
+  try { await Promise.allSettled([volumeSave.flush(), flushViewerAlias(), settleVoiceAuditionChoice(), flushAutosaves()]); }
+  finally { exitFlushing = false; }
   return true;
 }
 
@@ -4076,7 +4153,7 @@ async function handleAction(action, id, target) {
     if (!name) return;
     await flushViewerAlias();
     const limit = snapshot.chat_send?.message_limit || 20;
-    chatMessageDraft = (`@${name} ${chatMessageDraft}`).slice(0, limit);
+    chatMessageDraft = truncateUtf16(`@${name} ${chatMessageDraft}`, limit);
     await closeViewerDrawer();
     updateChatCompose();
     const input = document.querySelector('#chat-message');
@@ -4095,7 +4172,7 @@ async function handleAction(action, id, target) {
     const presetId = (viewerBinding(event)?.binding?.enabled && viewerBinding(event).binding.preset_id) || snapshot.rules?.default_preset_id;
     if (!presetId) throw new Error(t('请先添加一个声音预设'));
     await flushViewerAlias();
-    const spoken = viewerAlias(event) || event.user_name || t('访客');
+    const spoken = viewerAliasValue(event) || event.user_name || t('访客');
     return command('audition', { preset_id: presetId, text: `${spoken}：${eventText(event) || t('你好，欢迎来到直播间。')}` }, { quiet: true });
   }
   if (action === 'viewer.manage') {
@@ -4127,8 +4204,12 @@ async function handleAction(action, id, target) {
   if (action === 'draft.resume') { const draft = formDrafts.get(id); if (draft) { editor = draft.editor; renderSettings(); } return; }
   if (action === 'settings.open' || action === 'settings.room') {
     closeVoicePanel();
-    if (viewerContext) { await flushViewerAlias(); viewerContext = null; viewerOpenIdentity = ''; renderViewerDrawer(); }
-    return openSettings(action === 'settings.room' ? 'room' : 'voices');
+    const aliasSaved = !viewerContext || await flushViewerAlias();
+    if (viewerContext) { viewerContext = null; viewerOpenIdentity = ''; renderViewerDrawer(); }
+    await openSettings(action === 'settings.room' ? 'room' : 'voices');
+    // The failure toast sits beneath modal settings; repeat it inside them.
+    if (!aliasSaved && viewerAliasSave.error) showError(viewerAliasSave.error);
+    return;
   }
   if (action === 'settings.close') return closeSettings();
   if (action === 'broadcast.refresh') {
@@ -4459,7 +4540,7 @@ async function handleAction(action, id, target) {
     if (!await confirmAction(t('清除全部应用数据？'), t('将删除本机保存的账号和语音服务凭据、声音预设、播报规则、界面设置、已导入的音效及应用备份。\n当前接收和播报会停止，随后回到首次设置。'), t('清除应用数据'))) return;
     stopQrPolling();
     await command('data.clear', { confirmed: true });
-    unmountAutosaves(); formDrafts.clear(); tabEditors.clear();
+    unmountAutosaves(); formDrafts.clear(); tabEditors.clear(); viewerAliasSave.cancel(); viewerAliasDrafts.clear();
     editor = null; migrationPreview = null; settingsTab = 'voices'; settingsDirty = false; setupTts = true;
     settingsDialog.close(); settingsDialog.replaceChildren();
     showToast(t('应用数据已清除')); setStep('welcome'); return;
@@ -5048,17 +5129,20 @@ matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', event 
 function scheduleSnapshotPolling(immediate = false) {
   clearTimeout(snapshotTimer);
   if (disposed || !uiIsActive(nativeActive, windowFocused, document.hidden)) return;
-  const policy = snapshotPollingPolicy(snapshot, { step, hidden: document.hidden, focused: nativeActive ?? windowFocused, busy: pendingCommands > 0, settingsOpen: settingsDialog.open && settingsTab === 'voices' });
+  const policy = snapshotPollingPolicy(snapshot, { step, hidden: document.hidden, focused: nativeActive ?? windowFocused, settingsOpen: settingsDialog.open && settingsTab === 'voices' });
   if (!policy.poll && !pendingCommands) return;
   snapshotTimer = setTimeout(pollSnapshot, immediate ? 0 : policy.delay);
 }
 
 async function pollSnapshot() {
   if (disposed) return;
-  const policy = snapshotPollingPolicy(snapshot, { step, hidden: document.hidden, focused: nativeActive ?? windowFocused, busy: pendingCommands > 0, settingsOpen: settingsDialog.open && settingsTab === 'voices' });
+  const policy = snapshotPollingPolicy(snapshot, { step, hidden: document.hidden, focused: nativeActive ?? windowFocused, settingsOpen: settingsDialog.open && settingsTab === 'voices' });
   if (policy.poll) {
-    try { acceptSnapshot(await invoke('snapshot', { configRevision: snapshot?.config_revision })); }
-    catch (error) { try { acceptSnapshot(await invoke('snapshot')); } catch { showError(error); } }
+    // Polls continue while commands run; a reply that could predate the latest
+    // command reply or a newer poll is dropped instead of rolling state back.
+    const poll = async args => { const ticket = snapshotSequence.poll(); const next = await invoke('snapshot', args); if (!snapshotSequence.fresh(ticket)) return; snapshotSequence.accept(ticket); acceptSnapshot(next); };
+    try { await poll({ configRevision: snapshot?.config_revision }); }
+    catch (error) { try { await poll(); } catch { showError(error); } }
   }
   void refreshLocalServices();
   scheduleSnapshotPolling();

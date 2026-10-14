@@ -5,9 +5,10 @@ import vm from 'node:vm';
 import { createAutosaveQueue } from './autosave.mjs';
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, uiIsActive, validUid } from './helpers.mjs';
+import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, snapshotPollingPolicy, createSnapshotSequencer, truncateUtf16, uiIsActive, validUid } from './helpers.mjs';
 
-function appContext() {
+// overrides replace harness stubs before app.js runs (for example the real autosave queue).
+function appContext(overrides = {}) {
   setLanguage('zh-CN');
   const surface = { listeners: {}, classList: { add() {}, remove() {}, toggle() {} }, addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }, querySelector() { return null; }, querySelectorAll() { return []; } };
   const document = { querySelector(selector) { return selector?.startsWith('[data-brand') ? null : surface; }, addEventListener() {}, hasFocus() { return true; }, documentElement: { dataset: {} } };
@@ -36,11 +37,15 @@ function appContext() {
     playbackIssue,
     qrNeedsRoomFallback,
     safeMediaUrl,
+    snapshotPollingPolicy,
+    createSnapshotSequencer,
+    truncateUtf16,
     uiIsActive,
     validUid,
     deviceValue,
     setTimeout,
     clearTimeout,
+    ...overrides,
   });
   const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '')
@@ -257,23 +262,52 @@ test('audio settings display and save only the output device', async () => {
   assert.equal(autosave.action, 'preferences.save');
   assert.equal(autosave.payload.preferences.output, 'default');
   assert.equal(Object.hasOwn(autosave.payload, 'ffmpeg_path'), false);
+  assert.equal(Object.hasOwn(autosave.payload, 'confirmed'), false, 'consent is never assumed while collecting a draft');
+});
 
-  const calls = [];
-  context.mockCommand = async (action, payload) => { calls.push({ action, payload }); };
-  context.mockConfirm = async () => { throw new Error('unchanged output must not request confirmation'); };
-  vm.runInContext('command = mockCommand; confirmAction = mockConfirm; renderSettings = () => {}', context);
-  await vm.runInContext('handleForm', context)(form);
-  assert.equal(calls[0].action, 'preferences.save');
-  assert.equal(calls[0].payload.confirmed, false);
-  assert.equal(Object.hasOwn(calls[0].payload, 'ffmpeg_path'), false);
+// The output select autosaves on change; this drives that real path with the real queue.
+function audioAutosaveContext() {
+  const context = appContext();
+  const select = { name: 'output', tagName: 'SELECT', type: 'select-one', value: '', closest: selector => selector === '[data-form]' ? form : null, matches: () => false };
+  const form = { dataset: { form: 'audio' }, elements: { output: select }, fields: { get output() { return select.value; } }, checkValidity: () => true, querySelector: () => null };
+  const dialog = context.document.querySelector('#settings');
+  dialog.querySelectorAll = selector => selector === '[data-form]' ? [form] : [];
+  context.createAutosaveQueue = createAutosaveQueue;
+  context.audioForm = form;
+  context.calls = [];
+  context.confirmReply = false;
+  vm.runInContext(`snapshot.preferences = { output: 'default' }; snapshot.queue = { current: { id: 1 }, pending: [{ id: 2 }] };
+    copyFormDraft = () => {}; mountSelects = () => calls.push('sync select');
+    command = async (action, payload) => { calls.push({ action, payload }); snapshot.preferences.output = payload.preferences.output; return snapshot; };
+    confirmAction = async (...args) => { calls.push({ confirm: args }); return confirmReply; };
+    mountAutosaves();`, context);
+  const choose = async value => {
+    select.value = value;
+    for (const listener of dialog.listeners.change) await listener({ target: select });
+    await vm.runInContext('autosaves.get(audioForm).queue.flush()', context);
+  };
+  return { context, select, choose };
+}
 
-  form.fields.output = 'Speakers';
-  context.mockConfirm = async () => true;
-  vm.runInContext('confirmAction = mockConfirm', context);
-  await vm.runInContext('handleForm', context)(form);
-  assert.equal(calls[1].payload.preferences.output.named, 'Speakers');
-  assert.equal(calls[1].payload.confirmed, true);
-  assert.equal(Object.hasOwn(calls[1].payload, 'ffmpeg_path'), false);
+test('choosing another output while speech plays asks before stopping it, and cancelling restores the saved device', async () => {
+  const { context, select, choose } = audioAutosaveContext();
+  await choose('Speakers');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls)), [{ confirm: ['应用新的音频输出？', '当前播放和待播队列会停止。', '应用并停止播放', false] }, 'sync select']);
+  assert.equal(select.value, '', 'the select returns to the device that is still in use');
+  assert.equal(vm.runInContext('autosaves.get(audioForm).touched', context), false, 'a declined change leaves no draft to retry');
+
+  context.calls.length = 0;
+  context.confirmReply = true;
+  await choose('Speakers');
+  assert.equal(context.calls.length, 2);
+  assert.ok(context.calls[0].confirm);
+  assert.equal(context.calls[1].action, 'preferences.save');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls[1].payload)), { preferences: { output: { named: 'Speakers' } }, confirmed: true });
+
+  context.calls.length = 0;
+  vm.runInContext('snapshot.queue = { current: null, pending: [] }', context);
+  await choose('');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls)), [{ action: 'preferences.save', payload: { preferences: { output: 'default' }, confirmed: true } }], 'nothing to stop: switch without a dialog');
 });
 
 test('dots editor uses one visible form and keeps its generated role key hidden', () => {
@@ -1323,6 +1357,195 @@ test('snapshot polling leaves the shell title unchanged until the language chang
   assert.deepEqual(titles, ['超绝可爱弹幕姬', 'DanmakuVoice']);
   accept(vm.runInContext("({...snapshot, config_revision:3, config_unchanged:false, preferences:{language:'zh-CN'}})", context));
   assert.deepEqual(titles, ['超绝可爱弹幕姬', 'DanmakuVoice', '超绝可爱弹幕姬']);
+});
+
+test('chat keeps updating during a long command and polls started before its reply are dropped', async () => {
+  const context = appContext();
+  context.document.querySelectorAll = () => [];
+  const requests = [];
+  context.window.__TAURI__ = { core: { invoke: (command, args) => new Promise(resolve => requests.push({ command, args, resolve })) } };
+  const state = (received, live) => ({ config_revision: 1, live: { running: true, state: 'connected', received }, queue: {}, broadcast: { live } });
+  vm.runInContext("step = 'tts'; scheduleSnapshotPolling = () => {}; refreshLocalServices = async () => {};", context);
+  context.initial = state(1, false);
+  vm.runInContext('snapshot = initial', context);
+  const broadcast = vm.runInContext("command('broadcast.start', {}, { quiet: true })", context);
+  assert.equal(requests.length, 1);
+  const during = vm.runInContext('pollSnapshot()', context);
+  assert.equal(requests[1]?.command, 'snapshot', 'a command waiting for OBS must not freeze danmaku, queue and audience');
+  requests[1].resolve(state(2, false));
+  await during;
+  assert.equal(vm.runInContext('snapshot.live.received', context), 2);
+  const racing = vm.runInContext('pollSnapshot()', context);
+  requests[0].resolve(state(3, true));
+  await broadcast;
+  requests[2].resolve(state(2, false));
+  await racing;
+  assert.equal(vm.runInContext('snapshot.broadcast.live', context), true, 'a poll started before the command reply cannot roll it back');
+  assert.equal(vm.runInContext('snapshot.live.received', context), 3);
+  const after = vm.runInContext('pollSnapshot()', context);
+  requests[3].resolve(state(4, true));
+  await after;
+  assert.equal(vm.runInContext('snapshot.live.received', context), 4);
+});
+
+test('leaving the main screen stops the lake clock', () => {
+  const context = appContext();
+  const cleared = [];
+  context.clearInterval = id => cleared.push(id);
+  const surface = context.document.querySelector('#surface');
+  surface.setAttribute = () => {};
+  context.document.querySelector = selector => selector.startsWith('#titlebar') || selector === '[data-titlebar-name]' ? null : surface;
+  vm.runInContext("lakeClockTimer = 41; step = 'welcome'; renderApp();", context);
+  assert.deepEqual(cleared, [41]);
+  assert.equal(vm.runInContext('lakeClockTimer', context), null);
+});
+
+test('new messages entering the open history keep the entry being read in place', () => {
+  const context = appContext();
+  const scroll = { scrollTop: 0, getBoundingClientRect: () => ({ top: 100, bottom: 500 }) };
+  const feed = { children: [], set innerHTML(html) {
+    this.children = [...html.matchAll(/data-id="([^"]+)"/g)].map((match, index) => ({ dataset: { id: match[1] },
+      getBoundingClientRect: () => ({ top: 100 + index * 40 - scroll.scrollTop, bottom: 140 + index * 40 - scroll.scrollTop }) }));
+  } };
+  const nodes = new Map([['#chat-feed', feed], ['#chat-scroll', scroll], ['#lake-history-dialog', { open: true }]]);
+  const surface = context.document.querySelector('#surface');
+  context.document.querySelector = selector => nodes.has(selector) ? nodes.get(selector) : surface;
+  const events = count => Array.from({ length: count }, (_, index) => ({ kind: 'danmaku', user_name: `观众${index}`, message: `第${index}句`, observed_at_ms: 1_700_000_000_000 + index }));
+  const render = list => { context.list = list; vm.runInContext('renderLakeHistory(list, list.map((event, index) => `k${event.observed_at_ms}`))', context); };
+  render(events(10));
+  render(events(11));
+  assert.equal(scroll.scrollTop, 0, 'at the top the newest message stays in view');
+  scroll.scrollTop = 200;
+  const reading = feed.children[5].dataset.id;
+  render(events(13));
+  assert.equal(feed.children[7].dataset.id, reading);
+  assert.equal(scroll.scrollTop, 280, 'the entry being read stays under the same point');
+});
+
+test('a second voice chip chosen while the first binding is being created updates that binding', async () => {
+  const context = appContext();
+  context.requests = [];
+  vm.runInContext(`snapshot.bindings = []; snapshot.presets = [{ id: 'a', name: '甲', provider: 'dots' }, { id: 'b', name: '乙', provider: 'dots' }];
+    viewerContext = { user_name: 'Alice', user_id: 7 }; updateViewerVoices = () => {};
+    command = (action, payload) => new Promise(resolve => requests.push({ action, payload, resolve: () => {
+      const id = payload.id || 'created-' + requests.length;
+      snapshot.bindings = [...snapshot.bindings.filter(entry => entry.id !== id), { id, binding: payload.binding }];
+      resolve({ ...snapshot, result: { id } });
+    } }));`, context);
+  const first = vm.runInContext("handleAction('viewer.bind', 'a', null)", context);
+  const second = vm.runInContext("handleAction('viewer.bind', 'b', null)", context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.requests.length, 1, 'the second choice waits for the binding the first one creates');
+  context.requests[0].resolve();
+  await first;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.requests[1]?.payload.id, 'created-1');
+  assert.equal(context.requests[1].payload.binding.preset_id, 'b');
+  context.requests[1].resolve();
+  await second;
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('snapshot.bindings.map(entry => [entry.id, entry.binding.preset_id])', context))), [['created-1', 'b']]);
+});
+
+// A minimal composer whose controls drop focus when disabled, as browsers do.
+function composeContext() {
+  const context = appContext();
+  const body = { id: 'body' };
+  context.document.body = body;
+  const control = extra => {
+    const node = { hidden: false, isConnected: true, dataset: {}, attrs: {}, title: '', innerHTML: '', textContent: '', classList: { toggle() {} },
+      setAttribute(key, value) { this.attrs[key] = value; }, focus() { context.document.activeElement = this; }, ...extra };
+    let disabled = false;
+    Object.defineProperty(node, 'disabled', { get: () => disabled, set: value => { disabled = !!value; if (disabled && context.document.activeElement === node) context.document.activeElement = body; } });
+    return node;
+  };
+  const input = control({ id: 'chat-message', value: '你好', maxLength: 20 });
+  const submit = control({ type: 'submit' });
+  const emoji = control({});
+  const form = control({ contains: node => [input, submit, emoji].includes(node) });
+  const parts = { form, '#chat-message': input, '.chat-compose-note': control({}), '.lake-compose-count': control({}), '[data-action="chat.emoticons"]': emoji, 'button[type="submit"]': submit };
+  const host = control({ querySelector: selector => parts[selector] ?? null, querySelectorAll: () => [input, submit, emoji] });
+  const count = parts['.lake-compose-count'];
+  const surface = context.document.querySelector('#surface');
+  const nodes = new Map([['#chat-compose', host], ['#chat-compose form', form], ['#chat-message', input], ['#chat-emoticon-picker', null]]);
+  context.document.querySelector = selector => nodes.has(selector) ? nodes.get(selector) : surface;
+  context.requests = [];
+  vm.runInContext(`step = 'main'; snapshot = { account: { user_id: 42 }, setup: { room_id: 99 }, chat_send: { account_id: 42, room_id: 99, message_limit: 20 }, preferences: {} };
+    showToast = () => {}; command = (action, payload) => new Promise(resolve => requests.push({ action, payload, resolve: () => resolve(snapshot) }));
+    chatMessageDraft = '你好'; updateChatCompose();`, context);
+  return { context, input, submit, body, count };
+}
+
+test('the chat counter and @-mention prefill count what the field and platform enforce', async () => {
+  const { context, input, count } = composeContext();
+  input.value = '😀😀a';
+  vm.runInContext('updateChatCompose()', context);
+  assert.equal(count.textContent, '5/20', 'maxlength and the platform both count UTF-16 units');
+  vm.runInContext(`chatMessageDraft = ''; viewerContext = { user_name: '${'😀'.repeat(10)}', user_id: 9 };
+    renderViewerDrawer = () => {}; updateLive = () => {};`, context);
+  await vm.runInContext("handleAction('viewer.at', '', null)", context);
+  const draft = vm.runInContext('chatMessageDraft', context);
+  assert.equal(draft.isWellFormed(), true, 'a cut surrogate pair would be rejected as invalid JSON');
+  assert.equal(draft, '@' + '😀'.repeat(9));
+  assert.equal(input.value, draft);
+});
+
+test('sending chat keeps the composer focused for the next message', async () => {
+  const { context, input, submit, body } = composeContext();
+  input.focus();
+  const sent = vm.runInContext('sendChatMessage()', context);
+  assert.equal(context.requests[0].action, 'bili.chat.send');
+  context.requests[0].resolve();
+  await sent;
+  assert.equal(input.disabled, false);
+  assert.equal(context.document.activeElement, input, 'Enter-to-send returns to the field');
+
+  vm.runInContext("chatMessageDraft = '再来一条'", context);
+  input.value = '再来一条';
+  vm.runInContext('updateChatCompose()', context);
+  submit.focus();
+  const clicked = vm.runInContext('sendChatMessage()', context);
+  context.requests[1].resolve();
+  await clicked;
+  assert.equal(context.document.activeElement, input, 'the emptied send button is disabled, so focus returns to the field');
+
+  const elsewhere = { id: 'elsewhere' };
+  vm.runInContext("chatMessageDraft = '第三条'", context);
+  input.value = '第三条';
+  vm.runInContext('updateChatCompose()', context);
+  input.focus();
+  const moved = vm.runInContext('sendChatMessage()', context);
+  context.document.activeElement = elsewhere;
+  context.requests[2].resolve();
+  await moved;
+  assert.equal(context.document.activeElement, elsewhere, 'focus the person moved elsewhere is not taken back');
+  assert.notEqual(body, elsewhere);
+});
+
+test('a failing viewer alias save is shown but never traps the card or settings, and its draft survives', async () => {
+  const context = appContext({ createAutosaveQueue });
+  context.saved = [];
+  context.opened = [];
+  vm.runInContext(`step = 'main'; snapshot.rules = { user_words: [{ from: 'Bob', to: '老鲍' }] }; snapshot.account = {};
+    renderViewerDrawer = () => {}; updateLive = () => {}; closeVoicePanel = () => {}; openSettings = async tab => { opened.push(tab); };
+    command = async () => { throw new Error('rules save failed'); };
+    viewerContext = { user_name: 'Alice', user_id: 7 }; viewerOpenIdentity = 'uid:7';`, context);
+  vm.runInContext("scheduleViewerAlias('小A')", context);
+  await vm.runInContext("handleAction('viewer.close', '', null)", context);
+  assert.equal(vm.runInContext('viewerContext', context), null, 'the card closes even though the save failed');
+  assert.match(vm.runInContext('errorText', context), /rules save failed/);
+  assert.equal(vm.runInContext("viewerAliasValue({ user_name: 'Alice' })", context), '小A', 'reopening the card shows the unsaved alias');
+
+  vm.runInContext("viewerContext = { user_name: 'Bob', user_id: 8 }; errorText = ''; scheduleViewerAlias('鲍勃')", context);
+  await vm.runInContext("handleAction('settings.open', '', null)", context);
+  assert.deepEqual(context.opened, ['voices'], 'settings still open');
+  assert.equal(vm.runInContext('viewerContext', context), null);
+  assert.match(vm.runInContext('errorText', context), /rules save failed/);
+
+  vm.runInContext('command = async (action, payload) => { saved.push(payload.rules.user_words); snapshot.rules = payload.rules; return snapshot; }', context);
+  assert.equal(await vm.runInContext('flushViewerAlias()', context), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.saved.at(-1))), [{ from: 'Alice', to: '小A' }, { from: 'Bob', to: '鲍勃' }], 'both drafts are kept until a save succeeds');
+  assert.equal(vm.runInContext("viewerAliasValue({ user_name: 'Alice' })", context), '小A');
+  assert.equal(vm.runInContext('viewerAliasDrafts.size', context), 0);
 });
 
 test('standalone emote filter defaults on, preserves disabled settings, and autosaves either value', () => {

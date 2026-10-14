@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
-import { escapeHtml as esc, validUid } from './helpers.mjs';
+import { escapeHtml as esc, validUid, createSnapshotSequencer } from './helpers.mjs';
 
 // The production functions run unchanged; only the desktop/DOM boundary is
 // fictional. These tests neither contact Bilibili nor play audio.
@@ -16,7 +16,7 @@ function actionContext() {
   const context = vm.createContext({
     document: { documentElement: { dataset: {} }, hasFocus: () => true, addEventListener() {}, querySelector: selector => selector === '#toast' ? toast : surface, querySelectorAll: () => [] },
     window: { addEventListener() {} }, matchMedia: () => ({ addEventListener() {} }),
-    t, ui, getLanguage, setLanguage, esc, validUid,
+    t, ui, getLanguage, setLanguage, esc, validUid, createSnapshotSequencer,
     mountSelects() {}, closeSelect() {}, stripSelects() {},
     createAutosaveQueue: () => ({ schedule() {}, flush: async () => {} }),
     setTimeout: (fn, delay) => { const id = ++sequence; timers.set(id, { fn, delay }); return id; },
