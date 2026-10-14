@@ -24,6 +24,7 @@
 | `DV-B07` | `bilibili.rs / BiliError::AlreadyRunning` | 直播连接任务已经运行 |
 | `DV-B08` | `bilibili.rs / BiliError::NoOwnRoom` | 此账号没有可用的直播间 |
 | `DV-B09` | `bilibili.rs / BiliError::SessionExpired` | B站登录已失效，请重新扫码 |
+| `DV-B11` | `bilibili.rs / BiliError::Unconfirmed` | 写操作（发送弹幕、禁言、拉黑、任免房管）已发出，但等待确认超时或确认无法读取，结果未知；请核对后再操作，不要直接重试 |
 | `DV-S01` | `storage.rs / StorageError::Io` | 文件操作失败：{0} |
 | `DV-S02` | `storage.rs / StorageError::Sql` | 数据库操作失败：{0} |
 | `DV-S03` | `storage.rs / StorageError::Json` | 配置格式错误：{0} |
@@ -233,4 +234,4 @@
 
 开播时 OBS 失败不会撤销已打开的直播间：命令成功返回，`result.obs.error` 带上述代码，界面提示检查「设置 → OBS 与开播」，右上角不显示推流码。下播时 OBS 失败也不阻止关闭直播间；若 OBS 已停推但关闭直播间失败，错误以“OBS 已停止推流，但……”开头并保留 B站代码。
 
-直播间用户管理沿用 B站 `DV-B03` / `DV-B04` / `DV-B05` / `DV-B09` 与命令边界 `DV-X01`，保留权限拒绝及平台数值错误码，不记录原始响应、Cookie 或用户名。
+直播间用户管理沿用 B站 `DV-B03` / `DV-B04` / `DV-B05` / `DV-B09` 与命令边界 `DV-X01`，保留权限拒绝及平台数值错误码，不记录原始响应、Cookie 或用户名。发送弹幕与用户管理的写请求发出后若等待确认超时，报告 `DV-B11`（结果未知），不报告为未发送。

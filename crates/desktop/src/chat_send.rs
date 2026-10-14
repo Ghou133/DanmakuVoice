@@ -183,8 +183,7 @@ impl Application {
         let result = tokio::select! {
             biased;
             _ = operation.cancel.cancelled() => return Err("账号或网络设置已变更，弹幕请求已取消；请核对发送结果".into()),
-            result = tokio::time::timeout(std::time::Duration::from_secs(30),perform(&action,&operation.session)) =>
-                result.unwrap_or(Err(BiliError::Protocol("弹幕请求超时，请核对发送结果"))),
+            result = perform(&action, &operation.session) => result,
         };
         self.complete_chat_send(&operation, result)
     }
@@ -249,15 +248,53 @@ impl Application {
     }
 }
 
+/// Pre-write reads share one command deadline.
+pub(super) const CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+const READ_TIMEOUT: &str = "弹幕发送区读取超时，请重试";
+const NOT_SENT: &str = "发送前核对超时，弹幕未发送";
+
+/// The deadline covers only the reads before a write. A started write is
+/// bounded by its own request timeout and is never dropped by this deadline:
+/// Bilibili may already have accepted it, and a retry would repeat it. A write
+/// that times out itself reports an unknown result (`BiliError::Unconfirmed`).
+pub(super) async fn checked_write<P, T, W>(
+    limit: std::time::Duration,
+    checks: impl Future<Output = Result<P, BiliError>>,
+    not_sent: &'static str,
+    write: impl FnOnce(P) -> W,
+) -> Result<T, BiliError>
+where
+    W: Future<Output = Result<T, BiliError>>,
+{
+    let prepared = tokio::time::timeout(limit, checks)
+        .await
+        .unwrap_or(Err(BiliError::Protocol(not_sent)))?;
+    write(prepared).await
+}
+
 async fn perform(action: &Action<'_>, session: &BiliSession) -> Result<Outcome, BiliError> {
     let client = ChatSendClient::new()?;
     match action {
-        Action::Refresh => client.refresh(session).await.map(Outcome::Refreshed),
-        Action::Text(message) => client.send_text(session, message).await.map(Outcome::Sent),
-        Action::Emoticon(token) => client
-            .send_emoticon(session, token)
+        Action::Refresh => tokio::time::timeout(CHECK_LIMIT, client.refresh(session))
             .await
-            .map(Outcome::Sent),
+            .unwrap_or(Err(BiliError::Protocol(READ_TIMEOUT)))
+            .map(Outcome::Refreshed),
+        Action::Text(message) => checked_write(
+            CHECK_LIMIT,
+            client.prepare_text(session, message),
+            NOT_SENT,
+            |prepared| client.submit(session, prepared),
+        )
+        .await
+        .map(Outcome::Sent),
+        Action::Emoticon(token) => checked_write(
+            CHECK_LIMIT,
+            client.prepare_emoticon(session, token),
+            NOT_SENT,
+            |prepared| client.submit(session, prepared),
+        )
+        .await
+        .map(Outcome::Sent),
     }
 }
 
@@ -316,6 +353,44 @@ mod tests {
             account_epoch: state.bili_profile_epoch,
             cancel: state.chat_send.cancel.clone(),
         }
+    }
+
+    #[tokio::test]
+    async fn pre_check_deadline_never_cuts_off_a_started_write() {
+        use std::time::Duration;
+        let limit = Duration::from_millis(200);
+        // The checks finish in time; the write itself outlives the deadline.
+        let written = checked_write(
+            limit,
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(7)
+            },
+            "未发送",
+            |value| async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(value * 2)
+            },
+        )
+        .await;
+        assert_eq!(written, Ok(14));
+        // Slow checks are refused before any write starts.
+        let started = std::sync::atomic::AtomicBool::new(false);
+        let refused: Result<u64, BiliError> = checked_write(
+            limit,
+            async {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                Ok(7)
+            },
+            "未发送",
+            |value| {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                async move { Ok(value) }
+            },
+        )
+        .await;
+        assert_eq!(refused, Err(BiliError::Protocol("未发送")));
+        assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

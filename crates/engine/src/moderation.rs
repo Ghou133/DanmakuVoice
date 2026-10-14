@@ -35,6 +35,20 @@ pub struct ModerationView {
     pub message: Option<&'static str>,
 }
 
+/// A write whose account, room and permission were just revalidated. Submitting
+/// it sends exactly one POST; the form carries CSRF and is never printed.
+pub struct ModerationWrite {
+    path: String,
+    params: Zeroizing<Vec<(String, String)>>,
+    room_id: u64,
+}
+
+impl std::fmt::Debug for ModerationWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ModerationWrite([redacted])")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RoomPermission {
     room_id: u64,
@@ -334,6 +348,20 @@ impl ModerationClient {
         user_id: u64,
         hours: i64,
     ) -> Result<(), BiliError> {
+        let write = self
+            .prepare_mute(session, display_room, expected_room, user_id, hours)
+            .await?;
+        self.submit(session, write).await
+    }
+
+    pub async fn prepare_mute(
+        &self,
+        session: &BiliSession,
+        display_room: u64,
+        expected_room: u64,
+        user_id: u64,
+        hours: i64,
+    ) -> Result<ModerationWrite, BiliError> {
         validate_hours(hours)?;
         let room = self
             .write_room(session, display_room, expected_room, user_id)
@@ -349,16 +377,11 @@ impl ModerationClient {
             ("type".into(), if hours == 0 { "2" } else { "1" }.into()),
             ("hour".into(), hours.to_string()),
         ]);
-        api_ok(
-            &self
-                .post(
-                    &format!("{SILENT_ROOT}AddSilentUser"),
-                    session,
-                    &params,
-                    room.room_id,
-                )
-                .await?,
-        )
+        Ok(ModerationWrite {
+            path: format!("{SILENT_ROOT}AddSilentUser"),
+            params,
+            room_id: room.room_id,
+        })
     }
 
     pub async fn unmute(
@@ -368,6 +391,19 @@ impl ModerationClient {
         expected_room: u64,
         user_id: u64,
     ) -> Result<(), BiliError> {
+        let write = self
+            .prepare_unmute(session, display_room, expected_room, user_id)
+            .await?;
+        self.submit(session, write).await
+    }
+
+    pub async fn prepare_unmute(
+        &self,
+        session: &BiliSession,
+        display_room: u64,
+        expected_room: u64,
+        user_id: u64,
+    ) -> Result<ModerationWrite, BiliError> {
         let room = self
             .write_room(session, display_room, expected_room, user_id)
             .await?;
@@ -380,16 +416,11 @@ impl ModerationClient {
             ("tuid".into(), user_id.to_string()),
             ("mobi_app".into(), "web".into()),
         ]);
-        api_ok(
-            &self
-                .post(
-                    &format!("{SILENT_ROOT}DelSilentUser"),
-                    session,
-                    &params,
-                    room.room_id,
-                )
-                .await?,
-        )
+        Ok(ModerationWrite {
+            path: format!("{SILENT_ROOT}DelSilentUser"),
+            params,
+            room_id: room.room_id,
+        })
     }
 
     /// Anchor room blacklist, not `/x/relation/modify` account blacklisting.
@@ -401,6 +432,20 @@ impl ModerationClient {
         user_id: u64,
         blocked: bool,
     ) -> Result<(), BiliError> {
+        let write = self
+            .prepare_blacklist(session, display_room, expected_room, user_id, blocked)
+            .await?;
+        self.submit(session, write).await
+    }
+
+    pub async fn prepare_blacklist(
+        &self,
+        session: &BiliSession,
+        display_room: u64,
+        expected_room: u64,
+        user_id: u64,
+        blocked: bool,
+    ) -> Result<ModerationWrite, BiliError> {
         let room = self
             .write_room(session, display_room, expected_room, user_id)
             .await?;
@@ -414,16 +459,11 @@ impl ModerationClient {
             ("spmid".into(), "444.8.0.0".into()),
         ]);
         let path = if blocked { "AddBlack" } else { "DelBlack" };
-        api_ok(
-            &self
-                .post(
-                    &format!("{BLACK_ROOT}{path}"),
-                    session,
-                    &params,
-                    room.room_id,
-                )
-                .await?,
-        )
+        Ok(ModerationWrite {
+            path: format!("{BLACK_ROOT}{path}"),
+            params,
+            room_id: room.room_id,
+        })
     }
 
     /// Appointment/revocation is only available to the authenticated anchor.
@@ -436,6 +476,20 @@ impl ModerationClient {
         user_id: u64,
         appointed: bool,
     ) -> Result<(), BiliError> {
+        let write = self
+            .prepare_set_admin(session, display_room, expected_room, user_id, appointed)
+            .await?;
+        self.submit(session, write).await
+    }
+
+    pub async fn prepare_set_admin(
+        &self,
+        session: &BiliSession,
+        display_room: u64,
+        expected_room: u64,
+        user_id: u64,
+        appointed: bool,
+    ) -> Result<ModerationWrite, BiliError> {
         let room = self
             .write_room(session, display_room, expected_room, user_id)
             .await?;
@@ -458,8 +512,46 @@ impl ModerationClient {
             params.push(("uid".into(), user_id.to_string()));
             "/xlive/app-ucenter/v1/roomAdmin/dismiss"
         };
-        api_ok(&self.post(path, session, &params, room.room_id).await?)
+        Ok(ModerationWrite {
+            path: path.into(),
+            params,
+            room_id: room.room_id,
+        })
     }
+
+    /// Send one prepared write. Callers bound their pre-checks; once this
+    /// starts, only the request's own timeout applies (see [`send_write`]).
+    pub async fn submit(
+        &self,
+        session: &BiliSession,
+        write: ModerationWrite,
+    ) -> Result<(), BiliError> {
+        let request = self
+            .request(&write.path, session, true, false, write.room_id)
+            .form(&*write.params);
+        api_ok(&send_write(request).await?)
+    }
+}
+
+/// Send a platform write. Only a connection that never opened proves it was
+/// not received. Once Bilibili may have it, a timeout or an unreadable success
+/// reply leaves the result unknown: callers must not report it as unsent or
+/// retry it, because the action could be applied twice.
+pub(crate) async fn send_write(request: reqwest::RequestBuilder) -> Result<Value, BiliError> {
+    let response = request.send().await.map_err(|error| {
+        if error.is_builder() || (error.is_connect() && !error.is_timeout()) {
+            BiliError::Network
+        } else {
+            BiliError::Unconfirmed
+        }
+    })?;
+    if !response.status().is_success() {
+        return Err(BiliError::Network);
+    }
+    read_json(response).await.map_err(|error| match error {
+        BiliError::Network => BiliError::Unconfirmed,
+        error => error,
+    })
 }
 
 pub fn validate_target(user: u64, account: u64) -> Result<(), BiliError> {
@@ -721,6 +813,11 @@ mod tests {
                     assert!(bytes.len() < 64 * 1024);
                 }
                 requests.push(String::from_utf8(bytes).unwrap());
+                if reply == "hang" {
+                    // Received, but the reply never arrives in time.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
                 let body = reply.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -946,6 +1043,31 @@ mod tests {
         assert_eq!(error, BiliError::Api(403));
         assert!(!error.to_string().contains("credential-like-secret"));
         assert_eq!(task.await.unwrap().len(), 4);
+    }
+
+    fn short_timeout() -> Client {
+        Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(400))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn started_write_timeout_is_unknown_and_never_reported_as_not_sent() {
+        let (mut client, task) = fixture(vec![nav(), room(42), json!("hang")]).await;
+        client.http = short_timeout();
+        let error = client.mute(&session(), 1, 123, 77, 24).await.unwrap_err();
+        assert!(error.to_string().contains("结果未知"), "{error}");
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("POST /xlive/web-ucenter/v1/banned/AddSilentUser "));
+        // A slow pre-check read is not a write: it stays an ordinary failure.
+        let (mut client, task) = fixture(vec![json!("hang")]).await;
+        client.http = short_timeout();
+        let error = client.mute(&session(), 1, 123, 77, 24).await.unwrap_err();
+        assert_eq!(error, BiliError::Network);
+        assert_eq!(task.await.unwrap().len(), 1);
     }
 
     #[tokio::test]
