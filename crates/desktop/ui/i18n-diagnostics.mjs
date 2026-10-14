@@ -37,6 +37,10 @@ OBS 或叠加层设置已变更，请重新检测	OBS or overlay settings change
 当前账号没有使用这个表情的权限	This account cannot use this emoticon.
 这个表情当前不可用，请刷新表情列表	This emoticon is unavailable. Refresh the list.
 直播间与当前登录账号不匹配	The live room does not belong to the signed-in account.
+直播间不存在，请检查房间号	The live room does not exist. Check the room number.
+请先在设置中启用开播台	Enable the broadcast console in settings first.
+登录已更新，请重新提交语音任务	Login changed. Submit the speech task again.
+输出设备已断开，请重新选择输出设备	Output device disconnected. Select an output device again.
 弹幕发送身份与当前账号不匹配	Chat identity does not match the current account.
 请选择禁言时长	Choose a mute duration
 不支持的直播间用户管理操作	Unsupported room moderation action
@@ -284,7 +288,7 @@ TLS 安全连接失败，请检查系统证书、系统时间、网络或代理�
 请先完成豆包登录	Sign in to Doubao first
 请选择有效的豆包音色	Choose a valid Doubao voice
 语速须在 0.5 到 2.0 倍之间	Speech speed must be between 0.5 and 2.0
-总超时须在 1 到 120 秒之间	Total timeout must be between 1 and 120 seconds
+首段音频超时须在 1 到 120 秒之间	First audio timeout must be between 1 and 120 seconds
 WebSocket 地址无效	Invalid WebSocket URL
 朗读文本须为 1 到 10000 个字符	Speech text must contain 1–10000 characters
 豆包请求已暂停，请检查登录或稍后手动恢复	Doubao requests are paused. Check login or resume manually later

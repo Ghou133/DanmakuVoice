@@ -2541,6 +2541,12 @@ impl Application {
         Ok(())
     }
 
+    pub(crate) fn preflight_data_clear(&self) -> Result<(), String> {
+        let _transition = self.begin_reconfiguration()?;
+        DataResetPlan::inspect(&self.data_dir()?)?;
+        Ok(())
+    }
+
     async fn clear_data(&self) -> Result<Value, String> {
         let _transition = self.begin_reconfiguration()?;
         let data_dir = self.data_dir()?;
@@ -4092,7 +4098,7 @@ fn room_state(state: &RoomState) -> (&'static str, String) {
         ),
         RoomState::RoomNotFound { .. } => (
             "room_not_found",
-            "直播间不存在，请检查房间号 [DV-B11]".into(),
+            "直播间不存在，请检查房间号 [DV-B12]".into(),
         ),
         RoomState::Connecting { .. } => ("connecting", "正在连接".into()),
         RoomState::Connected { .. } => ("connected", "已连接，等待弹幕".into()),

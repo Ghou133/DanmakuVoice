@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 
 const CURRENT_SCHEMA: i64 = 6;
 const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_DATABASE_BACKUPS: usize = 5;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -525,18 +526,24 @@ impl DataStore {
         let db_path = data_dir.join("danmakuvoice.sqlite3");
         let mut conn = Connection::open(&db_path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;",
+        )?;
         // Most opens (one per live event) only need this unlocked check.
         let upgrade_backup = if schema_version(&conn)? < CURRENT_SCHEMA {
             Self::upgrade(&mut conn, &data_dir, &db_path)?
         } else {
             None
         };
-        Ok(Self {
+        let store = Self {
             data_dir,
             conn,
             upgrade_backup,
-        })
+        };
+        if store.upgrade_backup.is_some() {
+            store.maintain_backups()?;
+        }
+        Ok(store)
     }
 
     /// Create or upgrade the schema under SQLite's write lock. Another
@@ -574,7 +581,7 @@ impl DataStore {
                 "before-v{version}-to-v{CURRENT_SCHEMA}-{stamp}-{}.sqlite3",
                 Uuid::new_v4()
             ));
-            source.backup(rusqlite::MAIN_DB, &path, None)?;
+            credential_free_backup(&source, &path)?;
             Some(path)
         } else {
             None
@@ -799,7 +806,8 @@ impl DataStore {
     }
 
     /// Snapshot the current database before a user-confirmed legacy import.
-    /// SQLite's backup API includes committed WAL content in this file.
+    /// SQLite's backup API includes committed WAL content. Credentials are
+    /// removed in memory before any snapshot is written to disk.
     pub fn backup_before_legacy_import(&self) -> Result<PathBuf, StorageError> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -809,8 +817,50 @@ impl DataStore {
             "before-legacy-import-{stamp}-{}.sqlite3",
             Uuid::new_v4()
         ));
-        self.conn.backup(rusqlite::MAIN_DB, &path, None)?;
+        self.maintain_backups()?;
+        credential_free_backup(&self.conn, &path)?;
+        self.maintain_backups()?;
         Ok(path)
+    }
+
+    /// Preserve configuration recovery while revoking credentials from old
+    /// snapshots. This runs at backup creation or explicit credential removal,
+    /// never once per live event. Only our UUID-named snapshots are managed.
+    fn maintain_backups(&self) -> Result<(), StorageError> {
+        let directory = self.data_dir.join("backups");
+        check_backup_entry(&directory, &self.data_dir.canonicalize()?)?;
+        let root = directory.canonicalize()?;
+        let mut snapshots = Vec::new();
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if !name.to_str().is_some_and(is_database_backup) {
+                continue;
+            }
+            let path = entry.path();
+            check_backup_entry(&path, &root)?;
+            let source =
+                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            if backup_has_credentials(&source)? {
+                let sanitized = root.join(format!(".sanitized-{}.tmp", Uuid::new_v4()));
+                let result = credential_free_backup(&source, &sanitized);
+                drop(source);
+                if let Err(error) = result {
+                    let _ = fs::remove_file(&sanitized);
+                    return Err(error);
+                }
+                if let Err(error) = replace_backup(&sanitized, &path) {
+                    let _ = fs::remove_file(&sanitized);
+                    return Err(error.into());
+                }
+            }
+            snapshots.push((entry.metadata()?.modified()?, path));
+        }
+        snapshots.sort_by(|a, b| b.cmp(a));
+        for (_, path) in snapshots.into_iter().skip(MAX_DATABASE_BACKUPS) {
+            fs::remove_file(path)?;
+        }
+        Ok(())
     }
 
     /// The importer uses a separate store connection so its immediate write
@@ -834,6 +884,16 @@ impl DataStore {
         rules.validate()?;
         let json = serde_json::to_string(rules)?;
         let tx = self.conn.savepoint()?;
+        for sound in &rules.sounds {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assets WHERE id=?1)",
+                params![sound.asset_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(StorageError::AssetMissing(sound.asset_id.clone()));
+            }
+        }
         tx.execute(
             "INSERT INTO settings(key,json) VALUES('rules',?1)\
             ON CONFLICT(key) DO UPDATE SET json=excluded.json",
@@ -951,6 +1011,7 @@ impl DataStore {
     /// It is DPAPI-protected like other credentials and never exported.
     pub fn save_obs_password(&mut self, password: &str) -> Result<(), StorageError> {
         if password.is_empty() {
+            self.maintain_backups()?;
             self.conn.execute(
                 "DELETE FROM protected_secrets WHERE key='obs_websocket'",
                 [],
@@ -1112,6 +1173,7 @@ impl DataStore {
     }
 
     pub fn clear_bili_session(&mut self) -> Result<bool, StorageError> {
+        self.maintain_backups()?;
         let changed = self
             .conn
             .execute("DELETE FROM protected_secrets WHERE key='bilibili'", [])?;
@@ -1244,6 +1306,7 @@ impl DataStore {
     }
 
     pub fn delete_connection(&mut self, id: &str) -> Result<(), StorageError> {
+        self.maintain_backups()?;
         let references: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM presets WHERE connection_id=?1",
             params![id],
@@ -1476,6 +1539,7 @@ impl DataStore {
     }
 
     pub fn clear_connection_credential(&mut self, id: &str) -> Result<bool, StorageError> {
+        self.maintain_backups()?;
         let existing: Option<bool> = self
             .conn
             .query_row(
@@ -2048,6 +2112,139 @@ impl DataStore {
     }
 }
 
+fn backup_secret_tables(conn: &Connection) -> Result<(bool, bool), StorageError> {
+    let secrets: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='protected_secrets')",
+        [], |row| row.get(0))?;
+    let credential: bool = conn
+        .prepare("PRAGMA table_info(connections)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == "protected_credential");
+    Ok((secrets, credential))
+}
+
+fn backup_has_credentials(conn: &Connection) -> Result<bool, StorageError> {
+    let (secrets, credential) = backup_secret_tables(conn)?;
+    Ok((secrets
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM protected_secrets)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?)
+        || (credential
+            && conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connections WHERE protected_credential IS NOT NULL)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?))
+}
+
+fn credential_free_backup(source: &Connection, path: &Path) -> Result<(), StorageError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::other("备份目录不可用"))?;
+    let data = directory
+        .parent()
+        .ok_or_else(|| io::Error::other("备份目录不可用"))?;
+    check_backup_entry(directory, &data.canonicalize()?)?;
+    let mut memory = Connection::open_in_memory()?;
+    rusqlite::backup::Backup::new(source, &mut memory)?.run_to_completion(
+        128,
+        Duration::from_millis(1),
+        None,
+    )?;
+    let (secrets, credential) = backup_secret_tables(&memory)?;
+    memory.execute_batch("PRAGMA secure_delete = ON;")?;
+    if secrets {
+        memory.execute("DELETE FROM protected_secrets", [])?;
+    }
+    if credential {
+        memory.execute("UPDATE connections SET protected_credential=NULL", [])?;
+    }
+    // Compact before persisting so deleted ciphertext does not survive in
+    // free pages. The active database is never edited by this operation.
+    memory.execute_batch("VACUUM")?;
+    memory.backup(rusqlite::MAIN_DB, path, None)?;
+    Ok(())
+}
+
+fn is_database_backup(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".sqlite3") else {
+        return false;
+    };
+    if !stem.is_ascii() || stem.len() < 38 {
+        return false;
+    }
+    let (prefix, uuid) = stem.split_at(stem.len() - 36);
+    if Uuid::parse_str(uuid).is_err() {
+        return false;
+    }
+    let Some(prefix) = prefix.strip_suffix('-') else {
+        return false;
+    };
+    if let Some(stamp) = prefix.strip_prefix("before-legacy-import-") {
+        return stamp.parse::<u64>().is_ok();
+    }
+    let Some(prefix) = prefix.strip_prefix("before-v") else {
+        return false;
+    };
+    let Some((from, rest)) = prefix.split_once("-to-v") else {
+        return false;
+    };
+    let Some((to, stamp)) = rest.split_once('-') else {
+        return false;
+    };
+    from.parse::<u64>().is_ok() && to.parse::<u64>().is_ok() && stamp.parse::<u64>().is_ok()
+}
+
+fn check_backup_entry(path: &Path, parent: &Path) -> Result<(), StorageError> {
+    let metadata = fs::symlink_metadata(path)?;
+    #[cfg(windows)]
+    let redirected = {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    };
+    #[cfg(not(windows))]
+    let redirected = metadata.file_type().is_symlink();
+    if redirected || path.canonicalize()?.parent() != Some(parent) {
+        return Err(io::Error::other("备份路径被重定向，未操作该路径").into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_backup(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // Both buffers are NUL terminated and live throughout the call.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_backup(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
 fn schema_version(conn: &Connection) -> Result<i64, StorageError> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if !(0..=CURRENT_SCHEMA).contains(&version) {
@@ -2315,6 +2512,13 @@ mod tests {
             trigger: "叮".into(),
             asset_id: "missing-asset".into(),
         });
+        assert!(matches!(
+            store.save_rules(&unchanged_missing_references),
+            Err(StorageError::AssetMissing(_))
+        ));
+        assert_eq!(store.load_rules().unwrap(), saved);
+        // An intentionally missing default voice is still repairable.
+        unchanged_missing_references.sounds.clear();
         store.save_rules(&unchanged_missing_references).unwrap();
         assert_eq!(store.load_rules().unwrap(), unchanged_missing_references);
         store.save_rules(&saved).unwrap();
@@ -3315,6 +3519,104 @@ mod tests {
             })
             .unwrap();
         assert_eq!(marker, "{}");
+    }
+
+    #[test]
+    fn snapshots_preserve_configuration_but_never_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = DataStore::open(temp.path()).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO protected_secrets VALUES('bilibili', ?1)",
+                params![b"test-encrypted-cookie-marker".as_slice()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO connections VALUES('fish','Fish','fish_audio',?1,?2)",
+                params![
+                    r#"{"FishAudio":{"timeout_secs":30}}"#,
+                    b"test-encrypted-api-key-marker".as_slice()
+                ],
+            )
+            .unwrap();
+        let backup = store.backup_before_legacy_import().unwrap();
+        let snapshot = Connection::open(&backup).unwrap();
+        assert!(!backup_has_credentials(&snapshot).unwrap());
+        assert_eq!(
+            snapshot
+                .query_row("SELECT name FROM connections WHERE id='fish'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "Fish"
+        );
+        assert!(backup_has_credentials(&store.conn).unwrap());
+        let bytes = fs::read(backup).unwrap();
+        for marker in [
+            b"test-encrypted-api-key-marker".as_slice(),
+            b"test-encrypted-cookie-marker".as_slice(),
+        ] {
+            assert!(!bytes.windows(marker.len()).any(|part| part == marker));
+        }
+    }
+
+    #[test]
+    fn logout_scrubs_old_snapshots_and_retains_only_five_owned_backups() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO protected_secrets VALUES('bilibili', ?1)",
+                params![b"test-encrypted-cookie-marker".as_slice()],
+            )
+            .unwrap();
+        let directory = temp.path().join("backups");
+        fs::write(directory.join("user.sqlite3"), b"keep user file").unwrap();
+        for stamp in 1..=7 {
+            let path = directory.join(format!(
+                "before-legacy-import-{stamp}-{}.sqlite3",
+                Uuid::new_v4()
+            ));
+            store.conn.backup(rusqlite::MAIN_DB, &path, None).unwrap();
+        }
+        assert!(store.clear_bili_session().unwrap());
+        let mut count = 0;
+        for entry in fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            if is_database_backup(entry.file_name().to_str().unwrap()) {
+                count += 1;
+                let backup = Connection::open(entry.path()).unwrap();
+                assert!(!backup_has_credentials(&backup).unwrap());
+                assert_eq!(schema_version(&backup).unwrap(), CURRENT_SCHEMA);
+            }
+        }
+        assert_eq!(count, MAX_DATABASE_BACKUPS);
+        assert_eq!(
+            fs::read(directory.join("user.sqlite3")).unwrap(),
+            b"keep user file"
+        );
+        assert!(!store.clear_bili_session().unwrap());
+    }
+
+    #[test]
+    fn missing_sound_asset_cannot_replace_valid_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let mut rules = RuleSet::default();
+        rules.sounds.push(crate::rules::SoundRule {
+            trigger: "叮".into(),
+            asset_id: "missing".into(),
+        });
+        assert!(matches!(
+            store.save_rules(&rules),
+            Err(StorageError::AssetMissing(_))
+        ));
+        assert_eq!(store.load_rules().unwrap(), RuleSet::default());
+        assert!(store.conn.is_autocommit());
     }
 
     #[cfg(windows)]

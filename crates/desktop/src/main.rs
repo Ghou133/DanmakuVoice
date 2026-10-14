@@ -280,6 +280,7 @@ async fn dispatch(
         if payload.get("confirmed").and_then(Value::as_bool) != Some(true) {
             return Err("清除应用数据需要明确确认".into());
         }
+        state.preflight_data_clear()?;
         let window = app.get_webview_window("main").ok_or("主窗口不可用")?;
         resources::clear_browsing_data(&window).await?;
     }

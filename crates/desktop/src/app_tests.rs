@@ -1034,6 +1034,7 @@ async fn reset_rejects_unsafe_managed_entries_before_wiping_settings() {
     ));
     std::fs::create_dir(&path).unwrap();
     std::fs::write(path.join("keep.txt"), b"must survive").unwrap();
+    assert!(app.preflight_data_clear().is_err());
     assert!(
         app.dispatch("data.clear", json!({"confirmed":true}))
             .await
@@ -2558,7 +2559,7 @@ fn missing_room_and_api_rejections_have_distinct_desktop_states() {
         room_state(&RoomState::RoomNotFound { room_id: 42 }),
         (
             "room_not_found",
-            "直播间不存在，请检查房间号 [DV-B11]".into()
+            "直播间不存在，请检查房间号 [DV-B12]".into()
         )
     );
     let reconnecting = |api_code| RoomState::Reconnecting {

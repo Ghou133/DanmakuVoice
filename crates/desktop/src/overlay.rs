@@ -340,6 +340,7 @@ impl OverlayHub {
         (state.obs_clients.len(), state.obs_generation)
     }
 
+    #[cfg(test)]
     pub(crate) fn token_matches(&self, candidate: &str) -> bool {
         self.token_generation_if_matches(candidate).is_some()
     }
@@ -1252,7 +1253,7 @@ mod tests {
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
-        assert!(!response.contains("data:"));
+        assert!(!response.split_once("\r\n\r\n").unwrap().1.contains("data:"));
         assert!(!hub.has_clients());
     }
 

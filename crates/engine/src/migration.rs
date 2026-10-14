@@ -254,10 +254,15 @@ fn apply_reviewed(
             let provider = settings.provider;
             let endpoint = setting_text(settings, "ApiUrl");
             let old_timeout = setting_seconds(settings, "Timeout", default_timeout(provider));
-            let timeout = old_timeout.min(30);
-            if old_timeout > timeout {
+            let (minimum, maximum) = if provider == Provider::Doubao {
+                (1, 120)
+            } else {
+                (5, 600)
+            };
+            let timeout = old_timeout.clamp(minimum, maximum);
+            if old_timeout != timeout {
                 report.excluded.push(format!(
-                    "{} 旧超时 {old_timeout} 秒按新版上限调整为 30 秒",
+                    "{} 旧超时 {old_timeout} 秒按新版范围调整为 {timeout} 秒",
                     provider_label(provider)
                 ));
             }
@@ -605,8 +610,18 @@ fn import_fish_voice(
     if imported.contains_key(&id) {
         return Ok(false);
     }
-    let mut preset = store.save_fish_voice(connection_id, &id, name)?;
-    preset.speed = speed;
+    // This connection is new and the map already deduplicates normalized IDs.
+    // Avoid rescanning all previously imported presets for every new voice.
+    let preset = VoicePreset {
+        id: Uuid::new_v4().to_string(),
+        name: name.trim().to_owned(),
+        connection_id: connection_id.to_owned(),
+        provider: Provider::FishAudio,
+        voice_id: id.clone(),
+        speed,
+        volume: 1.0,
+        sovits: None,
+    };
     store.save_preset(&preset)?;
     imported.insert(id, preset.id);
     Ok(true)
@@ -1027,13 +1042,13 @@ mod tests {
         let connection = store.connections().unwrap().pop().unwrap();
         assert!(matches!(
             connection.settings,
-            ConnectionSettings::FishAudio { timeout_secs: 30 }
+            ConnectionSettings::FishAudio { timeout_secs: 180 }
         ));
         assert!(
             report
                 .excluded
                 .iter()
-                .any(|item| item.contains("旧超时 180 秒"))
+                .all(|item| !item.contains("旧超时 180 秒"))
         );
         assert!(!connection.has_credential);
         assert!(

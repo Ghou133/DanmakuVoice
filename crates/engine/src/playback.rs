@@ -667,6 +667,11 @@ impl PlaybackExecutor {
         cancel: &CancellationToken,
         speech_progress: &AtomicBool,
     ) -> Result<(), AttemptError> {
+        if self.writer.disconnected() {
+            return Err(AttemptError::Playback(
+                "输出设备已断开，请重新选择输出设备".into(),
+            ));
+        }
         match part {
             PreparedPart::OutputTest => {
                 ffmpeg::play_tts(
@@ -751,10 +756,13 @@ impl JobExecutor for PlaybackExecutor {
         if cancel.is_cancelled() {
             return Err("播放已取消".into());
         }
+        if self.writer.disconnected() {
+            return Err("输出设备已断开，请重新选择输出设备".into());
+        }
         let (selected, fallback_notice) = plan.select_for_execution(&cancel).await?;
         self.writer
             .activate_for(job.id, &cancel)
-            .map_err(|_| "播放已取消".to_owned())?;
+            .map_err(|error| error.to_string())?;
         let _guard = ActiveJobGuard {
             writer: self.writer.clone(),
             job_id: job.id,
@@ -769,6 +777,9 @@ impl JobExecutor for PlaybackExecutor {
                 && std::ptr::eq(selected, plan.as_ref())
                 && !cancel.is_cancelled() =>
             {
+                if self.writer.disconnected() {
+                    return Err("输出设备已断开，请重新选择输出设备".into());
+                }
                 let (default, notice) = plan
                     .choose_default(FallbackCause::SynthesisBeforeAudio, &cancel)
                     .await
@@ -2501,8 +2512,7 @@ mod tests {
         )
         .await
         .expect("the next part waited for synthesis on a dead device")
-        .err()
-        .expect("a dead device cannot play the next part");
+        .expect_err("a dead device cannot play the next part");
         assert!(matches!(
             failure.error,
             AttemptError::Playback(ref message) if message.contains("输出设备已断开")

@@ -4,7 +4,7 @@ use std::{
     fmt,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -234,9 +234,17 @@ fn process_gate() -> SharedGate {
     Arc::clone(GATE.get_or_init(|| Arc::new(Mutex::new(GateState::default()))))
 }
 
-fn process_pause() -> Arc<AtomicU8> {
-    static PAUSE: OnceLock<Arc<AtomicU8>> = OnceLock::new();
-    Arc::clone(PAUSE.get_or_init(|| Arc::new(AtomicU8::new(0))))
+fn process_pause() -> Arc<AtomicU64> {
+    static PAUSE: OnceLock<Arc<AtomicU64>> = OnceLock::new();
+    Arc::clone(PAUSE.get_or_init(|| Arc::new(AtomicU64::new(0))))
+}
+
+// Low byte is the pause reason; high bits identify the confirmed login.
+// Updating both atomically prevents an old request from pausing a new login.
+fn reset_pause(pause: &AtomicU64) {
+    let _ = pause.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+        Some((state & !255).wrapping_add(256))
+    });
 }
 
 struct Inner {
@@ -245,7 +253,23 @@ struct Inner {
     gate: SharedGate,
     interval: Duration,
     idle_timeout: Duration,
-    pause: Arc<AtomicU8>,
+    pause: Arc<AtomicU64>,
+    login_generation: u64,
+}
+
+impl Inner {
+    fn current_login(&self) -> bool {
+        self.pause.load(Ordering::Acquire) & !255 == self.login_generation
+    }
+
+    fn set_pause(&self, reason: DoubaoPauseReason) {
+        let _ = self.pause.compare_exchange(
+            self.login_generation,
+            self.login_generation | u64::from(reason.as_byte()),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -269,7 +293,7 @@ impl DoubaoClient {
         config: DoubaoConfig,
         endpoint: Url,
         gate: SharedGate,
-        pause: Arc<AtomicU8>,
+        pause: Arc<AtomicU64>,
         interval: Duration,
     ) -> Result<Self, TtsError> {
         config.device.validate()?;
@@ -278,7 +302,7 @@ impl DoubaoClient {
             return Err(configuration("语速须在 0.5 到 2.0 倍之间"));
         }
         if !(1..=120).contains(&config.timeout_secs) {
-            return Err(configuration("总超时须在 1 到 120 秒之间"));
+            return Err(configuration("首段音频超时须在 1 到 120 秒之间"));
         }
         if !matches!(endpoint.scheme(), "ws" | "wss") {
             return Err(configuration("WebSocket 地址无效"));
@@ -290,27 +314,36 @@ impl DoubaoClient {
                 gate,
                 interval,
                 idle_timeout: IDLE_TIMEOUT,
+                login_generation: pause.load(Ordering::Acquire) & !255,
                 pause,
             }),
         })
     }
 
     pub fn pause_reason(&self) -> Option<DoubaoPauseReason> {
-        DoubaoPauseReason::from_byte(self.inner.pause.load(Ordering::Acquire))
+        DoubaoPauseReason::from_byte(self.inner.pause.load(Ordering::Acquire) as u8)
     }
 
     /// Called only after the user resolves login or a service rate limit.
     pub fn resume_after_user_action(&self) {
-        self.inner.pause.store(0, Ordering::Release);
+        let _ = self
+            .inner
+            .pause
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (state & !255 == self.inner.login_generation).then_some(state & !255)
+            });
     }
 
     /// A confirmed QR login replaces the credential used by all new clients.
     /// Clear their shared pause only after the new credential is persisted.
     pub fn resume_after_confirmed_login() {
-        process_pause().store(0, Ordering::Release);
+        reset_pause(&process_pause());
     }
 
     pub fn stream(&self, text: &str, parent: &CancellationToken) -> Result<AudioStream, TtsError> {
+        if !self.inner.current_login() {
+            return Err(configuration("登录已更新，请重新提交语音任务"));
+        }
         if text.trim().is_empty() || text.chars().count() > 10_000 {
             return Err(configuration("朗读文本须为 1 到 10000 个字符"));
         }
@@ -328,7 +361,10 @@ impl DoubaoClient {
                     _ = cancellation.cancelled() => return Ok(()),
                     guard = inner.gate.lock() => guard,
                 };
-                if inner.pause.load(Ordering::Acquire) != 0 {
+                if !inner.current_login() {
+                    return Err(configuration("登录已更新，请重新提交语音任务"));
+                }
+                if inner.pause.load(Ordering::Acquire) as u8 != 0 {
                     return Err(configuration("豆包请求已暂停，请检查登录或稍后手动恢复"));
                 }
                 if let Some(instant) = gate.next_start {
@@ -339,6 +375,9 @@ impl DoubaoClient {
                     }
                 }
                 gate.next_start = Some(Instant::now() + inner.interval);
+                if !inner.current_login() {
+                    return Err(configuration("登录已更新，请重新提交语音任务"));
+                }
                 // The guard covers the entire synthesis, not just connection
                 // setup. The configured limit applies until the first audio
                 // frame: later frames are read only as fast as they play, so
@@ -550,7 +589,7 @@ fn process_event(inner: &Inner, event: &Value, adts: &AdtsDecoder) -> Result<boo
             _ => None,
         };
         if let Some(reason) = reason {
-            inner.pause.store(reason.as_byte(), Ordering::Release);
+            inner.set_pause(reason);
         }
         return Err(match reason {
             Some(DoubaoPauseReason::Authentication) => {
@@ -577,23 +616,15 @@ fn ws_error(inner: &Inner, error: tungstenite::Error, stage: &'static str) -> Tt
         let status = response.status().as_u16();
         let reason = match status {
             401 => {
-                inner.pause.store(
-                    DoubaoPauseReason::Authentication.as_byte(),
-                    Ordering::Release,
-                );
+                inner.set_pause(DoubaoPauseReason::Authentication);
                 "登录状态无效，请重新登录"
             }
             403 => {
-                inner.pause.store(
-                    DoubaoPauseReason::AccountBlocked.as_byte(),
-                    Ordering::Release,
-                );
+                inner.set_pause(DoubaoPauseReason::AccountBlocked);
                 "账号或设备语音请求受限"
             }
             429 => {
-                inner
-                    .pause
-                    .store(DoubaoPauseReason::RateLimited.as_byte(), Ordering::Release);
+                inner.set_pause(DoubaoPauseReason::RateLimited);
                 "请求频率过高"
             }
             300..=399 => "连接被重定向",
@@ -692,7 +723,7 @@ mod tests {
             config(),
             Url::parse(WS_ENDPOINT).unwrap(),
             Arc::new(Mutex::new(GateState::default())),
-            Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU64::new(0)),
             Duration::ZERO,
         )
         .unwrap();
@@ -790,7 +821,7 @@ mod tests {
             config(),
             endpoint,
             Arc::new(Mutex::new(GateState::default())),
-            Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU64::new(0)),
             Duration::ZERO,
         )
         .unwrap();
@@ -829,7 +860,7 @@ mod tests {
             config(),
             endpoint,
             Arc::new(Mutex::new(GateState::default())),
-            Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU64::new(0)),
             Duration::ZERO,
         )
         .unwrap();
@@ -849,7 +880,7 @@ mod tests {
     fn confirmed_login_resumes_new_clients_sharing_process_pause() {
         let pause = process_pause();
         pause.store(
-            DoubaoPauseReason::Authentication.as_byte(),
+            u64::from(DoubaoPauseReason::Authentication.as_byte()),
             Ordering::Release,
         );
         let client = DoubaoClient::new(config()).unwrap();
@@ -873,10 +904,52 @@ mod tests {
             config,
             endpoint,
             Arc::new(Mutex::new(GateState::default())),
-            Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU64::new(0)),
             Duration::ZERO,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn login_change_rejects_an_old_task_waiting_for_the_request_gate() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(&listener, 1);
+        let gate = client.inner.gate.lock().await;
+        let mut audio = client
+            .stream("旧登录排队任务", &CancellationToken::new())
+            .unwrap();
+        reset_pause(&client.inner.pause);
+        drop(gate);
+        let error = timeout(Duration::from_secs(2), audio.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("登录已更新"));
+        assert!(
+            timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_old_inflight_error_cannot_pause_a_new_login() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(&listener, 1);
+        reset_pause(&client.inner.pause);
+        let decoder = AdtsDecoder::default();
+        assert!(
+            process_event(
+                &client.inner,
+                &json!({"event":"error","status_code":710012001}),
+                &decoder
+            )
+            .is_err()
+        );
+        assert_eq!(client.pause_reason(), None);
+        assert!(!client.inner.current_login());
+        assert!(client.stream("旧任务", &CancellationToken::new()).is_err());
     }
 
     #[tokio::test]
@@ -978,7 +1051,7 @@ mod tests {
             config(),
             Url::parse(WS_ENDPOINT).unwrap(),
             Arc::new(Mutex::new(GateState::default())),
-            Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU64::new(0)),
             Duration::ZERO,
         )
         .unwrap();
@@ -1034,7 +1107,7 @@ mod tests {
             config(),
             endpoint,
             Arc::new(Mutex::new(GateState::default())),
-            Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU64::new(0)),
             Duration::from_millis(10),
         )
         .unwrap();

@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 const MAX_TEMPLATE_BYTES: usize = 8 * 1024;
-const MAX_KEYWORD_BYTES: usize = 512;
-const MAX_REPLACEMENT_BYTES: usize = 2 * 1024;
+pub(crate) const MAX_KEYWORD_BYTES: usize = 512;
+pub(crate) const MAX_REPLACEMENT_BYTES: usize = 2 * 1024;
 const MAX_PLAN_BYTES: usize = 64 * 1024;
 const MAX_PLAN_PARTS: usize = 256;
 
@@ -394,6 +394,9 @@ fn render_template(
 /// Check a legacy/user template before persisting it. A parser error at this
 /// stage must not become a silent per-event failure during live playback.
 pub(crate) fn validate_template(template: &str) -> Result<(), RuleError> {
+    if template.len() > MAX_TEMPLATE_BYTES {
+        return Err(RuleError::TooLarge("播报模板"));
+    }
     let sample = LiveEvent::danmaku(0, None, "用户", "消息");
     render_template(template, &sample, &RuleSet::default()).map(|_| ())
 }

@@ -207,8 +207,8 @@ by preset ID. Real Fish login, synthesis,
 charge behavior, and complete GUI flow have not been validated by offline IPC tests.
 Preferences include `{appearance:"system"|"light"|"dark",language:"zh-CN"|"en",scale:1,output:"default",
 master_volume:1,muted:false,onboarding_done:false,broadcaster_uid:null,authenticated:true,
-tts_enabled:true,broadcast_console:false}`. `broadcast_console` is the experimental 开播 switch: it only shows the
-broadcast console on the main screen and allows the UI's read-only `bili.broadcast.refresh` calls; it changes no reception,
+tts_enabled:true,broadcast_console:false}`. `broadcast_console` is the experimental 开播 switch: it shows the
+broadcast console and gates its read/write commands in Rust (except credential discard); it changes no reception,
 speech or room state. Only specified preference fields are merged into current values.
 Missing language defaults to `zh-CN`; unsupported language values are rejected before changing settings.
 Changing only language preserves playback, speech templates, names and existing credentials.

@@ -118,6 +118,9 @@ impl AudioWriter {
         if cancel.is_cancelled() {
             return Err(AudioError::Cancelled);
         }
+        if self.disconnected() {
+            return Err(AudioError::Disconnected);
+        }
         self.activate_unlocked(job_id);
         Ok(())
     }

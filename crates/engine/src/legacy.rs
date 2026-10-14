@@ -74,6 +74,7 @@ pub struct LegacySetting {
 pub enum LegacyPathState {
     Empty,
     Relative,
+    Unsafe,
     Missing,
     NotFile,
     Present,
@@ -174,7 +175,8 @@ pub fn preview_legacy_config_file(path: &Path) -> Result<LegacyPreview, LegacyEr
     preview_legacy_config_json(raw)
 }
 
-/// Parse an in-memory copy of the old `config.json` without touching disk.
+/// Parse an in-memory config and inspect only its declared local asset paths
+/// for review. Credential files and network paths are never opened.
 pub fn preview_legacy_config_json(raw: &str) -> Result<LegacyPreview, LegacyError> {
     if raw.len() > MAX_CONFIG_BYTES {
         return Err(LegacyError::TooLarge);
@@ -682,6 +684,16 @@ fn parse_replacements(
                 message: "空关键词不会匹配，已跳过".into(),
             });
         } else if let Some(to) = to.as_str() {
+            if from.len() > crate::rules::MAX_KEYWORD_BYTES
+                || to.len() > crate::rules::MAX_REPLACEMENT_BYTES
+            {
+                warnings.push(LegacyWarning {
+                    kind: LegacyWarningKind::InvalidValue,
+                    path: format!("{path}.{from}"),
+                    message: "词典词条超过新版长度上限，已跳过".into(),
+                });
+                continue;
+            }
             replacements.push(Replacement {
                 from: from.clone(),
                 to: to.into(),
@@ -702,8 +714,74 @@ fn path_state(value: &str) -> LegacyPathState {
         return LegacyPathState::Empty;
     }
     let path = Path::new(value);
+    // Inspect syntax before any filesystem call: UNC, device namespaces,
+    // drive-relative paths and alternate streams must never initiate I/O.
+    if value.starts_with(['\\', '/']) && (value.starts_with("\\\\") || value.starts_with("//"))
+        || value.chars().any(char::is_control)
+        || value
+            .char_indices()
+            .any(|(index, ch)| ch == ':' && index != 1)
+    {
+        return LegacyPathState::Unsafe;
+    }
     if !path.is_absolute() {
         return LegacyPathState::Relative;
+    }
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+        const DRIVE_REMOTE: u32 = 4;
+        let Some(Component::Prefix(prefix)) = path.components().next() else {
+            return LegacyPathState::Unsafe;
+        };
+        let Prefix::Disk(letter) = prefix.kind() else {
+            return LegacyPathState::Unsafe;
+        };
+        let drive = [u16::from(letter), 58, 92, 0];
+        // A mapped drive can point at SMB despite its local-looking syntax.
+        if unsafe { GetDriveTypeW(drive.as_ptr()) } == DRIVE_REMOTE {
+            return LegacyPathState::Unsafe;
+        }
+        for component in path.components() {
+            if let Component::Normal(name) = component {
+                let name = name.to_string_lossy();
+                let stem = name
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_ascii_uppercase();
+                if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                        && stem.len() == 4
+                        && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+                {
+                    return LegacyPathState::Unsafe;
+                }
+            }
+        }
+    }
+    // A local-looking path can still redirect to a network share through a
+    // junction. Inspect each existing component before following it.
+    let mut inspected = std::path::PathBuf::new();
+    for component in path.components() {
+        inspected.push(component.as_os_str());
+        match fs::symlink_metadata(&inspected) {
+            Ok(metadata) => {
+                #[cfg(windows)]
+                let redirected = {
+                    use std::os::windows::fs::MetadataExt;
+                    metadata.file_attributes() & 0x400 != 0
+                };
+                #[cfg(not(windows))]
+                let redirected = metadata.file_type().is_symlink();
+                if redirected {
+                    return LegacyPathState::Unsafe;
+                }
+            }
+            Err(_) => return LegacyPathState::Missing,
+        }
     }
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => LegacyPathState::Present,
@@ -739,12 +817,15 @@ fn parse_sounds(value: Option<&Value>, preview: &mut LegacyPreview) -> Result<()
             );
             continue;
         };
-        if trigger.is_empty() || source_path.is_empty() {
+        if trigger.is_empty()
+            || trigger.len() > crate::rules::MAX_KEYWORD_BYTES
+            || source_path.is_empty()
+        {
             warn(
                 preview,
                 LegacyWarningKind::InvalidValue,
                 "BiliService.AudioClipDict",
-                "空关键词或路径在旧版不会触发，已跳过",
+                "关键词为空、超长或路径为空，已跳过",
             );
             continue;
         }
@@ -769,9 +850,19 @@ fn parse_sounds(value: Option<&Value>, preview: &mut LegacyPreview) -> Result<()
                     "音效超过预览校验预算，不能直接选择导入",
                 );
             } else {
-                source_sha256 = Some(sound_sha256(Path::new(source_path))?);
-                source_bytes = Some(size);
-                hashed_bytes += size;
+                match sound_sha256(Path::new(source_path)) {
+                    Ok(hash) => {
+                        source_sha256 = Some(hash);
+                        source_bytes = Some(size);
+                        hashed_bytes += size;
+                    }
+                    Err(_) => warn(
+                        preview,
+                        LegacyWarningKind::InvalidPath,
+                        &format!("BiliService.AudioClipDict.{trigger}"),
+                        "音效文件不可读，已保留预览并禁用该项导入",
+                    ),
+                }
             }
         }
         let preview_asset_id = format!("legacy-preview-only-sound-{}", preview.sounds.len());
@@ -856,6 +947,13 @@ fn parse_provider(
             );
         } else if let Some((_, kind)) = safe.iter().find(|(name, _)| *name == key.as_str()) {
             if valid_type(value, *kind) {
+                if key == "Voices"
+                    && value
+                        .as_object()
+                        .is_some_and(|voices| voices.len() > MAX_RULES)
+                {
+                    return Err(LegacyError::TooMany("Fish Audio 音色收藏"));
+                }
                 if matches!(key.as_str(), "GptModel" | "SovitsModel" | "RefAudioPath")
                     && let Some(value) = value.as_str()
                 {
@@ -1227,6 +1325,54 @@ fn optional_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_rejects_network_and_device_paths_before_filesystem_access() {
+        for path in [
+            r"\\server\share\voice.wav",
+            "//server/share/voice.wav",
+            r"\\?\C:\voice.wav",
+            r"\\.\pipe\voice",
+            r"C:\voice.wav:stream",
+        ] {
+            assert_eq!(path_state(path), LegacyPathState::Unsafe, "{path}");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("local.wav");
+        fs::write(&local, b"RIFF").unwrap();
+        assert_eq!(
+            path_state(local.to_str().unwrap()),
+            LegacyPathState::Present
+        );
+        #[cfg(windows)]
+        for device in [r"C:\CON", r"C:\NUL.wav", r"C:\COM1", r"C:\folder\LPT2.mp3"] {
+            assert_eq!(path_state(device), LegacyPathState::Unsafe);
+        }
+    }
+
+    #[test]
+    fn overlong_legacy_rules_are_excluded_before_confirmed_import() {
+        let raw = serde_json::json!({"BiliService":{
+            "DanmakuOnText":"x".repeat(8193),
+            "AliasDict":{"valid":"ok","too-long":"x".repeat(2049)},
+            "AudioClipDict":{ "x".repeat(513): r"C:\missing.wav" }
+        }})
+        .to_string();
+        let preview = preview_legacy_config_json(&raw).unwrap();
+        assert_eq!(preview.rules.user_words.len(), 1);
+        assert!(preview.sounds.is_empty());
+        assert_eq!(preview.warnings.len(), 3);
+        preview.rules.validate().unwrap();
+        let voices: serde_json::Map<String, Value> = (0..1025)
+            .map(|id| (id.to_string(), Value::String("voice".into())))
+            .collect();
+        assert!(matches!(
+            preview_legacy_config_json(
+                &serde_json::json!({"FishAudioService":{"Voices":voices}}).to_string()
+            ),
+            Err(LegacyError::TooMany(_))
+        ));
+    }
     use crate::model::LiveEvent;
     use crate::rules::PlanPart;
 

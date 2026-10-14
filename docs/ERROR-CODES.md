@@ -25,6 +25,7 @@
 | `DV-B08` | `bilibili.rs / BiliError::NoOwnRoom` | 此账号没有可用的直播间 |
 | `DV-B09` | `bilibili.rs / BiliError::SessionExpired` | B站登录已失效，请重新扫码 |
 | `DV-B11` | `bilibili.rs / BiliError::Unconfirmed` | 写操作（发送弹幕、禁言、拉黑、任免房管）已发出，但等待确认超时或确认无法读取，结果未知；请核对后再操作，不要直接重试 |
+| `DV-B12` | `bilibili.rs / BiliError::RoomNotFound` | 直播间不存在；停止重连并提示检查房间号 |
 | `DV-S01` | `storage.rs / StorageError::Io` | 文件操作失败：{0} |
 | `DV-S02` | `storage.rs / StorageError::Sql` | 数据库操作失败：{0} |
 | `DV-S03` | `storage.rs / StorageError::Json` | 配置格式错误：{0} |

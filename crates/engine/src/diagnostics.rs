@@ -117,27 +117,75 @@ impl DiagnosticLog {
                 checked_local_entry(&path, &parent, false)?;
             }
         }
-        if let Some(mut file) = self.file.take() {
+        let current = self.directory.join("current.jsonl");
+        if let Some(file) = self.file.as_mut() {
             file.flush()?;
         }
-        for index in (2..=ROTATED_FILES).rev() {
-            let previous = self.directory.join(format!("previous-{}.jsonl", index - 1));
-            let destination = self.directory.join(format!("previous-{index}.jsonl"));
-            if entry_exists(&previous)? {
-                if entry_exists(&destination)? {
-                    fs::remove_file(&destination)?;
+        self.file.take();
+        let generation = uuid::Uuid::new_v4();
+        let mut moves = Vec::new();
+        let rotated = (|| -> io::Result<()> {
+            // Stage every source before overwriting an archive. A locked
+            // current file therefore never shifts or evicts an old log.
+            for index in 0..=ROTATED_FILES {
+                let source = if index == 0 {
+                    current.clone()
+                } else {
+                    self.directory.join(format!("previous-{index}.jsonl"))
+                };
+                if entry_exists(&source)? {
+                    let stage = self
+                        .directory
+                        .join(format!(".rotation-{generation}-{index}.jsonl"));
+                    fs::rename(&source, &stage)?;
+                    moves.push((source, stage));
                 }
-                fs::rename(previous, destination)?;
+            }
+            for index in 0..ROTATED_FILES {
+                let stage = self
+                    .directory
+                    .join(format!(".rotation-{generation}-{index}.jsonl"));
+                if entry_exists(&stage)? {
+                    let destination = self.directory.join(format!("previous-{}.jsonl", index + 1));
+                    fs::rename(&stage, &destination)?;
+                    moves.push((stage, destination));
+                }
+            }
+            Ok(())
+        })();
+        if rotated.is_err() {
+            // Undo promotions first, then restore their original sources.
+            for (source, destination) in moves.iter().rev() {
+                if let Err(error) = fs::rename(destination, source) {
+                    // Keep staged evidence on disk if rollback itself fails.
+                    self.file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&current)
+                        .ok();
+                    self.bytes = self
+                        .file
+                        .as_ref()
+                        .and_then(|file| file.metadata().ok())
+                        .map_or(0, |meta| meta.len());
+                    return Err(error);
+                }
             }
         }
-        let current = self.directory.join("current.jsonl");
-        let first = self.directory.join("previous-1.jsonl");
-        if entry_exists(&first)? {
-            fs::remove_file(&first)?;
+        // A failed rename must not permanently disable future diagnostics.
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&current)?;
+        self.bytes = file.metadata()?.len();
+        self.file = Some(file);
+        rotated?;
+        let oldest = self
+            .directory
+            .join(format!(".rotation-{generation}-{ROTATED_FILES}.jsonl"));
+        if entry_exists(&oldest)? {
+            fs::remove_file(oldest)?;
         }
-        fs::rename(&current, &first)?;
-        self.file = Some(OpenOptions::new().create(true).append(true).open(current)?);
-        self.bytes = 0;
         Ok(())
     }
 }
@@ -240,6 +288,47 @@ fn checked_local_entry(path: &Path, parent: &Path, directory: bool) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_current_file_does_not_evict_archives_or_disable_logging() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let mut log = DiagnosticLog::open(temp.path()).unwrap();
+        log.record(DiagnosticCode::AppStarted, None).unwrap();
+        for index in 1..=ROTATED_FILES {
+            fs::write(
+                log.directory.join(format!("previous-{index}.jsonl")),
+                format!("archive {index}"),
+            )
+            .unwrap();
+        }
+        // Read/write sharing permits reopening but denies rename/delete.
+        let locked = OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(log.directory.join("current.jsonl"))
+            .unwrap();
+        for _ in 0..2 {
+            assert!(log.rotate().is_err());
+            assert!(log.file.is_some());
+            for index in 1..=ROTATED_FILES {
+                assert_eq!(
+                    fs::read_to_string(log.directory.join(format!("previous-{index}.jsonl")))
+                        .unwrap(),
+                    format!("archive {index}")
+                );
+            }
+        }
+        drop(locked);
+        log.rotate().unwrap();
+        log.record(DiagnosticCode::RoomConnected, Some(42)).unwrap();
+        assert!(
+            fs::read_to_string(log.directory.join("current.jsonl"))
+                .unwrap()
+                .contains("room_connected")
+        );
+    }
 
     #[cfg(any(unix, windows))]
     #[test]

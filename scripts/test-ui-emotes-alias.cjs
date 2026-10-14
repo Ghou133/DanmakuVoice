@@ -46,6 +46,8 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
 
 (async()=>{
   await fs.mkdir(output,{recursive:true});
+  // Match the native app's production page policy in this HTTP fixture.
+  const csp = JSON.parse(await fs.readFile(path.resolve(__dirname,'../crates/desktop/tauri.conf.json'),'utf8')).app.security.csp;
   const server = http.createServer(async(request,response)=>{
     try {
       const pathname = new URL(request.url,'http://localhost').pathname;
@@ -54,7 +56,7 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
       const type = {'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.png':'image/png','.woff2':'font/woff2'}[path.extname(file)];
       let bytes = await fs.readFile(overrideApp && pathname==='/app.js'?overrideApp:file).catch(()=>fs.readFile(path.join(root,'fonts',path.basename(file))));
       if(pathname==='/app.js')bytes=Buffer.concat([bytes,Buffer.from('\nglobalThis.__acceptTestSnapshot = acceptSnapshot;\n')]);
-      response.writeHead(200,{'Content-Type':type||'application/octet-stream'}).end(bytes);
+      response.writeHead(200,{'Content-Type':type||'application/octet-stream','Content-Security-Policy':csp}).end(bytes);
     }catch{response.writeHead(404).end();}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -64,9 +66,15 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
     browser = await chromium.launch({headless:true,channel:'msedge',args:['--disable-features=msWindowTabManagerPublic']});
     const context = await browser.newContext({viewport:{width:1040,height:740}});
     const blocked = [];
+    const injectedBlocked = [];
     await context.route('**/*',route=>{
       if(route.request().url().startsWith(origin+'/'))return route.continue();
-      blocked.push(route.request().url());return route.abort();
+      const url = new URL(route.request().url());
+      // This Windows host's antivirus injects its own script into Edge. It
+      // is absent from application assets and is still aborted, never allowed.
+      if (url.hostname === 'me.kis.v2.scr.kaspersky-labs.com' && url.pathname.endsWith('/main.js')) injectedBlocked.push(url.origin+url.pathname);
+      else blocked.push(route.request().url());
+      return route.abort();
     });
     const page = await context.newPage();
     const errors = [];
@@ -292,8 +300,8 @@ const check = name => {checks.push(name);console.log('PASS '+name);};
         await capture.close();check('1920x1080 main-chat light and dark screenshots captured');
       }
     assert.deepEqual(errors,[]);
-    assert.equal(blocked.length,0);
+    assert.equal(blocked.length,0,JSON.stringify(blocked));
     assert.equal(calls.some(call=>/audition|qr.begin|live.connect/.test(call.action)),false);
-    await fs.writeFile(path.join(output,'result.json'),JSON.stringify({passed:true,headless:true,realNativeDesktop:false,externalNetwork:false,fictionalData:true,checks,dispatches:calls.map(call=>call.action)},null,2));
+    await fs.writeFile(path.join(output,'result.json'),JSON.stringify({passed:true,headless:true,realNativeDesktop:false,externalNetwork:false,fictionalData:true,blockedInjectedRequests:injectedBlocked,checks,dispatches:calls.map(call=>call.action)},null,2));
   }finally{if(browser)await browser.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});

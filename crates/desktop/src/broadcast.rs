@@ -238,6 +238,9 @@ impl Application {
         }
         if action == "bili.broadcast.credentials" {
             let state = self.lock()?;
+            if !state.prefs.broadcast_console {
+                return Err("请先在设置中启用开播台 [DV-B10]".into());
+            }
             if state.broadcast.busy {
                 return Err("开播管理正在处理请求，请稍候 [DV-B10]".into());
             }
@@ -249,6 +252,9 @@ impl Application {
                 .ok_or_else(|| "当前没有推流信息，请点击开播获取 [DV-B10]".into());
         }
         self.require_network()?;
+        if !self.lock()?.prefs.broadcast_console {
+            return Err("请先在设置中启用开播台 [DV-B10]".into());
+        }
         let (session, epoch, cancel, obs_cancel) = {
             let mut state = self.lock()?;
             if state.broadcast.busy {
@@ -421,7 +427,9 @@ impl Application {
             Some(Ok(launched)) => launched,
             None => false,
         };
-        if launched {
+        // OBS may have been launched manually or during an earlier face
+        // verification attempt. Its WebSocket must be ready in every case.
+        {
             let ready = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err("账号已变更，开播管理请求已取消；请刷新房间状态 [DV-B10]".into()),
@@ -431,7 +439,7 @@ impl Application {
             if let Err(error) = ready {
                 let message = error.to_string();
                 self.record_obs(Err(message.clone()))?;
-                return Ok(json!({"obs": obs_outcome(Err(message), true)}));
+                return Ok(json!({"obs": obs_outcome(Err(message), launched)}));
             }
         }
         // The room is already open. OBS problems become a warning for the
@@ -1143,6 +1151,7 @@ mod tests {
     fn isolated(network_disabled: bool) -> (tempfile::TempDir, Application) {
         let directory = tempfile::tempdir().unwrap();
         let app = Application::new(directory.path().to_path_buf(), network_disabled).unwrap();
+        app.lock().unwrap().prefs.broadcast_console = true;
         (directory, app)
     }
 
@@ -1267,6 +1276,23 @@ mod tests {
                 .unwrap_err()
                 .contains("正在处理请求")
         );
+    }
+
+    #[tokio::test]
+    async fn disabled_broadcast_console_blocks_backend_actions_before_account_or_obs_work() {
+        let (_directory, app) = isolated(false);
+        app.lock().unwrap().prefs.broadcast_console = false;
+        for action in ["refresh", "start", "stop", "update", "credentials"] {
+            let error = app
+                .broadcast_command(
+                    &format!("bili.broadcast.{action}"),
+                    &json!({"confirmed":true}),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("启用开播台"), "{error}");
+            assert!(!app.lock().unwrap().broadcast.busy);
+        }
     }
 
     #[tokio::test]

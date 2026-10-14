@@ -669,13 +669,14 @@ pub async fn wait_until_ready(
 ) -> Result<(), ObsError> {
     let deadline = tokio::time::Instant::now() + limit;
     loop {
-        let attempt = async {
+        let attempt = tokio::time::timeout_at(deadline, async {
             let mut connection = ObsConnection::connect(settings, password).await?;
             let result = connection.stream_active().await.map(|_| ());
             connection.close().await;
             result
-        }
-        .await;
+        })
+        .await
+        .map_err(|_| ObsError::NotReady(limit.as_secs()))?;
         match attempt {
             Ok(()) => return Ok(()),
             Err(
@@ -689,7 +690,8 @@ pub async fn wait_until_ready(
                 if tokio::time::Instant::now() >= deadline {
                     return Err(ObsError::NotReady(limit.as_secs()));
                 }
-                sleep(READY_POLL).await;
+                tokio::time::sleep_until((tokio::time::Instant::now() + READY_POLL).min(deadline))
+                    .await;
             }
             Err(error) => return Err(error),
         }
@@ -1966,6 +1968,26 @@ mod tests {
             .unwrap();
         assert!(!outcome.found && !outcome.created);
         assert!(server.await.unwrap().sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn readiness_deadline_also_bounds_a_stalled_websocket_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            let _ = released.await;
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_until_ready(&local(port), None, Duration::from_millis(200)),
+        )
+        .await
+        .expect("readiness deadline did not bound connection setup");
+        assert!(matches!(result, Err(ObsError::NotReady(0))));
+        let _ = release.send(());
+        server.await.unwrap();
     }
 
     #[tokio::test]
