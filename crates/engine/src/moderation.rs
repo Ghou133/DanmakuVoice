@@ -17,7 +17,14 @@ const LIVE_API: &str = "https://api.live.bilibili.com";
 const ACCOUNT_API: &str = "https://api.bilibili.com";
 const SILENT_ROOT: &str = "/xlive/web-ucenter/v1/banned/";
 const BLACK_ROOT: &str = "/xlive/app-ucenter/v2/xbanned/banned/";
-const MAX_LIST_PAGES: u64 = 100;
+/// Pages read from one moderation list before its status counts as unknown.
+const STATUS_LIST_PAGES: u64 = 30;
+/// Each status list has its own time budget, so one slow list cannot hold
+/// back the rows that did answer.
+#[cfg(not(test))]
+const STATUS_LIST_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+#[cfg(test)]
+const STATUS_LIST_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 const BLACK_PAGE_SIZE: u64 = 10;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -33,6 +40,20 @@ pub struct ModerationView {
     pub muted: Option<bool>,
     pub blacklisted: Option<bool>,
     pub message: Option<&'static str>,
+}
+
+/// A write whose account, room and permission were just revalidated. Submitting
+/// it sends exactly one POST; the form carries CSRF and is never printed.
+pub struct ModerationWrite {
+    path: String,
+    params: Zeroizing<Vec<(String, String)>>,
+    room_id: u64,
+}
+
+impl std::fmt::Debug for ModerationWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ModerationWrite([redacted])")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,18 +207,18 @@ impl ModerationClient {
             });
         }
         let muted = if room.can_moderate {
-            Some(self.silent_status(session, room.room_id, user_id).await?)
+            list_status(self.silent_status(session, room.room_id, user_id)).await?
         } else {
             None
         };
         let blacklisted = if room.can_blacklist {
-            Some(self.black_status(session, room, user_id).await?)
+            list_status(self.black_status(session, room, user_id)).await?
         } else {
             None
         };
         let can_manage_admins = room.anchor_id == session.user_id();
         let is_admin = if can_manage_admins {
-            Some(self.admin_status(session, room.room_id, user_id).await?)
+            list_status(self.admin_status(session, room.room_id, user_id)).await?
         } else {
             None
         };
@@ -220,7 +241,7 @@ impl ModerationClient {
         room: u64,
         user: u64,
     ) -> Result<bool, BiliError> {
-        for page in 1..=MAX_LIST_PAGES {
+        for page in 1..=STATUS_LIST_PAGES {
             let mut params = csrf_params(session);
             params.extend([
                 ("room_id".into(), room.to_string()),
@@ -251,7 +272,7 @@ impl ModerationClient {
         room: RoomPermission,
         user: u64,
     ) -> Result<bool, BiliError> {
-        for page in 1..=MAX_LIST_PAGES {
+        for page in 1..=STATUS_LIST_PAGES {
             let value = self
                 .get(
                     &format!("{BLACK_ROOT}GetBlackList"),
@@ -282,7 +303,7 @@ impl ModerationClient {
         room: u64,
         user: u64,
     ) -> Result<bool, BiliError> {
-        for page in 1..=MAX_LIST_PAGES {
+        for page in 1..=STATUS_LIST_PAGES {
             let value = self
                 .get(
                     "/xlive/app-ucenter/v1/roomAdmin/get_by_anchor",
@@ -334,6 +355,20 @@ impl ModerationClient {
         user_id: u64,
         hours: i64,
     ) -> Result<(), BiliError> {
+        let write = self
+            .prepare_mute(session, display_room, expected_room, user_id, hours)
+            .await?;
+        self.submit(session, write).await
+    }
+
+    pub async fn prepare_mute(
+        &self,
+        session: &BiliSession,
+        display_room: u64,
+        expected_room: u64,
+        user_id: u64,
+        hours: i64,
+    ) -> Result<ModerationWrite, BiliError> {
         validate_hours(hours)?;
         let room = self
             .write_room(session, display_room, expected_room, user_id)
@@ -349,16 +384,11 @@ impl ModerationClient {
             ("type".into(), if hours == 0 { "2" } else { "1" }.into()),
             ("hour".into(), hours.to_string()),
         ]);
-        api_ok(
-            &self
-                .post(
-                    &format!("{SILENT_ROOT}AddSilentUser"),
-                    session,
-                    &params,
-                    room.room_id,
-                )
-                .await?,
-        )
+        Ok(ModerationWrite {
+            path: format!("{SILENT_ROOT}AddSilentUser"),
+            params,
+            room_id: room.room_id,
+        })
     }
 
     pub async fn unmute(
@@ -368,6 +398,19 @@ impl ModerationClient {
         expected_room: u64,
         user_id: u64,
     ) -> Result<(), BiliError> {
+        let write = self
+            .prepare_unmute(session, display_room, expected_room, user_id)
+            .await?;
+        self.submit(session, write).await
+    }
+
+    pub async fn prepare_unmute(
+        &self,
+        session: &BiliSession,
+        display_room: u64,
+        expected_room: u64,
+        user_id: u64,
+    ) -> Result<ModerationWrite, BiliError> {
         let room = self
             .write_room(session, display_room, expected_room, user_id)
             .await?;
@@ -380,16 +423,11 @@ impl ModerationClient {
             ("tuid".into(), user_id.to_string()),
             ("mobi_app".into(), "web".into()),
         ]);
-        api_ok(
-            &self
-                .post(
-                    &format!("{SILENT_ROOT}DelSilentUser"),
-                    session,
-                    &params,
-                    room.room_id,
-                )
-                .await?,
-        )
+        Ok(ModerationWrite {
+            path: format!("{SILENT_ROOT}DelSilentUser"),
+            params,
+            room_id: room.room_id,
+        })
     }
 
     /// Anchor room blacklist, not `/x/relation/modify` account blacklisting.
@@ -401,6 +439,20 @@ impl ModerationClient {
         user_id: u64,
         blocked: bool,
     ) -> Result<(), BiliError> {
+        let write = self
+            .prepare_blacklist(session, display_room, expected_room, user_id, blocked)
+            .await?;
+        self.submit(session, write).await
+    }
+
+    pub async fn prepare_blacklist(
+        &self,
+        session: &BiliSession,
+        display_room: u64,
+        expected_room: u64,
+        user_id: u64,
+        blocked: bool,
+    ) -> Result<ModerationWrite, BiliError> {
         let room = self
             .write_room(session, display_room, expected_room, user_id)
             .await?;
@@ -414,16 +466,11 @@ impl ModerationClient {
             ("spmid".into(), "444.8.0.0".into()),
         ]);
         let path = if blocked { "AddBlack" } else { "DelBlack" };
-        api_ok(
-            &self
-                .post(
-                    &format!("{BLACK_ROOT}{path}"),
-                    session,
-                    &params,
-                    room.room_id,
-                )
-                .await?,
-        )
+        Ok(ModerationWrite {
+            path: format!("{BLACK_ROOT}{path}"),
+            params,
+            room_id: room.room_id,
+        })
     }
 
     /// Appointment/revocation is only available to the authenticated anchor.
@@ -436,6 +483,20 @@ impl ModerationClient {
         user_id: u64,
         appointed: bool,
     ) -> Result<(), BiliError> {
+        let write = self
+            .prepare_set_admin(session, display_room, expected_room, user_id, appointed)
+            .await?;
+        self.submit(session, write).await
+    }
+
+    pub async fn prepare_set_admin(
+        &self,
+        session: &BiliSession,
+        display_room: u64,
+        expected_room: u64,
+        user_id: u64,
+        appointed: bool,
+    ) -> Result<ModerationWrite, BiliError> {
         let room = self
             .write_room(session, display_room, expected_room, user_id)
             .await?;
@@ -458,7 +519,58 @@ impl ModerationClient {
             params.push(("uid".into(), user_id.to_string()));
             "/xlive/app-ucenter/v1/roomAdmin/dismiss"
         };
-        api_ok(&self.post(path, session, &params, room.room_id).await?)
+        Ok(ModerationWrite {
+            path: path.into(),
+            params,
+            room_id: room.room_id,
+        })
+    }
+
+    /// Send one prepared write. Callers bound their pre-checks; once this
+    /// starts, only the request's own timeout applies (see [`send_write`]).
+    pub async fn submit(
+        &self,
+        session: &BiliSession,
+        write: ModerationWrite,
+    ) -> Result<(), BiliError> {
+        let request = self
+            .request(&write.path, session, true, false, write.room_id)
+            .form(&*write.params);
+        api_ok(&send_write(request).await?)
+    }
+}
+
+/// Send a platform write. Only a connection that never opened proves it was
+/// not received. Once Bilibili may have it, a timeout or an unreadable success
+/// reply leaves the result unknown: callers must not report it as unsent or
+/// retry it, because the action could be applied twice.
+pub(crate) async fn send_write(request: reqwest::RequestBuilder) -> Result<Value, BiliError> {
+    let response = request.send().await.map_err(|error| {
+        if error.is_builder() || (error.is_connect() && !error.is_timeout()) {
+            BiliError::Network
+        } else {
+            BiliError::Unconfirmed
+        }
+    })?;
+    if !response.status().is_success() {
+        return Err(BiliError::Network);
+    }
+    read_json(response).await.map_err(|error| match error {
+        BiliError::Network => BiliError::Unconfirmed,
+        error => error,
+    })
+}
+
+/// Status rows are independent: a refused, malformed, oversized or slow list
+/// makes only its own row unknown (`None`), which the UI never treats as
+/// "not muted/blocked". An expired login still fails the whole view.
+async fn list_status(
+    read: impl Future<Output = Result<bool, BiliError>>,
+) -> Result<Option<bool>, BiliError> {
+    match tokio::time::timeout(STATUS_LIST_BUDGET, read).await {
+        Ok(Ok(found)) => Ok(Some(found)),
+        Ok(Err(BiliError::SessionExpired)) => Err(BiliError::SessionExpired),
+        Ok(Err(_)) | Err(_) => Ok(None),
     }
 }
 
@@ -721,6 +833,14 @@ mod tests {
                     assert!(bytes.len() < 64 * 1024);
                 }
                 requests.push(String::from_utf8(bytes).unwrap());
+                if reply == "hang" {
+                    // Received, but the reply never arrives in time.
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        drop(socket);
+                    });
+                    continue;
+                }
                 let body = reply.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -851,6 +971,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_failing_or_oversized_list_is_unknown_without_hiding_the_others() {
+        // A refused mute list leaves only mute unknown.
+        let (client, task) = fixture(vec![
+            nav(),
+            room(42),
+            json!({"code":403,"message":"fictional-private-response"}),
+            list(json!([{"uid":77}]), 1, 0),
+            json!({"code":0,"data":{"data":[],"page":{"total_page":1}}}),
+        ])
+        .await;
+        let view = client.inspect(&session(), 1, 77).await.unwrap();
+        assert_eq!(
+            (view.muted, view.blacklisted, view.is_admin),
+            (None, Some(true), Some(false))
+        );
+        assert_eq!(task.await.unwrap().len(), 5);
+        // An oversized list stops at the page budget instead of reading on.
+        let mut replies = vec![nav(), room(42)];
+        replies.extend((0..STATUS_LIST_PAGES).map(|_| list(json!([{"tuid":55}]), 9999, 9999)));
+        replies.push(list(json!([]), 0, 0));
+        replies.push(json!({"code":0,"data":{"data":[{"uid":77}]}}));
+        let (client, task) = fixture(replies).await;
+        let view = client.inspect(&session(), 1, 77).await.unwrap();
+        assert_eq!(
+            (view.muted, view.blacklisted, view.is_admin),
+            (None, Some(false), Some(true))
+        );
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len() as u64, STATUS_LIST_PAGES + 4);
+        // A list that does not answer in time is unknown too.
+        let (client, task) = fixture(vec![
+            nav(),
+            room(42),
+            list(json!([]), 0, 0),
+            json!("hang"),
+            json!({"code":0,"data":{"data":[]}}),
+        ])
+        .await;
+        let view = client.inspect(&session(), 1, 77).await.unwrap();
+        assert_eq!(
+            (view.muted, view.blacklisted, view.is_admin),
+            (Some(false), None, Some(false))
+        );
+        assert_eq!(task.await.unwrap().len(), 5);
+        // An expired login is never hidden as one unknown row.
+        let (client, task) = fixture(vec![nav(), room(42), json!({"code":-101})]).await;
+        assert_eq!(
+            client.inspect(&session(), 1, 77).await,
+            Err(BiliError::SessionExpired)
+        );
+        assert_eq!(task.await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
     async fn ordinary_viewer_cannot_write_and_does_not_read_private_lists() {
         let (client, task) = fixture(vec![nav(), room(7), admin(false)]).await;
         let view = client.inspect(&session(), 1, 77).await.unwrap();
@@ -946,6 +1120,31 @@ mod tests {
         assert_eq!(error, BiliError::Api(403));
         assert!(!error.to_string().contains("credential-like-secret"));
         assert_eq!(task.await.unwrap().len(), 4);
+    }
+
+    fn short_timeout() -> Client {
+        Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(400))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn started_write_timeout_is_unknown_and_never_reported_as_not_sent() {
+        let (mut client, task) = fixture(vec![nav(), room(42), json!("hang")]).await;
+        client.http = short_timeout();
+        let error = client.mute(&session(), 1, 123, 77, 24).await.unwrap_err();
+        assert!(error.to_string().contains("结果未知"), "{error}");
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("POST /xlive/web-ucenter/v1/banned/AddSilentUser "));
+        // A slow pre-check read is not a write: it stays an ordinary failure.
+        let (mut client, task) = fixture(vec![json!("hang")]).await;
+        client.http = short_timeout();
+        let error = client.mute(&session(), 1, 123, 77, 24).await.unwrap_err();
+        assert_eq!(error, BiliError::Network);
+        assert_eq!(task.await.unwrap().len(), 1);
     }
 
     #[tokio::test]

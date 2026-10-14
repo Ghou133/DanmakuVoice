@@ -16,7 +16,8 @@ OBS 或叠加层设置已变更，请重新检测	OBS or overlay settings change
 弹幕发送正在处理请求，请稍候	Chat is processing a request. Please wait.
 账号或开播台设置已变更，弹幕请求已取消；请核对发送结果	The account or broadcast settings changed. Chat request cancelled; verify the send result.
 账号或开播台设置已变更；请核对发送结果	The account or broadcast settings changed. Verify the send result.
-弹幕请求超时，请核对发送结果	Chat request timed out. Verify the send result.
+发送前核对超时，弹幕未发送	Pre-send checks timed out. The message was not sent.
+弹幕发送区读取超时，请重试	Reading chat settings timed out. Try again.
 弹幕被平台拦截，未确认发送成功	The platform filtered this message. Sending was not confirmed.
 弹幕被直播间屏蔽，未确认发送成功	This room filtered the message. Sending was not confirmed.
 平台未确认弹幕发送成功，请核对接收记录	The platform did not confirm sending. Check the received chat.
@@ -40,6 +41,8 @@ OBS 或叠加层设置已变更，请重新检测	OBS or overlay settings change
 请选择禁言时长	Choose a mute duration
 不支持的直播间用户管理操作	Unsupported room moderation action
 直播间用户管理正在处理请求，请稍候	Room moderation is busy. Please wait.
+直播间用户管理读取超时，请重新打开用户资料	Reading moderation details timed out. Reopen the user's card.
+操作前核对超时，用户管理操作未提交	Pre-action checks timed out. The moderation action was not submitted.
 请先扫码登录哔哩哔哩，再管理直播间用户	Sign in to Bilibili by QR code to moderate room users
 登录身份与当前账号不匹配，请重新扫码	The session identity differs from the signed-in account. Sign in again.
 直播间已变更，请重新打开用户资料	The room changed. Reopen the user's card.
@@ -93,6 +96,7 @@ B站返回了不支持或无效的数据：{0}	Bilibili returned unsupported or 
 直播连接任务已经运行	The live connection task is already running
 此账号没有可用的直播间	This account has no available live room
 B站登录已失效，请重新扫码	Bilibili login expired. Scan again
+请求已发出，但没有及时收到 B站确认，结果未知；请核对后再操作	The request was sent, but Bilibili did not confirm it in time. The result is unknown; verify it before trying again
 文件操作失败：{0}	File operation failed: {0}
 数据库操作失败：{0}	Database operation failed: {0}
 配置格式错误：{0}	Invalid configuration format: {0}

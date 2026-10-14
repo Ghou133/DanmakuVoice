@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     bilibili::{BiliError, BiliSession, bili_image_url, http_client, nav_wbi_mixin, read_json},
-    moderation::{api_ok, csrf_params, parse_identity},
+    moderation::{api_ok, csrf_params, parse_identity, send_write},
 };
 
 const LIVE_API: &str = "https://api.live.bilibili.com";
@@ -61,6 +61,20 @@ struct OwnRoom {
     room_id: u64,
     message_limit: usize,
     mixin: String,
+}
+
+/// A send whose account, own room, permission and length were just
+/// revalidated. Submitting it sends exactly one POST.
+pub struct PreparedChatSend {
+    room: OwnRoom,
+    message: String,
+    emoticon: bool,
+}
+
+impl std::fmt::Debug for PreparedChatSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreparedChatSend([redacted])")
+    }
 }
 
 pub struct ChatSendClient {
@@ -236,13 +250,25 @@ impl ChatSendClient {
     }
 
     pub async fn send_text(&self, session: &BiliSession, message: &str) -> Result<u64, BiliError> {
+        let prepared = self.prepare_text(session, message).await?;
+        self.submit(session, prepared).await
+    }
+
+    pub async fn prepare_text(
+        &self,
+        session: &BiliSession,
+        message: &str,
+    ) -> Result<PreparedChatSend, BiliError> {
         // Reject empty/control content before networking; the actual platform
         // limit is resolved before the write and counted like its JS client.
         validate_message(message, 1000)?;
         let room = self.own_room(session).await?;
         validate_message(message, room.message_limit)?;
-        self.send(session, &room, message, false).await?;
-        Ok(room.room_id)
+        Ok(PreparedChatSend {
+            room,
+            message: message.into(),
+            emoticon: false,
+        })
     }
 
     pub async fn send_emoticon(
@@ -250,6 +276,32 @@ impl ChatSendClient {
         session: &BiliSession,
         token: &str,
     ) -> Result<u64, BiliError> {
+        let prepared = self.prepare_emoticon(session, token).await?;
+        self.submit(session, prepared).await
+    }
+
+    /// Send one prepared message. Callers bound their pre-checks; once this
+    /// starts, only the request's own timeout applies.
+    pub async fn submit(
+        &self,
+        session: &BiliSession,
+        prepared: PreparedChatSend,
+    ) -> Result<u64, BiliError> {
+        self.send(
+            session,
+            &prepared.room,
+            &prepared.message,
+            prepared.emoticon,
+        )
+        .await?;
+        Ok(prepared.room.room_id)
+    }
+
+    pub async fn prepare_emoticon(
+        &self,
+        session: &BiliSession,
+        token: &str,
+    ) -> Result<PreparedChatSend, BiliError> {
         validate_token(token)?;
         let room = self.own_room(session).await?;
         // Re-fetch the exact current account collection or live permissions
@@ -268,11 +320,8 @@ impl ChatSendClient {
         if !item.allowed {
             return Err(BiliError::Protocol("当前账号没有使用这个表情的权限"));
         }
-        match item.kind {
-            "emoticon" => {
-                self.send(session, &room, &item.emoticon_unique, true)
-                    .await?;
-            }
+        let (message, emoticon) = match item.kind {
+            "emoticon" => (item.emoticon_unique.clone(), true),
             "text" => {
                 let message = item
                     .text
@@ -282,11 +331,15 @@ impl ChatSendClient {
                 // Send one standalone regular message using the official raw
                 // text field. Never insert into a draft or invent an image
                 // token from a comment package's numeric item ID.
-                self.send(session, &room, message, false).await?;
+                (message.to_owned(), false)
             }
             _ => return Err(BiliError::Protocol("表情类型无效")),
-        }
-        Ok(room.room_id)
+        };
+        Ok(PreparedChatSend {
+            room,
+            message,
+            emoticon,
+        })
     }
 
     async fn send(
@@ -322,18 +375,15 @@ impl ChatSendClient {
             ));
         }
         body.push_str(&format!("--{boundary}--\r\n"));
-        let response = self
+        let request = self
             .request(session, "/msg/send", true, false, room.room_id)
             .query(&query)
             .header(
                 CONTENT_TYPE,
                 format!("multipart/form-data; boundary={boundary}"),
             )
-            .body(std::mem::take(&mut *body))
-            .send()
-            .await
-            .map_err(|_| BiliError::Network)?;
-        parse_send_result(&read_json(response).await?)
+            .body(std::mem::take(&mut *body));
+        parse_send_result(&send_write(request).await?)
     }
 }
 
@@ -914,6 +964,14 @@ mod tests {
                     assert!(bytes.len() < 64 * 1024);
                 }
                 requests.push(String::from_utf8(bytes).unwrap());
+                if reply == "hang" {
+                    // Received, but the reply never arrives in time.
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        drop(socket);
+                    });
+                    continue;
+                }
                 let body = reply.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1332,6 +1390,23 @@ mod tests {
         assert_eq!(error, BiliError::Api(403));
         assert!(!error.to_string().contains("fictional-private-response"));
         assert_eq!(task.await.unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn started_send_timeout_is_unknown_and_never_reported_as_not_sent() {
+        let mut replies = own_room(20);
+        replies.push(json!("hang"));
+        let (mut client, task) = fixture(replies).await;
+        client.http = Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(400))
+            .build()
+            .unwrap();
+        let error = client.send_text(&session(), "你好").await.unwrap_err();
+        assert!(error.to_string().contains("结果未知"), "{error}");
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[4].starts_with("POST /msg/send?"));
     }
 
     #[test]

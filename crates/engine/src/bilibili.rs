@@ -80,6 +80,9 @@ pub enum BiliError {
     NoOwnRoom,
     #[error("B站登录已失效，请重新扫码 [DV-B09]")]
     SessionExpired,
+    /// A write may have reached Bilibili, but no reply confirmed it.
+    #[error("请求已发出，但没有及时收到 B站确认，结果未知；请核对后再操作 [DV-B11]")]
+    Unconfirmed,
 }
 
 /// Sensitive web session returned by a confirmed QR login. Its Debug output

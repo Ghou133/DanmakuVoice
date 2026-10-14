@@ -1,5 +1,6 @@
 //! Transient moderation context: freeze the room and viewer at confirmation,
 //! cancel on account changes, and never persist moderation credentials/state.
+use super::chat_send::{CHECK_LIMIT, checked_write};
 use super::{Application, Controller, confirmed, display};
 use danmakuvoice_engine::{
     bilibili::{BiliError, BiliSession},
@@ -199,8 +200,7 @@ impl Application {
         let result = tokio::select! {
             biased;
             _ = operation.cancel.cancelled() => return Err("账号或直播间已变更，用户管理请求已取消；请重新打开用户资料".into()),
-            result = tokio::time::timeout(std::time::Duration::from_secs(30), perform(action, &operation)) =>
-                result.unwrap_or(Err(BiliError::Protocol("直播间用户管理请求超时，请刷新资料核对操作结果"))),
+            result = perform(action, &operation) => result,
         };
         self.complete_moderation(action, &operation, result)
     }
@@ -285,6 +285,11 @@ fn target_uid(payload: &Value) -> Result<u64, String> {
         .ok_or_else(|| "这个用户没有可用的真实 UID，无法执行禁言或拉黑".into())
 }
 
+const READ_TIMEOUT: &str = "直播间用户管理读取超时，请重新打开用户资料";
+const NOT_SUBMITTED: &str = "操作前核对超时，用户管理操作未提交";
+
+/// Only the revalidation reads share the command deadline; a started write is
+/// left to its own request timeout (see `chat_send::checked_write`).
 async fn perform(
     action: Action,
     operation: &Operation,
@@ -294,24 +299,37 @@ async fn perform(
     let room = operation.watched_room;
     let target = operation.target_uid;
     if action == Action::Refresh {
-        return client.inspect(session, room, target).await.map(Some);
+        return tokio::time::timeout(CHECK_LIMIT, client.inspect(session, room, target))
+            .await
+            .unwrap_or(Err(BiliError::Protocol(READ_TIMEOUT)))
+            .map(Some);
     }
     let expected = operation.expected_room.ok_or(BiliError::InvalidRoom)?;
-    match action {
-        Action::Mute(hours) => client.mute(session, room, expected, target, hours).await?,
-        Action::Unmute => client.unmute(session, room, expected, target).await?,
-        Action::Blacklist(blocked) => {
-            client
-                .blacklist(session, room, expected, target, blocked)
-                .await?
+    let checks = async {
+        match action {
+            Action::Mute(hours) => {
+                client
+                    .prepare_mute(session, room, expected, target, hours)
+                    .await
+            }
+            Action::Unmute => client.prepare_unmute(session, room, expected, target).await,
+            Action::Blacklist(blocked) => {
+                client
+                    .prepare_blacklist(session, room, expected, target, blocked)
+                    .await
+            }
+            Action::Admin(appointed) => {
+                client
+                    .prepare_set_admin(session, room, expected, target, appointed)
+                    .await
+            }
+            Action::Refresh => unreachable!(),
         }
-        Action::Admin(appointed) => {
-            client
-                .set_admin(session, room, expected, target, appointed)
-                .await?
-        }
-        Action::Refresh => unreachable!(),
-    }
+    };
+    checked_write(CHECK_LIMIT, checks, NOT_SUBMITTED, |write| {
+        client.submit(session, write)
+    })
+    .await?;
     Ok(None)
 }
 
