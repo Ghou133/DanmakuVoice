@@ -1387,6 +1387,66 @@ test('chat keeps updating during a long command and polls started before its rep
   assert.equal(vm.runInContext('snapshot.live.received', context), 4);
 });
 
+// A minimal composer whose controls drop focus when disabled, as browsers do.
+function composeContext() {
+  const context = appContext();
+  const body = { id: 'body' };
+  context.document.body = body;
+  const control = extra => {
+    const node = { hidden: false, isConnected: true, dataset: {}, attrs: {}, title: '', innerHTML: '', textContent: '', classList: { toggle() {} },
+      setAttribute(key, value) { this.attrs[key] = value; }, focus() { context.document.activeElement = this; }, ...extra };
+    let disabled = false;
+    Object.defineProperty(node, 'disabled', { get: () => disabled, set: value => { disabled = !!value; if (disabled && context.document.activeElement === node) context.document.activeElement = body; } });
+    return node;
+  };
+  const input = control({ id: 'chat-message', value: '你好', maxLength: 20 });
+  const submit = control({ type: 'submit' });
+  const emoji = control({});
+  const form = control({ contains: node => [input, submit, emoji].includes(node) });
+  const parts = { form, '#chat-message': input, '.chat-compose-note': control({}), '.lake-compose-count': control({}), '[data-action="chat.emoticons"]': emoji, 'button[type="submit"]': submit };
+  const host = control({ querySelector: selector => parts[selector] ?? null, querySelectorAll: () => [input, submit, emoji] });
+  const surface = context.document.querySelector('#surface');
+  const nodes = new Map([['#chat-compose', host], ['#chat-compose form', form], ['#chat-message', input], ['#chat-emoticon-picker', null]]);
+  context.document.querySelector = selector => nodes.has(selector) ? nodes.get(selector) : surface;
+  context.requests = [];
+  vm.runInContext(`step = 'main'; snapshot = { account: { user_id: 42 }, setup: { room_id: 99 }, chat_send: { account_id: 42, room_id: 99, message_limit: 20 }, preferences: {} };
+    showToast = () => {}; command = (action, payload) => new Promise(resolve => requests.push({ action, payload, resolve: () => resolve(snapshot) }));
+    chatMessageDraft = '你好'; updateChatCompose();`, context);
+  return { context, input, submit, body };
+}
+
+test('sending chat keeps the composer focused for the next message', async () => {
+  const { context, input, submit, body } = composeContext();
+  input.focus();
+  const sent = vm.runInContext('sendChatMessage()', context);
+  assert.equal(context.requests[0].action, 'bili.chat.send');
+  context.requests[0].resolve();
+  await sent;
+  assert.equal(input.disabled, false);
+  assert.equal(context.document.activeElement, input, 'Enter-to-send returns to the field');
+
+  vm.runInContext("chatMessageDraft = '再来一条'", context);
+  input.value = '再来一条';
+  vm.runInContext('updateChatCompose()', context);
+  submit.focus();
+  const clicked = vm.runInContext('sendChatMessage()', context);
+  context.requests[1].resolve();
+  await clicked;
+  assert.equal(context.document.activeElement, input, 'the emptied send button is disabled, so focus returns to the field');
+
+  const elsewhere = { id: 'elsewhere' };
+  vm.runInContext("chatMessageDraft = '第三条'", context);
+  input.value = '第三条';
+  vm.runInContext('updateChatCompose()', context);
+  input.focus();
+  const moved = vm.runInContext('sendChatMessage()', context);
+  context.document.activeElement = elsewhere;
+  context.requests[2].resolve();
+  await moved;
+  assert.equal(context.document.activeElement, elsewhere, 'focus the person moved elsewhere is not taken back');
+  assert.notEqual(body, elsewhere);
+});
+
 test('a failing viewer alias save is shown but never traps the card or settings, and its draft survives', async () => {
   const context = appContext({ createAutosaveQueue });
   context.saved = [];

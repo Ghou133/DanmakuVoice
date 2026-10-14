@@ -322,11 +322,26 @@ function updateChatCompose() {
   renderChatEmoticons(picker, view, disabled);
 }
 
+// Busy requests disable the composer, which drops keyboard focus. Return it to
+// the same control (or the field) unless the person has moved focus elsewhere.
+function composerFocus() {
+  const active = document.activeElement;
+  return active && document.querySelector('#chat-compose form')?.contains(active) ? active : null;
+}
+
+function restoreComposerFocus(previous) {
+  const active = document.activeElement;
+  if (!previous || (active && active !== document.body && active !== previous)) return;
+  const target = previous.isConnected && !previous.disabled ? previous : document.querySelector('#chat-message');
+  if (target && !target.disabled) target.focus({ preventScroll: true });
+}
+
 async function refreshChatEmoticons(automatic = false) {
   syncChatEmoticonContext();
   if (chatSendBusy || !snapshot.account?.user_id || snapshot.network_disabled) return;
   const context = chatEmoteContext;
   const sequence = ++chatRequestSequence;
+  const focused = composerFocus();
   chatSendBusy = true;
   updateChatCompose();
   try {
@@ -336,7 +351,7 @@ async function refreshChatEmoticons(automatic = false) {
     if (sequence === chatRequestSequence && context === chatEmoteContext) chatEmoticonError = errorMessage(error);
     throw error;
   }
-  finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); }
+  finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); restoreComposerFocus(focused); }
 }
 
 async function sendChatMessage(emoticon_unique = '') {
@@ -349,6 +364,7 @@ async function sendChatMessage(emoticon_unique = '') {
   const room = String(snapshot.setup?.room_id || '');
   const submittedDraft = chatMessageDraft;
   const sequence = ++chatRequestSequence;
+  const focused = composerFocus();
   if (emoticon_unique) chatEmoticonsOpen = false;
   chatSendBusy = true;
   updateChatCompose();
@@ -361,7 +377,7 @@ async function sendChatMessage(emoticon_unique = '') {
       if (input) input.value = '';
     }
     if (String(snapshot.account?.user_id) === account && String(snapshot.setup?.room_id || '') === room) showToast(t('已发送'));
-  } finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); }
+  } finally { if (sequence === chatRequestSequence) chatSendBusy = false; updateChatCompose(); restoreComposerFocus(focused); }
 }
 
 function chatResponseGuard() {
