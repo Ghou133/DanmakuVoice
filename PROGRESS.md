@@ -865,3 +865,13 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 
 - 新修复均为离线单元/集成回归，未在真实直播间、真实 OBS、真实 TTS 或音频设备上验收；未重跑浏览器脚本、原生窗口与性能测试（本轮改动未触及布局、CSS 和叠加层页面）。
 - 待办项来自代码阅读，未逐一复现；P1-1、P1-2 建议先补失败测试再修。
+
+## 2026-10-14 旧分支与历史产物清理
+
+- 按用户指出的 Claude `scratchpad/delete-old.sh` 及 `target-delete-list.txt` 执行相同删除范围。为核对绝对路径、禁止跨目录链接、阻止删除受 Git 跟踪的源码、检查运行进程和可靠保留固定输入，实际使用原生 PowerShell 等效脚本；原脚本与清单副本、删除计划、逐项结果和回执保存在 `.git/cleanup-20261014/`。
+- **347 个删除目标成功，0 失败**；包含历史 `target/` 证据与交付目录、`dist/` 内容、改名的候选 EXE、`Claude outputs/`、已废弃的许可探针和两个 Python 缓存目录。清理前清单中的这些范围包含 1,742 个 EXE、1,770 个 PDB、82 个 ZIP 和 8 个 MSIX；数字包含历史测试及构建辅助程序，并非应用版本数量。磁盘可用空间在删除阶段增加 **52.712 GiB**，清单逻辑文件大小与实际释放空间因硬链接等因素不同。
+- 原有历史章节保留，但其中本次删除的旧证据、候选包及源码快照路径不再可用；原先记录的通过/失败及验收边界没有被改写为新的验证结果。`target/debug`、Cargo `target/release` 输出、`target/tmp`、今天的 `target/maintenance-20261014` 日志保留。
+- `target/persistence-chat-fix/lake-parity/actual-measurements.json` 已按原路径恢复，SHA-256 不变；其余同目录旧内容删除。`E:\AITTS\DanmakuVoice-release\danmakuvoice.exe`（文件版本 0.3.2，SHA-256 `f3b39a62a744b18e06432f6bd6517cb58432e1be072c09a6bada25741df1b052`）及根目录 ZIP 保留；共 **19 个受保护文件**逐项核对 SHA-256 通过。未清理独立的 `DanmakuVoice-release` 仓库内部产物。
+- 旧主线备份分支 `backup/local-main-pre-realign-20261014` 转存为 `refs/archive/local-main-pre-realign-20261014`，仍指向 `8568e13d310a3312254e054a40934ffdf4a8b1eb`；完整恢复包 `.git/cleanup-20261014/local-main-pre-realign.bundle` 经 `git bundle verify` 和 bundle 引用核对通过后，才移除普通分支。此前回滚命令现在使用 `git reset --mixed refs/archive/local-main-pre-realign-20261014`。
+- 6 个 Claude 工作树均含未合并提交，其中 3 个还有未提交修改，全部保留；不存在可直接移除的已合并旧工作树或失效登记。主分支 HEAD 保持 `b3ec4e8d259f2ea8433db6215555c916a85c4ae2`，仍领先 `origin/main` 两个提交。本次不提交、不推送、不发布；除本节清理记录外，没有更改受跟踪源码。
+- 本次是文件与 Git 元数据维护，没有运行 fmt、clippy、应用回归或在线验收，也没有构建或提出发布声明。证据为删除结果、Git 引用/bundle 校验、受保护文件摘要和工作区差异核对。
