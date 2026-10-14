@@ -610,7 +610,9 @@ async fn run_events(
                     let state = room_state.borrow_and_update().clone();
                     let code = match &state {
                         RoomState::Stopped => DiagnosticCode::RoomStopped,
-                        RoomState::SessionExpired { .. } => DiagnosticCode::RoomFailed,
+                        RoomState::SessionExpired { .. } | RoomState::RoomNotFound { .. } => {
+                            DiagnosticCode::RoomFailed
+                        }
                         RoomState::Connecting { .. } => DiagnosticCode::RoomConnecting,
                         RoomState::Connected { .. } => DiagnosticCode::RoomConnected,
                         RoomState::Reconnecting { .. } => DiagnosticCode::RoomReconnecting,
@@ -625,7 +627,9 @@ async fn run_events(
                     diagnostics::record(code, number);
                     let terminal = matches!(
                         &state,
-                        RoomState::Stopped | RoomState::SessionExpired { .. }
+                        RoomState::Stopped
+                            | RoomState::SessionExpired { .. }
+                            | RoomState::RoomNotFound { .. }
                     );
                     updates.send_modify(|snapshot| {
                         if let RoomState::Connected { room_id, .. } = &state { snapshot.resolved_room_id = Some(*room_id); }
@@ -787,7 +791,11 @@ async fn run_events(
     }
     updates.send_modify(|state| {
         state.running = false;
-        if !matches!(&state.room_state, RoomState::SessionExpired { .. }) {
+        // Keep a terminal cause that needs user action visible after the end.
+        if !matches!(
+            &state.room_state,
+            RoomState::SessionExpired { .. } | RoomState::RoomNotFound { .. }
+        ) {
             state.room_state = RoomState::Stopped;
         }
     });
@@ -1767,41 +1775,44 @@ mod tests {
 
     #[tokio::test]
     async fn saved_session_expiry_ends_room_and_remains_visible_in_snapshot() {
-        let (events_tx, events_rx) = mpsc::channel(1);
-        let (room_tx, room_rx) = watch::channel(RoomState::Connecting { room_id: 42 });
-        let (updates, snapshot) = watch::channel(LiveSnapshot {
-            running: true,
-            room_id: Some(42),
-            room_state: RoomState::Connecting { room_id: 42 },
-            ..LiveSnapshot::default()
-        });
-        let (_playback_tx, playback_rx) = watch::channel(0u64);
-        let worker = tokio::spawn(run_events(
-            events_rx,
-            room_rx,
-            WorkerContext {
-                scheduler: None,
-                tts_enabled: Arc::new(Mutex::new(false)),
-                playback_changes: playback_rx,
-                emote_catalog: watch::channel(Arc::new(ReceivedEmoteCatalog::default())).1,
-                data_dir: PathBuf::from("unused-receive-only"),
-                dobao_device: None,
-                updates,
-                cancel: CancellationToken::new(),
-                room_driven: true,
-            },
-        ));
-        room_tx.send_replace(RoomState::SessionExpired { room_id: 42 });
-        timeout(Duration::from_secs(3), worker)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!snapshot.borrow().running);
-        assert_eq!(
-            snapshot.borrow().room_state,
-            RoomState::SessionExpired { room_id: 42 }
-        );
-        drop(events_tx);
+        // A missing room is terminal in the same way: no retry, cause kept.
+        for terminal in [
+            RoomState::SessionExpired { room_id: 42 },
+            RoomState::RoomNotFound { room_id: 42 },
+        ] {
+            let (events_tx, events_rx) = mpsc::channel(1);
+            let (room_tx, room_rx) = watch::channel(RoomState::Connecting { room_id: 42 });
+            let (updates, snapshot) = watch::channel(LiveSnapshot {
+                running: true,
+                room_id: Some(42),
+                room_state: RoomState::Connecting { room_id: 42 },
+                ..LiveSnapshot::default()
+            });
+            let (_playback_tx, playback_rx) = watch::channel(0u64);
+            let worker = tokio::spawn(run_events(
+                events_rx,
+                room_rx,
+                WorkerContext {
+                    scheduler: None,
+                    tts_enabled: Arc::new(Mutex::new(false)),
+                    playback_changes: playback_rx,
+                    emote_catalog: watch::channel(Arc::new(ReceivedEmoteCatalog::default())).1,
+                    data_dir: PathBuf::from("unused-receive-only"),
+                    dobao_device: None,
+                    updates,
+                    cancel: CancellationToken::new(),
+                    room_driven: true,
+                },
+            ));
+            room_tx.send_replace(terminal.clone());
+            timeout(Duration::from_secs(3), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!snapshot.borrow().running);
+            assert_eq!(snapshot.borrow().room_state, terminal);
+            drop(events_tx);
+        }
     }
 
     #[tokio::test]
