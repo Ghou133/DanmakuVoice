@@ -900,6 +900,8 @@ function renderApp() {
     updateLive();
     return;
   }
+  // The clock only exists on the main screen; welcome and setup must not keep ticking.
+  clearInterval(lakeClockTimer); lakeClockTimer = null;
   const note = snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : '';
   if (step === 'welcome') {
     app.innerHTML = ui`<div class="app-shell onboard-shell">${note}<div class="onboard-aura one" aria-hidden="true"></div><div class="onboard-aura two" aria-hidden="true"></div><main class="welcome"><div class="welcome-mark" aria-hidden="true"><span></span><span></span><span></span><img src="./logo.png" width="148" height="148" alt="" draggable="false"></div><h1>超绝可爱弹幕姬</h1><p>接收 B 站直播弹幕，用你喜欢的声音读出来。</p><button type="button" class="onboard-cta" data-action="setup.start">开始设置${icon('arrow')}</button><p class="welcome-foot">${icon('shield')}登录凭据仅加密保存在这台电脑</p></main></div>`;

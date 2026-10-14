@@ -1388,6 +1388,18 @@ test('chat keeps updating during a long command and polls started before its rep
   assert.equal(vm.runInContext('snapshot.live.received', context), 4);
 });
 
+test('leaving the main screen stops the lake clock', () => {
+  const context = appContext();
+  const cleared = [];
+  context.clearInterval = id => cleared.push(id);
+  const surface = context.document.querySelector('#surface');
+  surface.setAttribute = () => {};
+  context.document.querySelector = selector => selector.startsWith('#titlebar') || selector === '[data-titlebar-name]' ? null : surface;
+  vm.runInContext("lakeClockTimer = 41; step = 'welcome'; renderApp();", context);
+  assert.deepEqual(cleared, [41]);
+  assert.equal(vm.runInContext('lakeClockTimer', context), null);
+});
+
 test('new messages entering the open history keep the entry being read in place', () => {
   const context = appContext();
   const scroll = { scrollTop: 0, getBoundingClientRect: () => ({ top: 100, bottom: 500 }) };
