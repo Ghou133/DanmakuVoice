@@ -1522,6 +1522,8 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
             // blivedm/models/web.py maps info[0][12] to dm_type:
             // 0=text, 1=standalone emoticon, 2=voice. Do not infer it from
             // message text, inline emots, image URLs, or command suffixes.
+            // Live reception then applies received_emotes.rs, which also marks
+            // a message made only of verified emote markers.
             event.is_bilibili_emoticon = metadata
                 .and_then(|meta| meta.get(12))
                 .and_then(Value::as_u64)
@@ -2702,10 +2704,13 @@ mod tests {
     }
     #[test]
     fn standalone_emote_filter_uses_protocol_type_without_guessing_text() {
+        use crate::received_emotes::ReceivedEmoteCatalog;
         use crate::rules::{RuleSet, SoundRule};
         // Protocol-shaped fixtures derived from blivedm/models/web.py:
         // info[0][12]=dm_type, info[0][13]=emoticon_options; these are not
-        // claimed to be a recording of the user's live room.
+        // claimed to be a recording of the user's live room. The parser alone
+        // reads dm_type; live reception then classifies a message made only
+        // of markers verified by the packet's own images (received_emotes.rs).
         let mut rules = RuleSet::default();
         rules.sounds.push(SoundRule {
             trigger: "[表情]".into(),
@@ -2735,6 +2740,13 @@ mod tests {
                     "info":[metadata,text,[7,"Alice"]]});
                 let event = parse_live_event(42, 123, &raw).unwrap();
                 assert_eq!(event.is_bilibili_emoticon, marked, "{kind}: {text}");
+                let mut received = event.clone();
+                ReceivedEmoteCatalog::default().enrich_in_connected_room(&mut received, 42, 42);
+                assert_eq!(
+                    received.is_bilibili_emoticon,
+                    marked || text == "[表情]",
+                    "received {kind}: {text}"
+                );
                 for enabled in [false, true, false] {
                     rules.events.filter_bilibili_emoticons = enabled;
                     let preview = rules.preview(&event, &[], &[]).unwrap();
