@@ -738,25 +738,44 @@ impl DataStore {
         &mut self,
         write: impl FnOnce(&mut Self) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        self.conn.execute_batch("SAVEPOINT application_write")?;
-        let result = write(self).and_then(|value| {
+        self.in_savepoint("application_write", write)
+    }
+
+    /// The one savepoint helper for writes that call other store methods.
+    /// A failure, including a failed RELEASE (the commit of an outermost
+    /// savepoint), rolls the savepoint back. If an outermost savepoint still
+    /// cannot be closed, the whole transaction is rolled back so the
+    /// connection never stays inside an abandoned transaction.
+    fn in_savepoint<T>(
+        &mut self,
+        name: &'static str,
+        write: impl FnOnce(&mut Self) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let outermost = self.conn.is_autocommit();
+        self.conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+        let write = match write(self).and_then(|value| {
             self.conn
-                .execute_batch("RELEASE SAVEPOINT application_write")?;
+                .execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
             Ok(value)
-        });
-        match result {
-            Ok(value) => Ok(value),
-            Err(write) => {
-                if let Err(rollback) = self.conn.execute_batch(
-                    "ROLLBACK TO SAVEPOINT application_write; RELEASE SAVEPOINT application_write",
-                ) {
-                    return Err(StorageError::WriteRollback {
-                        write: Box::new(write),
-                        rollback,
-                    });
-                }
+        }) {
+            Ok(value) => return Ok(value),
+            Err(write) => write,
+        };
+        match self.conn.execute_batch(&format!(
+            "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
+        )) {
+            Ok(()) => Err(write),
+            Err(_)
+                if outermost
+                    && (self.conn.is_autocommit()
+                        || self.conn.execute_batch("ROLLBACK").is_ok()) =>
+            {
                 Err(write)
             }
+            Err(rollback) => Err(StorageError::WriteRollback {
+                write: Box::new(write),
+                rollback,
+            }),
         }
     }
 
@@ -1537,27 +1556,28 @@ impl DataStore {
     }
 
     pub fn delete_preset(&mut self, id: &str) -> Result<(), StorageError> {
-        let mut rules = self.load_rules()?;
-        if rules.default_preset_id.as_deref() == Some(id) {
-            return Err(StorageError::PresetIsDefault);
-        }
-        let references: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM bindings WHERE preset_id=?1",
-            params![id],
-            |row| row.get(0),
-        )?;
-        if references > 0 {
-            return Err(StorageError::PresetReferenced(references));
-        }
-        self.conn.execute_batch("SAVEPOINT delete_preset")?;
-        let result = (|| {
-            let changed = self
+        // Check the default choice and bindings in the same transaction as
+        // the delete, so another connection cannot add a reference between.
+        self.in_savepoint("delete_preset", |store| {
+            let mut rules = store.load_rules()?;
+            if rules.default_preset_id.as_deref() == Some(id) {
+                return Err(StorageError::PresetIsDefault);
+            }
+            let references: i64 = store.conn.query_row(
+                "SELECT COUNT(*) FROM bindings WHERE preset_id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            if references > 0 {
+                return Err(StorageError::PresetReferenced(references));
+            }
+            let changed = store
                 .conn
                 .execute("DELETE FROM presets WHERE id=?1", params![id])?;
             if changed == 0 {
                 return Err(StorageError::PresetMissing(id.to_owned()));
             }
-            self.conn.execute(
+            store.conn.execute(
                 "DELETE FROM settings WHERE key=?1",
                 params![dots_settings_key(id)],
             )?;
@@ -1566,22 +1586,10 @@ impl DataStore {
                 .preferred_presets
                 .retain(|_, preset_id| preset_id != id);
             if rules.preferred_presets.len() != remembered {
-                self.save_rules(&rules)?;
+                store.save_rules(&rules)?;
             }
             Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.conn.execute_batch("RELEASE SAVEPOINT delete_preset")?;
-                Ok(())
-            }
-            Err(error) => {
-                self.conn.execute_batch(
-                    "ROLLBACK TO SAVEPOINT delete_preset; RELEASE SAVEPOINT delete_preset",
-                )?;
-                Err(error)
-            }
-        }
+        })
     }
 
     pub fn save_binding(&mut self, id: &str, binding: &VoiceBinding) -> Result<(), StorageError> {
@@ -1752,34 +1760,20 @@ impl DataStore {
         {
             return Err(StorageError::InvalidReferenceProfile);
         }
-        self.conn.execute_batch("SAVEPOINT save_dots_voice")?;
-        let result = (|| {
-            self.save_preset(preset)?;
-            self.save_reference_profile(profile)?;
+        self.in_savepoint("save_dots_voice", |store| {
+            store.save_preset(preset)?;
+            store.save_reference_profile(profile)?;
             if make_preferred {
-                let mut rules = self.load_rules()?;
+                let mut rules = store.load_rules()?;
                 rules.default_preset_id = Some(preset.id.clone());
                 rules.default_preset_explicitly_cleared = false;
                 rules
                     .preferred_presets
                     .insert(preset.provider, preset.id.clone());
-                self.save_rules(&rules)?;
+                store.save_rules(&rules)?;
             }
             Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.conn
-                    .execute_batch("RELEASE SAVEPOINT save_dots_voice")?;
-                Ok(())
-            }
-            Err(error) => {
-                self.conn.execute_batch(
-                    "ROLLBACK TO SAVEPOINT save_dots_voice; RELEASE SAVEPOINT save_dots_voice",
-                )?;
-                Err(error)
-            }
-        }
+        })
     }
 
     /// Remember the user's original reference file path, text and languages
@@ -2631,6 +2625,92 @@ mod tests {
             store.reference_profile("dots", &profile.role).unwrap(),
             Some(profile)
         );
+    }
+
+    #[test]
+    fn failed_savepoint_release_never_leaves_an_open_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("reference.wav");
+        fs::write(&original, b"RIFF reference recording WAVE").unwrap();
+        let mut store = DataStore::open(temp.path().join("app")).unwrap();
+        store
+            .save_connection(&ServiceConnection {
+                id: "dots".into(),
+                name: "dots".into(),
+                settings: ConnectionSettings::Dots {
+                    endpoint: "http://127.0.0.1:9881".into(),
+                    timeout_secs: 30,
+                },
+                has_credential: false,
+            })
+            .unwrap();
+        let preset = VoicePreset {
+            id: "voice".into(),
+            name: "声音".into(),
+            connection_id: "dots".into(),
+            provider: Provider::Dots,
+            voice_id: "角色 A".into(),
+            speed: 1.0,
+            volume: 1.0,
+            sovits: None,
+        };
+        store.save_preset(&preset).unwrap();
+        // A deferred foreign-key violation makes the outermost RELEASE
+        // (the commit) fail while the savepoint is still open.
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE release_probe (preset_id TEXT REFERENCES presets(id)
+                     DEFERRABLE INITIALLY DEFERRED);
+                 CREATE TRIGGER release_probe_delete AFTER DELETE ON presets BEGIN
+                     INSERT INTO release_probe VALUES ('missing-preset'); END;
+                 CREATE TRIGGER release_probe_update AFTER UPDATE ON presets BEGIN
+                     INSERT INTO release_probe VALUES ('missing-preset'); END;",
+            )
+            .unwrap();
+        let other = DataStore::open(temp.path().join("app")).unwrap();
+
+        assert!(matches!(
+            store.delete_preset("voice"),
+            Err(StorageError::Sql(_))
+        ));
+        assert!(store.conn.is_autocommit());
+        assert_eq!(other.presets().unwrap(), vec![preset.clone()]);
+
+        let profile = ReferenceProfile {
+            connection_id: "dots".into(),
+            role: ReferenceRole::Dots {
+                role: "角色 A".into(),
+            },
+            audio_path: original.to_string_lossy().into_owned(),
+            reference_text: String::new(),
+            reference_language: String::new(),
+            text_language: String::new(),
+            text_free: false,
+        };
+        let mut renamed = preset.clone();
+        renamed.name = "改名".into();
+        assert!(matches!(
+            store.save_dots_voice_with_preference(&renamed, &profile, true),
+            Err(StorageError::Sql(_))
+        ));
+        assert!(store.conn.is_autocommit());
+        assert_eq!(other.presets().unwrap(), vec![preset.clone()]);
+        assert!(other.reference_profiles("dots").unwrap().is_empty());
+
+        assert!(
+            store
+                .with_savepoint(|store| store.save_preset(&renamed))
+                .is_err()
+        );
+        assert!(store.conn.is_autocommit());
+        assert_eq!(other.presets().unwrap(), vec![preset]);
+
+        // Later writes commit normally and are visible to other connections.
+        let mut rules = RuleSet::default();
+        rules.templates.danmaku = "之后的写入".into();
+        store.save_rules(&rules).unwrap();
+        assert_eq!(other.load_rules().unwrap(), rules);
     }
 
     #[test]
