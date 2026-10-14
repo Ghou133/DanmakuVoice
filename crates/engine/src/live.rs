@@ -298,21 +298,7 @@ impl LiveController {
     /// and never initiates QR login.
     pub async fn start(&self, room_id: u64, session: Option<BiliSession>) -> Result<(), LiveError> {
         let mut running = self.running.lock().await;
-        self.reap_finished(&mut running).await;
-        if running.is_some() {
-            return Err(LiveError::AlreadyRunning);
-        }
-        if room_id == 0 {
-            return Err(BiliError::InvalidRoom.into());
-        }
-
-        if self
-            .scheduler
-            .as_ref()
-            .is_some_and(|scheduler| !scheduler.state().borrow().accepting)
-        {
-            return Err(LiveError::Scheduler);
-        }
+        self.check_can_start(&mut running, room_id).await?;
         let mut lookup_error = None;
         if let Some(session) = session.as_ref() {
             if !self
@@ -430,10 +416,13 @@ impl LiveController {
         }
     }
 
-    #[cfg(test)]
-    async fn start_offline(&self, room_id: u64) -> Result<mpsc::Sender<LiveEvent>, LiveError> {
-        let mut running = self.running.lock().await;
-        self.reap_finished(&mut running).await;
+    /// Shared start preconditions; the caller holds the `running` lock.
+    async fn check_can_start(
+        &self,
+        running: &mut Option<Running>,
+        room_id: u64,
+    ) -> Result<(), LiveError> {
+        self.reap_finished(running).await;
         if running.is_some() {
             return Err(LiveError::AlreadyRunning);
         }
@@ -447,6 +436,13 @@ impl LiveController {
         {
             return Err(LiveError::Scheduler);
         }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn start_offline(&self, room_id: u64) -> Result<mpsc::Sender<LiveEvent>, LiveError> {
+        let mut running = self.running.lock().await;
+        self.check_can_start(&mut running, room_id).await?;
         let (sender, events) = mpsc::channel(LIVE_EVENT_CHANNEL_CAPACITY);
         *running = Some(self.spawn_worker(room_id, events, false));
         Ok(sender)
