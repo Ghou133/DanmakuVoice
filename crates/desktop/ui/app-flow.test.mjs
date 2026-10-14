@@ -259,23 +259,52 @@ test('audio settings display and save only the output device', async () => {
   assert.equal(autosave.action, 'preferences.save');
   assert.equal(autosave.payload.preferences.output, 'default');
   assert.equal(Object.hasOwn(autosave.payload, 'ffmpeg_path'), false);
+  assert.equal(Object.hasOwn(autosave.payload, 'confirmed'), false, 'consent is never assumed while collecting a draft');
+});
 
-  const calls = [];
-  context.mockCommand = async (action, payload) => { calls.push({ action, payload }); };
-  context.mockConfirm = async () => { throw new Error('unchanged output must not request confirmation'); };
-  vm.runInContext('command = mockCommand; confirmAction = mockConfirm; renderSettings = () => {}', context);
-  await vm.runInContext('handleForm', context)(form);
-  assert.equal(calls[0].action, 'preferences.save');
-  assert.equal(calls[0].payload.confirmed, false);
-  assert.equal(Object.hasOwn(calls[0].payload, 'ffmpeg_path'), false);
+// The output select autosaves on change; this drives that real path with the real queue.
+function audioAutosaveContext() {
+  const context = appContext();
+  const select = { name: 'output', tagName: 'SELECT', type: 'select-one', value: '', closest: selector => selector === '[data-form]' ? form : null, matches: () => false };
+  const form = { dataset: { form: 'audio' }, elements: { output: select }, fields: { get output() { return select.value; } }, checkValidity: () => true, querySelector: () => null };
+  const dialog = context.document.querySelector('#settings');
+  dialog.querySelectorAll = selector => selector === '[data-form]' ? [form] : [];
+  context.createAutosaveQueue = createAutosaveQueue;
+  context.audioForm = form;
+  context.calls = [];
+  context.confirmReply = false;
+  vm.runInContext(`snapshot.preferences = { output: 'default' }; snapshot.queue = { current: { id: 1 }, pending: [{ id: 2 }] };
+    copyFormDraft = () => {}; mountSelects = () => calls.push('sync select');
+    command = async (action, payload) => { calls.push({ action, payload }); snapshot.preferences.output = payload.preferences.output; return snapshot; };
+    confirmAction = async (...args) => { calls.push({ confirm: args }); return confirmReply; };
+    mountAutosaves();`, context);
+  const choose = async value => {
+    select.value = value;
+    for (const listener of dialog.listeners.change) await listener({ target: select });
+    await vm.runInContext('autosaves.get(audioForm).queue.flush()', context);
+  };
+  return { context, select, choose };
+}
 
-  form.fields.output = 'Speakers';
-  context.mockConfirm = async () => true;
-  vm.runInContext('confirmAction = mockConfirm', context);
-  await vm.runInContext('handleForm', context)(form);
-  assert.equal(calls[1].payload.preferences.output.named, 'Speakers');
-  assert.equal(calls[1].payload.confirmed, true);
-  assert.equal(Object.hasOwn(calls[1].payload, 'ffmpeg_path'), false);
+test('choosing another output while speech plays asks before stopping it, and cancelling restores the saved device', async () => {
+  const { context, select, choose } = audioAutosaveContext();
+  await choose('Speakers');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls)), [{ confirm: ['应用新的音频输出？', '当前播放和待播队列会停止。', '应用并停止播放', false] }, 'sync select']);
+  assert.equal(select.value, '', 'the select returns to the device that is still in use');
+  assert.equal(vm.runInContext('autosaves.get(audioForm).touched', context), false, 'a declined change leaves no draft to retry');
+
+  context.calls.length = 0;
+  context.confirmReply = true;
+  await choose('Speakers');
+  assert.equal(context.calls.length, 2);
+  assert.ok(context.calls[0].confirm);
+  assert.equal(context.calls[1].action, 'preferences.save');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls[1].payload)), { preferences: { output: { named: 'Speakers' } }, confirmed: true });
+
+  context.calls.length = 0;
+  vm.runInContext('snapshot.queue = { current: null, pending: [] }', context);
+  await choose('');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.calls)), [{ action: 'preferences.save', payload: { preferences: { output: 'default' }, confirmed: true } }], 'nothing to stop: switch without a dialog');
 });
 
 test('dots editor uses one visible form and keeps its generated role key hidden', () => {

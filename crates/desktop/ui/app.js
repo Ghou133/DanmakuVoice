@@ -2133,7 +2133,8 @@ function collectAutosave(form) {
     rules.sounds = [...form.querySelectorAll('[data-dictionary="sounds"] .dict-row')].map(row => ({ trigger: row.querySelector('[data-key="from"]').value, asset_id: row.querySelector('[data-key="to"]').value }));
     return { action: 'rules.save', payload: { rules } };
   }
-  if (type === 'audio') return { action: 'preferences.save', payload: { preferences: { output: value('output') ? { named: value('output') } : 'default' }, confirmed: true } };
+  // Consent to stop playback is asked when this draft is written (confirmOutputChange).
+  if (type === 'audio') return { action: 'preferences.save', payload: { preferences: { output: value('output') ? { named: value('output') } : 'default' } } };
   if (type === 'appearance') return { action: 'preferences.save', payload: { preferences: { appearance: value('appearance'), scale: number('scale') } } };
   if (type === 'startup') return { action: 'startup.set', payload: { enabled: checked('enabled') } };
   if (type === 'overlay') {
@@ -2153,6 +2154,22 @@ function collectAutosave(form) {
   }
   if (type === 'obs-link') return { action: 'obs.save', payload: { settings: { enabled: checked('enabled'), auto_launch: checked('auto_launch') } } };
   throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
+}
+
+// A new output device stops current playback and clears the queue. Ask first
+// when something would be lost; declining restores the device still in use.
+// Exit stops playback anyway and must not wait on a prompt.
+let exitFlushing = false;
+async function confirmOutputChange(form, payload) {
+  if (JSON.stringify(payload.preferences.output) === JSON.stringify(snapshot.preferences?.output)) return true;
+  const playing = !!(snapshot.queue?.current || snapshot.queue?.pending?.length);
+  if (!playing || exitFlushing || await confirmAction(t('应用新的音频输出？'), t('当前播放和待播队列会停止。'), t('应用并停止播放'), false)) {
+    payload.confirmed = true;
+    return true;
+  }
+  const select = form.elements.output;
+  if (select) { select.value = deviceValue(snapshot.preferences?.output); mountSelects(form); }
+  return false;
 }
 
 function showAutoState(form, message = '', state = '') {
@@ -2238,6 +2255,7 @@ function mountAutosaves() {
       },
       save: async ({ action, payload }) => {
         if (form.dataset.form === 'service-local') return saveLocalDirectory(payload.provider, payload.directory);
+        if (form.dataset.form === 'audio' && !await confirmOutputChange(form, payload)) return snapshot;
         return command(action, payload, { quiet: true, silent: true });
       },
       onSaved: async (result, envelope) => {
@@ -3297,7 +3315,9 @@ async function settleVoiceAuditionChoice() {
 async function flushExitEdits() {
   // Exit is one action: flush pending automatic saves, but never prompt about
   // an unsubmitted form or keep an owned service running because a save failed.
-  await Promise.allSettled([volumeSave.flush(), flushViewerAlias(), settleVoiceAuditionChoice(), flushAutosaves()]);
+  exitFlushing = true;
+  try { await Promise.allSettled([volumeSave.flush(), flushViewerAlias(), settleVoiceAuditionChoice(), flushAutosaves()]); }
+  finally { exitFlushing = false; }
   return true;
 }
 
