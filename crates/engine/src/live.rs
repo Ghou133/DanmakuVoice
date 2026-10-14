@@ -371,7 +371,12 @@ impl LiveController {
             return Ok(());
         };
         slot.cancel.cancel();
-        let scheduler_result = stop_live_jobs(self.scheduler.as_ref()).await;
+        // A dispatch past its cancellation check holds the speech gate until
+        // its submission is acknowledged; stop live jobs only after it.
+        let scheduler_result = {
+            let _gate = self.tts_enabled.lock().await;
+            stop_live_jobs(self.scheduler.as_ref()).await
+        };
         self.room.stop().await;
         let _ = slot.worker.await;
         self.updates.send_modify(|state| {
@@ -1666,6 +1671,63 @@ mod tests {
                 .is_err()
         );
         controller.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_an_in_flight_submission_before_stopping_live_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jobs_tx, _jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: true,
+        }));
+        scheduler.start().await.unwrap();
+        let controller =
+            Arc::new(LiveController::new(dir.path(), scheduler.clone(), None).unwrap());
+        let _events = controller.start_offline(42).await.unwrap();
+        // Stand in for dispatch_event after its cancellation check: it holds
+        // the speech gate until its submission has been acknowledged.
+        let gate = controller.tts_enabled.clone().lock_owned().await;
+        let stopping = controller.clone();
+        let mut stop = tokio::spawn(async move { stopping.stop().await });
+        assert!(
+            timeout(Duration::from_millis(300), &mut stop)
+                .await
+                .is_err(),
+            "stop acknowledged while a live submission held the speech gate"
+        );
+        let voice = VoicePreset {
+            id: "voice".into(),
+            name: "voice".into(),
+            connection_id: "local".into(),
+            provider: Provider::Dots,
+            voice_id: "voice.wav".into(),
+            speed: 1.0,
+            volume: 1.0,
+            sovits: None,
+        };
+        let rules = RuleSet {
+            default_preset_id: Some("voice".into()),
+            ..RuleSet::default()
+        };
+        let late = rules
+            .preview(
+                &LiveEvent::danmaku(42, Some(7), "Alice", "late"),
+                &[voice],
+                &[],
+            )
+            .unwrap();
+        scheduler.submit(late, JobOrigin::Live).await.unwrap();
+        drop(gate);
+        timeout(Duration::from_secs(3), stop)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let queue = scheduler.state().borrow().clone();
+        assert!(queue.current.is_none(), "a live job survived stop");
+        assert!(queue.pending.is_empty(), "a live job survived stop");
+        assert!(queue.accepting);
     }
 
     #[tokio::test]
