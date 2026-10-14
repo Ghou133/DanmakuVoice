@@ -1387,6 +1387,30 @@ test('chat keeps updating during a long command and polls started before its rep
   assert.equal(vm.runInContext('snapshot.live.received', context), 4);
 });
 
+test('a second voice chip chosen while the first binding is being created updates that binding', async () => {
+  const context = appContext();
+  context.requests = [];
+  vm.runInContext(`snapshot.bindings = []; snapshot.presets = [{ id: 'a', name: '甲', provider: 'dots' }, { id: 'b', name: '乙', provider: 'dots' }];
+    viewerContext = { user_name: 'Alice', user_id: 7 }; updateViewerVoices = () => {};
+    command = (action, payload) => new Promise(resolve => requests.push({ action, payload, resolve: () => {
+      const id = payload.id || 'created-' + requests.length;
+      snapshot.bindings = [...snapshot.bindings.filter(entry => entry.id !== id), { id, binding: payload.binding }];
+      resolve({ ...snapshot, result: { id } });
+    } }));`, context);
+  const first = vm.runInContext("handleAction('viewer.bind', 'a', null)", context);
+  const second = vm.runInContext("handleAction('viewer.bind', 'b', null)", context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.requests.length, 1, 'the second choice waits for the binding the first one creates');
+  context.requests[0].resolve();
+  await first;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.requests[1]?.payload.id, 'created-1');
+  assert.equal(context.requests[1].payload.binding.preset_id, 'b');
+  context.requests[1].resolve();
+  await second;
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('snapshot.bindings.map(entry => [entry.id, entry.binding.preset_id])', context))), [['created-1', 'b']]);
+});
+
 // A minimal composer whose controls drop focus when disabled, as browsers do.
 function composeContext() {
   const context = appContext();

@@ -1852,9 +1852,21 @@ async function flushViewerAlias() {
   catch { return false; }
 }
 
-async function bindViewerVoice(presetId) {
+// Chips for one viewer save in order: a choice made while the first binding is
+// still being created must update that binding instead of creating another.
+const viewerBindings = new Map();
+function bindViewerVoice(presetId) {
   const event = viewerContext;
   if (!event) return;
+  const identity = viewerIdentity(event);
+  const saved = (viewerBindings.get(identity) || Promise.resolve()).then(() => saveViewerVoice(event, presetId));
+  const settled = saved.catch(() => {});
+  viewerBindings.set(identity, settled);
+  void settled.then(() => { if (viewerBindings.get(identity) === settled) viewerBindings.delete(identity); });
+  return saved;
+}
+
+async function saveViewerVoice(event, presetId) {
   const hasUid = validUid(event.user_id);
   if (!hasUid && !String(event.user_name || '').trim()) throw new Error(t('这条弹幕没有可用用户名或 UID，无法指定声音。'));
   const record = viewerBinding(event);
