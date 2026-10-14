@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { createAutosaveQueue } from './autosave.mjs';
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, snapshotPollingPolicy, createSnapshotSequencer, uiIsActive, validUid } from './helpers.mjs';
+import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, snapshotPollingPolicy, createSnapshotSequencer, truncateUtf16, uiIsActive, validUid } from './helpers.mjs';
 
 // overrides replace harness stubs before app.js runs (for example the real autosave queue).
 function appContext(overrides = {}) {
@@ -39,6 +39,7 @@ function appContext(overrides = {}) {
     safeMediaUrl,
     snapshotPollingPolicy,
     createSnapshotSequencer,
+    truncateUtf16,
     uiIsActive,
     validUid,
     deviceValue,
@@ -1451,6 +1452,7 @@ function composeContext() {
   const form = control({ contains: node => [input, submit, emoji].includes(node) });
   const parts = { form, '#chat-message': input, '.chat-compose-note': control({}), '.lake-compose-count': control({}), '[data-action="chat.emoticons"]': emoji, 'button[type="submit"]': submit };
   const host = control({ querySelector: selector => parts[selector] ?? null, querySelectorAll: () => [input, submit, emoji] });
+  const count = parts['.lake-compose-count'];
   const surface = context.document.querySelector('#surface');
   const nodes = new Map([['#chat-compose', host], ['#chat-compose form', form], ['#chat-message', input], ['#chat-emoticon-picker', null]]);
   context.document.querySelector = selector => nodes.has(selector) ? nodes.get(selector) : surface;
@@ -1458,8 +1460,22 @@ function composeContext() {
   vm.runInContext(`step = 'main'; snapshot = { account: { user_id: 42 }, setup: { room_id: 99 }, chat_send: { account_id: 42, room_id: 99, message_limit: 20 }, preferences: {} };
     showToast = () => {}; command = (action, payload) => new Promise(resolve => requests.push({ action, payload, resolve: () => resolve(snapshot) }));
     chatMessageDraft = '你好'; updateChatCompose();`, context);
-  return { context, input, submit, body };
+  return { context, input, submit, body, count };
 }
+
+test('the chat counter and @-mention prefill count what the field and platform enforce', async () => {
+  const { context, input, count } = composeContext();
+  input.value = '😀😀a';
+  vm.runInContext('updateChatCompose()', context);
+  assert.equal(count.textContent, '5/20', 'maxlength and the platform both count UTF-16 units');
+  vm.runInContext(`chatMessageDraft = ''; viewerContext = { user_name: '${'😀'.repeat(10)}', user_id: 9 };
+    renderViewerDrawer = () => {}; updateLive = () => {};`, context);
+  await vm.runInContext("handleAction('viewer.at', '', null)", context);
+  const draft = vm.runInContext('chatMessageDraft', context);
+  assert.equal(draft.isWellFormed(), true, 'a cut surrogate pair would be rejected as invalid JSON');
+  assert.equal(draft, '@' + '😀'.repeat(9));
+  assert.equal(input.value, draft);
+});
 
 test('sending chat keeps the composer focused for the next message', async () => {
   const { context, input, submit, body } = composeContext();

@@ -276,6 +276,17 @@ export function mergeSnapshot(previous, next) {
   return { ...previous, ...next, result: undefined };
 }
 
+// Bilibili counts chat length in UTF-16 units, like maxlength. Cut on whole code
+// points: half of a surrogate pair cannot be serialized for the desktop host.
+export function truncateUtf16(text, limit) {
+  let result = '';
+  for (const point of String(text)) {
+    if (result.length + point.length > limit) break;
+    result += point;
+  }
+  return result;
+}
+
 export function uiIsActive(nativeActive, browserFocused, hidden) {
   return !hidden && (typeof nativeActive === 'boolean' ? nativeActive : browserFocused);
 }

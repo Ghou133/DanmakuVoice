@@ -1,6 +1,6 @@
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, createSnapshotSequencer, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
+import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, createSnapshotSequencer, truncateUtf16, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
 import { createAutosaveQueue } from './autosave.mjs';
 import { mountSelects, closeSelect, stripSelects } from './select.mjs';
 import { lakeSceneMarkup } from './lake-scene.mjs';
@@ -278,7 +278,7 @@ function updateChatCompose() {
     host.querySelector('#chat-message').addEventListener('input', inputEvent => {
       const count = host.querySelector('.lake-compose-count');
       count.hidden = !inputEvent.target.value;
-      count.textContent = `${Array.from(inputEvent.target.value).length}/${inputEvent.target.maxLength}`;
+      count.textContent = `${inputEvent.target.value.length}/${inputEvent.target.maxLength}`;
       updateChatCompose();
     });
   }
@@ -296,7 +296,8 @@ function updateChatCompose() {
   noteHost.hidden = !diagnostic;
   const count = host.querySelector('.lake-compose-count');
   count.hidden = !input.value;
-  count.textContent = `${Array.from(input.value).length}/${input.maxLength}`;
+  // maxlength and the platform limit both count UTF-16 units; so does the counter.
+  count.textContent = `${input.value.length}/${input.maxLength}`;
   const emoteButton = host.querySelector('[data-action="chat.emoticons"]');
   emoteButton.setAttribute('aria-expanded', String(chatEmoticonsOpen));
   emoteButton.classList.toggle('on', chatEmoticonsOpen);
@@ -4150,7 +4151,7 @@ async function handleAction(action, id, target) {
     if (!name) return;
     await flushViewerAlias();
     const limit = snapshot.chat_send?.message_limit || 20;
-    chatMessageDraft = (`@${name} ${chatMessageDraft}`).slice(0, limit);
+    chatMessageDraft = truncateUtf16(`@${name} ${chatMessageDraft}`, limit);
     await closeViewerDrawer();
     updateChatCompose();
     const input = document.querySelector('#chat-message');

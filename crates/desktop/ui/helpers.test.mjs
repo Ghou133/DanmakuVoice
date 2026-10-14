@@ -1,4 +1,4 @@
-import { errorMessage, mergeSnapshot, audienceUsers, audienceDisplayCount, createSnapshotSequencer } from './helpers.mjs';
+import { errorMessage, mergeSnapshot, audienceUsers, audienceDisplayCount, createSnapshotSequencer, truncateUtf16 } from './helpers.mjs';
 
 test('audience list searches confirmed viewers safely and clears when the room stops', () => {
   const snapshot = { live: { running: true, audience: { active: true, live_status: 1, rank_count: 9999, users: [{ user_id: 42, user_name: '<Viewer>' }, { user_id: null, user_name: '神秘人', mystery: true }] }, events: [
@@ -270,6 +270,14 @@ test('incremental snapshots retain settings, drop transient results and reject s
   assert.equal(mergeSnapshot(config, replacement), replacement);
 });
 
+
+test('chat text is cut to the platform UTF-16 limit without splitting a character', () => {
+  assert.equal(truncateUtf16('ab😀', 3), 'ab');
+  assert.equal(truncateUtf16('ab😀', 4), 'ab😀');
+  assert.equal(truncateUtf16('你好世界', 2), '你好');
+  assert.equal(truncateUtf16('@' + '😀'.repeat(10) + ' ', 20), '@' + '😀'.repeat(9));
+  assert.equal(truncateUtf16('短', 20), '短');
+});
 
 test('poll replies that started before a settled command or a newer poll are dropped', () => {
   const sequence = createSnapshotSequencer();
