@@ -122,17 +122,19 @@ impl ServiceState {
         }
     }
 
-    pub fn stop_owned(&mut self) {
+    pub fn stop_owned(&mut self) -> Retired {
         self.generation = self.generation.wrapping_add(1);
-        self.process = None;
+        let retired = Retired(self.process.take().into_iter().collect());
         self.owned_port = None;
         self.set("stopped", "本应用启动的服务已停止");
+        retired
     }
 
-    pub fn stop_manual(&mut self) {
+    pub fn stop_manual(&mut self) -> Retired {
         self.manual_stopped = true;
-        self.stop_owned();
+        let retired = self.stop_owned();
         self.set("stopped", "本次会话已暂停自动启动；外部服务不会被停止");
+        retired
     }
 
     pub fn start_manual(&mut self) {
@@ -151,38 +153,53 @@ impl ServiceState {
         !self.manual_stopped
     }
 
-    pub fn process_exited(&mut self) -> bool {
+    /// Takes the owned process out once it has exited; `None` while it runs.
+    #[must_use = "reap after releasing the application lock"]
+    pub fn take_exited(&mut self) -> Option<Retired> {
         if self.process.as_mut().is_some_and(OwnedProcess::exited) {
-            self.process = None;
+            let retired = Retired(self.process.take().into_iter().collect());
             self.owned_port = None;
             self.set("failed", "本地服务进程已退出，请检查安装目录");
-            true
+            Some(retired)
         } else {
-            false
+            None
         }
     }
 
-    pub fn switch_endpoint(&mut self, port: u16) {
-        self.process_exited();
+    pub fn switch_endpoint(&mut self, port: u16) -> Retired {
+        let mut retired = self.take_exited().unwrap_or_default();
         if self.process.is_some() && self.owned_port != Some(port) {
             // Each provider owns at most one model process. Never report the
             // old listener as the selected voice's newly configured port.
-            self.stop_owned();
+            retired.0.extend(self.stop_owned().0);
         }
+        retired
     }
 
+    /// Also returns any previous process taken out, even if the launch fails.
     pub fn launch(
         &mut self,
         kind: Kind,
         endpoint: &Endpoint,
         app_data_dir: &Path,
-    ) -> Result<(), String> {
+    ) -> (Retired, Result<(), String>) {
         // A service can exit between status polls. An explicit start must not
         // mistake its stale process handle for a running service.
-        self.switch_endpoint(endpoint.port);
-        if self.process.is_some() {
-            return Ok(());
-        }
+        let retired = self.switch_endpoint(endpoint.port);
+        let launched = if self.process.is_some() {
+            Ok(())
+        } else {
+            self.spawn(kind, endpoint, app_data_dir)
+        };
+        (retired, launched)
+    }
+
+    fn spawn(
+        &mut self,
+        kind: Kind,
+        endpoint: &Endpoint,
+        app_data_dir: &Path,
+    ) -> Result<(), String> {
         let directory = self.directory.as_deref().ok_or("请先设置本地 TTS 目录")?;
         self.process = Some(OwnedProcess::launch(
             kind,
@@ -216,9 +233,25 @@ impl LocalServices {
         }
     }
 
-    pub fn stop_owned(&mut self) {
-        self.dots.stop_owned();
-        self.gpt_sovits.stop_owned();
+    pub fn stop_owned(&mut self) -> Retired {
+        let mut retired = self.dots.stop_owned();
+        retired.0.extend(self.gpt_sovits.stop_owned().0);
+        retired
+    }
+}
+
+/// Owned processes taken out of their slots. Dropping one ends its process
+/// tree and can wait seconds, so drop it after releasing the application lock.
+#[must_use = "reap after releasing the application lock"]
+#[derive(Default)]
+pub struct Retired(Vec<OwnedProcess>);
+
+impl Retired {
+    /// Ends the process trees on a blocking thread and waits for them.
+    pub async fn reap(self) {
+        if !self.0.is_empty() {
+            let _ = tokio::task::spawn_blocking(move || drop(self)).await;
+        }
     }
 }
 
@@ -566,6 +599,17 @@ fn process_path(path: PathBuf) -> Result<PathBuf, String> {
 
 struct OwnedProcess {
     child: Child,
+    #[cfg(test)]
+    on_drop: Option<Box<dyn FnOnce() + Send>>,
+}
+
+#[cfg(test)]
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        if let Some(probe) = self.on_drop.take() {
+            probe();
+        }
+    }
 }
 
 impl OwnedProcess {
@@ -639,7 +683,11 @@ impl OwnedProcess {
         let mut child = Child::spawn(&command, false, false, true)
             .map_err(|error| format!("无法安全启动本地 TTS 服务：{error}"))?;
         start_stderr_capture(&mut child, stderr_log)?;
-        Ok(Self { child })
+        Ok(Self {
+            child,
+            #[cfg(test)]
+            on_drop: None,
+        })
     }
 
     fn exited(&mut self) -> bool {
@@ -820,9 +868,32 @@ pub(crate) mod tests {
         kind: Kind,
         endpoint: &str,
     ) -> ServiceState {
+        owned_service_fixture(directory, kind, endpoint, "idle")
+    }
+
+    /// An owned slot whose process has already exited but is not yet reaped.
+    #[cfg(windows)]
+    pub(crate) fn exited_owned_service_fixture(
+        directory: &Path,
+        kind: Kind,
+        endpoint: &str,
+    ) -> ServiceState {
+        let mut state = owned_service_fixture(directory, kind, endpoint, "exit");
+        let process = state.process.as_mut().unwrap();
+        process.child.blocking_wait().unwrap();
+        state
+    }
+
+    #[cfg(windows)]
+    fn owned_service_fixture(
+        directory: &Path,
+        kind: Kind,
+        endpoint: &str,
+        mode: &str,
+    ) -> ServiceState {
         let log = File::create(directory.join("owned-fixture.log")).unwrap();
         let process =
-            OwnedProcess::spawn_owned(fixture_command("idle", &directory.join("unused.pid")), log)
+            OwnedProcess::spawn_owned(fixture_command(mode, &directory.join("unused.pid")), log)
                 .unwrap();
         let mut state = ServiceState::new(Some(directory.to_owned()));
         state.process = Some(process);
@@ -830,6 +901,12 @@ pub(crate) mod tests {
         state.observe_endpoint(endpoint);
         state.set("ready", "Isolated process fixture is running");
         state
+    }
+
+    /// Runs `probe` when the slot's owned process is about to be reaped.
+    #[cfg(windows)]
+    pub(crate) fn on_process_reap(state: &mut ServiceState, probe: impl FnOnce() + Send + 'static) {
+        state.process.as_mut().unwrap().on_drop = Some(Box::new(probe));
     }
 
     #[cfg(windows)]
@@ -883,10 +960,16 @@ pub(crate) mod tests {
         let mut state = ServiceState::new(Some(temp.path().join("invalid-install")));
         state.process = Some(owned);
         let endpoint = Endpoint::parse(Kind::Dots, "http://127.0.0.1:19881").unwrap();
-        assert!(state.launch(Kind::Dots, &endpoint, temp.path()).is_err());
+        let (retired, launched) = state.launch(Kind::Dots, &endpoint, temp.path());
+        assert!(launched.is_err());
         assert!(
             state.process.is_none(),
             "stale process prevented new launch"
+        );
+        assert_eq!(
+            retired.0.len(),
+            1,
+            "a failed launch dropped the old process"
         );
     }
 
@@ -900,11 +983,14 @@ pub(crate) mod tests {
         let mut state = ServiceState::new(None);
         state.process = Some(owned);
         state.owned_port = Some(9881);
-        state.switch_endpoint(9881);
+        assert!(state.switch_endpoint(9881).0.is_empty());
         assert!(state.view().owned, "same endpoint should reuse its process");
-        state.switch_endpoint(19881);
+        let mut retired = state.switch_endpoint(19881);
         assert!(!state.view().owned, "old endpoint process stayed owned");
         assert_eq!(state.owned_port, None);
+        // The slot is released at once; the caller ends the tree later.
+        assert!(!retired.0[0].exited());
+        drop(retired);
     }
 
     fn touch(path: &Path) {
@@ -1008,7 +1094,7 @@ pub(crate) mod tests {
     fn manual_stop_suppresses_auto_start_until_explicit_start() {
         let mut service = ServiceState::new(Some(PathBuf::from("C:/dots.tts")));
         assert!(service.auto_start_allowed());
-        service.stop_manual();
+        assert!(service.stop_manual().0.is_empty());
         assert!(!service.auto_start_allowed());
         assert!(service.view().manual_stopped);
         assert_eq!(service.view().state, "stopped");

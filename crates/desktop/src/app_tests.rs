@@ -1233,7 +1233,7 @@ async fn gpt_late_probe_cannot_overwrite_changed_endpoint_or_manual_stop() {
             save_gpt_connection(&app, "http://127.0.0.1:9").await;
         } else {
             // Emulate a lifecycle transition without starting/stopping a process.
-            app.lock().unwrap().local_services.gpt_sovits.stop_manual();
+            drop(app.lock().unwrap().local_services.gpt_sovits.stop_manual());
         }
         release_tx.send(()).unwrap();
         let result = check.await.unwrap();
@@ -1266,7 +1266,7 @@ async fn gpt_explicit_start_rechecks_external_service_and_stale_start_never_runs
         false
     );
     let old_generation = app.lock().unwrap().local_services.gpt_sovits.generation;
-    app.lock().unwrap().local_services.gpt_sovits.stop_manual();
+    drop(app.lock().unwrap().local_services.gpt_sovits.stop_manual());
     app.ensure_local_service(Kind::GptSovits, &endpoint, false, Some(old_generation))
         .await;
     assert_eq!(
@@ -2567,7 +2567,7 @@ async fn stale_auto_start_does_not_restart_an_unselected_local_service() {
 async fn invalid_stale_service_task_does_not_overwrite_manual_stop_or_new_selection() {
     let (_directory, app) = isolated(false);
     let generation = app.lock().unwrap().local_services.dots.generation;
-    app.lock().unwrap().local_services.dots.stop_manual();
+    drop(app.lock().unwrap().local_services.dots.stop_manual());
     app.ensure_local_service(Kind::Dots, "invalid old endpoint", false, Some(generation))
         .await;
     assert_eq!(app.lock().unwrap().local_services.dots.state, "stopped");
@@ -2701,6 +2701,72 @@ async fn primary_switch_keeps_owned_processes_until_explicit_stop_or_exit() {
     assert_eq!(
         app.snapshot().unwrap()["local_services"]["dots"]["owned"],
         false
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn owned_local_services_are_reaped_outside_the_application_lock() {
+    use local_service::tests::{
+        exited_owned_service_fixture, on_process_reap, running_owned_service_fixture,
+    };
+    let (_directory, app) = isolated(true);
+    let services = tempfile::tempdir().unwrap();
+    let reaped = Arc::new(Mutex::new(Vec::new()));
+    // Reaping can wait seconds for a process tree; the state lock must be free.
+    let watch = |slot: &mut local_service::ServiceState, path: &'static str| {
+        let controller = Arc::downgrade(&app.0);
+        let reaped = reaped.clone();
+        on_process_reap(slot, move || {
+            let unlocked = controller
+                .upgrade()
+                .is_some_and(|controller| controller.try_lock().is_ok());
+            reaped.lock().unwrap().push((path, unlocked));
+        });
+    };
+    {
+        let mut state = app.lock().unwrap();
+        state.local_services.dots =
+            exited_owned_service_fixture(services.path(), Kind::Dots, "http://127.0.0.1:9881");
+        watch(&mut state.local_services.dots, "poll");
+        state.local_services.gpt_sovits = running_owned_service_fixture(
+            services.path(),
+            Kind::GptSovits,
+            "http://127.0.0.1:19880",
+        );
+        watch(&mut state.local_services.gpt_sovits, "stop");
+    }
+    app.snapshot().unwrap();
+    app.dispatch("local_services.stop", json!({"provider":"gpt_sovits"}))
+        .await
+        .unwrap();
+    {
+        let mut state = app.lock().unwrap();
+        state.local_services.dots =
+            running_owned_service_fixture(services.path(), Kind::Dots, "http://127.0.0.1:9881");
+        watch(&mut state.local_services.dots, "reset");
+    }
+    app.dispatch("data.clear", json!({"confirmed":true}))
+        .await
+        .unwrap();
+    {
+        let mut state = app.lock().unwrap();
+        state.local_services.gpt_sovits = running_owned_service_fixture(
+            services.path(),
+            Kind::GptSovits,
+            "http://127.0.0.1:19880",
+        );
+        watch(&mut state.local_services.gpt_sovits, "exit");
+    }
+    app.stop_owned_local_services();
+    assert_eq!(
+        *reaped.lock().unwrap(),
+        [
+            ("poll", true),
+            ("stop", true),
+            ("reset", true),
+            ("exit", true)
+        ]
     );
 }
 
