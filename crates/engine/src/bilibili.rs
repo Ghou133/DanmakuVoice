@@ -45,6 +45,8 @@ use crate::diagnostics::{self, DiagnosticCode};
 use crate::model::{EventKind, LiveEmote, LiveEvent};
 
 const USER_AGENT_VALUE: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const LIVE_API: &str = "https://api.live.bilibili.com/";
+const ACCOUNT_API: &str = "https://api.bilibili.com/";
 const QR_GENERATE_URL: &str = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate";
 const QR_POLL_URL: &str = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
 const QR_TTL: Duration = Duration::from_secs(180);
@@ -57,6 +59,7 @@ const MAX_IMAGE_URL_BYTES: usize = 1024;
 const MAX_EMOTES_PER_EVENT: usize = 8;
 const MAX_EMOTE_TEXT_BYTES: usize = 128;
 const MAX_DANMAKU_EXTRA_BYTES: usize = 64 * 1024;
+const ROOM_INIT_NOT_FOUND: i64 = 60004;
 
 /// Error messages intentionally exclude URL query strings, ticket values,
 /// Cookie headers, server response bodies and credentials.
@@ -83,6 +86,8 @@ pub enum BiliError {
     /// A write may have reached Bilibili, but no reply confirmed it.
     #[error("请求已发出，但没有及时收到 B站确认，结果未知；请核对后再操作 [DV-B11]")]
     Unconfirmed,
+    #[error("直播间不存在，请检查房间号 [DV-B12]")]
+    RoomNotFound,
 }
 
 /// Sensitive web session returned by a confirmed QR login. Its Debug output
@@ -698,6 +703,11 @@ pub enum RoomState {
     SessionExpired {
         room_id: u64,
     },
+    /// room_init reported that the requested room does not exist. Retrying
+    /// cannot help until the user changes the room number.
+    RoomNotFound {
+        room_id: u64,
+    },
     Connecting {
         room_id: u64,
     },
@@ -708,6 +718,10 @@ pub enum RoomState {
         room_id: u64,
         attempt: u32,
         delay: Duration,
+        /// Bilibili's API error code when it rejected the last attempt's
+        /// room or danmaku discovery; `None` for network, data or socket
+        /// failures.
+        api_code: Option<i64>,
     },
 }
 
@@ -716,10 +730,38 @@ struct RunningRoom {
     task: JoinHandle<()>,
 }
 
+/// Room discovery client and API origins; tests point these at a fixture.
+#[derive(Clone)]
+struct RoomApi {
+    http: Client,
+    live_base: Url,
+    account_base: Url,
+}
+
+impl RoomApi {
+    fn new(http: Client) -> Self {
+        Self {
+            http,
+            live_base: Url::parse(LIVE_API).expect("fixed API URL"),
+            account_base: Url::parse(ACCOUNT_API).expect("fixed API URL"),
+        }
+    }
+
+    fn live(&self, path: &str) -> Url {
+        self.live_base.join(path).expect("fixed relative API path")
+    }
+
+    fn account(&self, path: &str) -> Url {
+        self.account_base
+            .join(path)
+            .expect("fixed relative API path")
+    }
+}
+
 /// Owns at most one room task. The caller supplies a bounded channel; when
 /// its receiver closes, the task exits rather than reconnecting forever.
 pub struct BiliRoomClient {
-    http: Client,
+    api: RoomApi,
     running: Mutex<Option<RunningRoom>>,
     state_tx: watch::Sender<RoomState>,
     audience_tx: watch::Sender<AudienceSnapshot>,
@@ -731,7 +773,7 @@ impl BiliRoomClient {
         let (state_tx, _) = watch::channel(RoomState::Stopped);
         let (audience_tx, _) = watch::channel(AudienceSnapshot::default());
         Ok(Self {
-            http: http_client()?,
+            api: RoomApi::new(http_client()?),
             running: Mutex::new(None),
             state_tx,
             audience_tx,
@@ -766,7 +808,7 @@ impl BiliRoomClient {
         session: Option<BiliSession>,
         events: mpsc::Sender<LiveEvent>,
     ) -> Result<(), BiliError> {
-        let http = self.http.clone();
+        let api = self.api.clone();
         let audience = self.audience_tx.clone();
         let (requests, receiver) = mpsc::channel(4);
         // Keep the request channel serialized with stop/start so a previous
@@ -776,8 +818,8 @@ impl BiliRoomClient {
             audience.send_replace(AudienceSnapshot { active: true, ..AudienceSnapshot::default() });
             tokio::spawn(async move {
                 let final_state = tokio::select! {
-                    result = run_room(http.clone(), room_id, session, &events, task_cancel.clone(), state.clone(), &audience) => result,
-                    _ = run_audience(http.clone(), room_id, audience.clone(), receiver, task_cancel) => RoomState::Stopped,
+                    result = run_room(api.clone(), room_id, session, &events, task_cancel.clone(), state.clone(), &audience) => result,
+                    _ = run_audience(api.http.clone(), room_id, audience.clone(), receiver, task_cancel) => RoomState::Stopped,
                 };
                 audience.send_modify(|snapshot| { snapshot.active = false; snapshot.loading = false; });
                 state.send_replace(final_state);
@@ -845,7 +887,7 @@ impl Drop for BiliRoomClient {
 }
 
 async fn run_room(
-    http: Client,
+    api: RoomApi,
     display_room_id: u64,
     session: Option<BiliSession>,
     events: &mpsc::Sender<LiveEvent>,
@@ -864,10 +906,19 @@ async fn run_room(
         let started = Instant::now();
         let result = tokio::select! {
             _ = cancel.cancelled() => return RoomState::Stopped,
-            result = connect_once(&http, display_room_id, session.as_ref(), events, &cancel, &state, audience) => result,
+            result = connect_once(&api, display_room_id, session.as_ref(), events, &cancel, &state, audience) => result,
         };
         if result == ConnectionEnd::SessionExpired {
             return RoomState::SessionExpired {
+                room_id: display_room_id,
+            };
+        }
+        if result == ConnectionEnd::RoomNotFound {
+            diagnostics::record(
+                DiagnosticCode::RoomFailed,
+                Some(ConnectionFailureStage::ResolveRoom.diagnostic_number()),
+            );
+            return RoomState::RoomNotFound {
                 room_id: display_room_id,
             };
         }
@@ -879,9 +930,17 @@ async fn run_room(
         {
             return RoomState::Stopped;
         }
-        if let ConnectionEnd::Failed(stage) = result {
-            diagnostics::record(DiagnosticCode::RoomFailed, Some(stage.diagnostic_number()));
-        }
+        let api_code = match result {
+            ConnectionEnd::Failed(stage) => {
+                diagnostics::record(DiagnosticCode::RoomFailed, Some(stage.diagnostic_number()));
+                None
+            }
+            ConnectionEnd::Rejected(stage, code) => {
+                diagnostics::record(DiagnosticCode::RoomFailed, Some(stage.diagnostic_number()));
+                Some(code)
+            }
+            _ => None,
+        };
         failures = if started.elapsed() >= Duration::from_secs(60) {
             1
         } else {
@@ -892,6 +951,7 @@ async fn run_room(
             room_id: display_room_id,
             attempt: failures,
             delay,
+            api_code,
         });
         tokio::select! {
             _ = cancel.cancelled() => return RoomState::Stopped,
@@ -934,9 +994,23 @@ impl ConnectionFailureStage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConnectionEnd {
     Failed(ConnectionFailureStage),
+    /// A discovery request returned this Bilibili API error code.
+    Rejected(ConnectionFailureStage, i64),
+    RoomNotFound,
     SessionExpired,
     Cancelled,
     ReceiverClosed,
+}
+
+impl ConnectionEnd {
+    fn discovery_failed(stage: ConnectionFailureStage, error: BiliError) -> Self {
+        match error {
+            BiliError::Api(code) => Self::Rejected(stage, code),
+            BiliError::RoomNotFound => Self::RoomNotFound,
+            BiliError::SessionExpired => Self::SessionExpired,
+            _ => Self::Failed(stage),
+        }
+    }
 }
 
 fn room_websocket_config() -> WebSocketConfig {
@@ -948,7 +1022,7 @@ fn room_websocket_config() -> WebSocketConfig {
 }
 
 async fn connect_once(
-    http: &Client,
+    api: &RoomApi,
     display_room_id: u64,
     session: Option<&BiliSession>,
     events: &mpsc::Sender<LiveEvent>,
@@ -956,13 +1030,17 @@ async fn connect_once(
     state: &watch::Sender<RoomState>,
     audience: &watch::Sender<AudienceSnapshot>,
 ) -> ConnectionEnd {
-    let Ok(room_id) = resolve_room(http, display_room_id).await else {
-        return ConnectionEnd::Failed(ConnectionFailureStage::ResolveRoom);
+    let room_id = match resolve_room(api, display_room_id).await {
+        Ok(room_id) => room_id,
+        Err(error) => {
+            return ConnectionEnd::discovery_failed(ConnectionFailureStage::ResolveRoom, error);
+        }
     };
-    let info = match discover_danmu(http, room_id, session).await {
+    let info = match discover_danmu(api, room_id, session).await {
         Ok(info) => info,
-        Err(BiliError::SessionExpired) => return ConnectionEnd::SessionExpired,
-        Err(_) => return ConnectionEnd::Failed(ConnectionFailureStage::DiscoverDanmu),
+        Err(error) => {
+            return ConnectionEnd::discovery_failed(ConnectionFailureStage::DiscoverDanmu, error);
+        }
     };
     let mut host_failure = ConnectionFailureStage::WebSocketConnect;
     for host in info.hosts {
@@ -1039,9 +1117,18 @@ async fn connect_once(
     ConnectionEnd::Failed(host_failure)
 }
 
-async fn resolve_room(http: &Client, display_id: u64) -> Result<u64, BiliError> {
-    let url = format!("https://api.live.bilibili.com/room/v1/Room/room_init?id={display_id}");
-    let value = read_json(http.get(url).send().await.map_err(|_| BiliError::Network)?).await?;
+async fn resolve_room(api: &RoomApi, display_id: u64) -> Result<u64, BiliError> {
+    let request = api
+        .http
+        .get(api.live("room/v1/Room/room_init"))
+        .query(&[("id", display_id)]);
+    let value = read_json(request.send().await.map_err(|_| BiliError::Network)?).await?;
+    // room_init documents 60004 as "直播间不存在" (bilibili-API-collect
+    // docs/live/info.md). Retrying cannot change it; other codes stay
+    // reconnectable because they may be rate limits or temporary rejections.
+    if value.get("code").and_then(Value::as_i64) == Some(ROOM_INIT_NOT_FOUND) {
+        return Err(BiliError::RoomNotFound);
+    }
     require_api_ok(&value)?;
     value
         .pointer("/data/room_id")
@@ -1060,14 +1147,19 @@ struct DanmuInfo {
 }
 
 async fn discover_danmu(
-    http: &Client,
+    api: &RoomApi,
     room_id: u64,
     session: Option<&BiliSession>,
 ) -> Result<DanmuInfo, BiliError> {
-    let mixin_key = fetch_wbi_mixin(http, session).await?;
-    let query = signed_danmu_query(room_id, now_ms() / 1000, &mixin_key);
-    let url = format!("https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?{query}");
-    let mut request = http
+    let mixin_key = fetch_wbi_mixin(api, session).await?;
+    let mut url = api.live("xlive/web-room/v1/index/getDanmuInfo");
+    url.set_query(Some(&signed_danmu_query(
+        room_id,
+        now_ms() / 1000,
+        &mixin_key,
+    )));
+    let mut request = api
+        .http
         .get(url)
         .header(REFERER, format!("https://live.bilibili.com/{room_id}"));
     if let Some(session) = session {
@@ -1082,11 +1174,12 @@ async fn discover_danmu(
 /// -101 for an anonymous viewer. The image URLs are key containers, not
 /// resources to download.
 async fn fetch_wbi_mixin(
-    http: &Client,
+    api: &RoomApi,
     session: Option<&BiliSession>,
 ) -> Result<String, BiliError> {
-    let mut request = http
-        .get("https://api.bilibili.com/x/web-interface/nav")
+    let mut request = api
+        .http
+        .get(api.account("x/web-interface/nav"))
         .header(REFERER, "https://www.bilibili.com/");
     if let Some(session) = session {
         request = request.header(COOKIE, session.cookie_header());
@@ -1525,6 +1618,8 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
             // blivedm/models/web.py maps info[0][12] to dm_type:
             // 0=text, 1=standalone emoticon, 2=voice. Do not infer it from
             // message text, inline emots, image URLs, or command suffixes.
+            // Live reception then applies received_emotes.rs, which also marks
+            // a message made only of verified emote markers.
             event.is_bilibili_emoticon = metadata
                 .and_then(|meta| meta.get(12))
                 .and_then(Value::as_u64)
@@ -1547,14 +1642,7 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 .and_then(Value::as_u64)
                 .and_then(|n| u32::try_from(n).ok())
                 .filter(|n| *n > 0)?;
-            let milli_yuan = data
-                .get("price")
-                .and_then(Value::as_f64)
-                .filter(|v| v.is_finite() && *v >= 0.0)?;
-            let price_yuan = milli_yuan / 1000.0 * f64::from(quantity);
-            if !price_yuan.is_finite() {
-                return None;
-            }
+            let price_yuan = gold_total_yuan(data.get("price")?, quantity)?;
             LiveEvent {
                 room_id,
                 user_id: data
@@ -1619,6 +1707,17 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 3 => "舰长",
                 _ => return None,
             };
+            let quantity = data
+                .get("num")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(1);
+            // blivedm's GuardBuyMessage.price is the unit price in gold, like
+            // SEND_GIFT. Payloads without it keep the former zero amount.
+            let price_yuan = match data.get("price") {
+                None | Some(Value::Null) => 0.0,
+                Some(price) => gold_total_yuan(price, quantity)?,
+            };
             LiveEvent {
                 room_id,
                 user_id: data
@@ -1636,12 +1735,8 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
                 emotes: Vec::new(),
                 is_bilibili_emoticon: false,
                 gift_name: String::new(),
-                quantity: data
-                    .get("num")
-                    .and_then(Value::as_u64)
-                    .and_then(|n| u32::try_from(n).ok())
-                    .unwrap_or(1),
-                price_yuan: 0.0,
+                quantity,
+                price_yuan,
                 coin_type: None,
                 guard_name: guard_name.to_owned(),
                 platform_event_id: json_id(data.get("id")),
@@ -1652,6 +1747,15 @@ pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Opt
     };
     event.observed_at_ms = observed_at_ms;
     Some(event)
+}
+
+/// Gold amounts are per unit (1000 gold = 1 yuan). A negative, non-numeric,
+/// or overflowing total is rejected before rule evaluation.
+fn gold_total_yuan(unit_gold: &Value, quantity: u32) -> Option<f64> {
+    let unit_gold = unit_gold
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)?;
+    Some(unit_gold / 1000.0 * f64::from(quantity)).filter(|total| total.is_finite())
 }
 
 /// Image references come only from Bilibili's own CDN. This also keeps a
@@ -1914,6 +2018,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn guard_purchase_price_is_unit_gold_times_quantity_without_affecting_thresholds() {
+        use crate::rules::RuleSet;
+        let guard = |data: Value| parse_live_event(1, 2, &json!({"cmd":"GUARD_BUY","data":data}));
+        // blivedm GuardBuyMessage.price is the unit price in gold (1000 = 1 yuan).
+        let captain = guard(json!({
+            "uid":15,"username":"丁","guard_level":3,"num":3,"price":198000
+        }))
+        .unwrap();
+        assert_eq!(captain.quantity, 3);
+        assert_eq!(captain.price_yuan, 594.0);
+        let mut rules = RuleSet::default();
+        rules.templates.guard = "{guard_name}:{price}".into();
+        // Gift and Super Chat thresholds never apply to guard purchases.
+        rules.events.gift_threshold_yuan = 1.0e9;
+        rules.events.super_chat_threshold_yuan = 1.0e9;
+        let preview = rules.preview(&captain, &[], &[]).unwrap();
+        assert_eq!(preview.filtered_reason, None);
+        assert_eq!(preview.final_text, "舰长:594");
+
+        // Older payloads without a price keep the former zero amount.
+        let unpriced = guard(json!({"uid":15,"username":"丁","guard_level":3,"num":1})).unwrap();
+        assert_eq!(unpriced.price_yuan, 0.0);
+        for price in [json!(-1), json!("198000"), json!(f64::MAX)] {
+            assert!(
+                guard(json!({
+                    "uid":15,"username":"丁","guard_level":1,"num":u32::MAX,"price":price
+                }))
+                .is_none(),
+                "{price}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn websocket_rejects_oversized_frame_before_packet_decode() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1942,6 +2080,153 @@ mod tests {
             tokio_tungstenite::tungstenite::Error::Capacity(_)
         ));
         server.await.unwrap();
+    }
+
+    /// Serves one JSON reply per connection, in order, and returns each
+    /// request line. Never contacts Bilibili.
+    async fn api_fixture(replies: Vec<Value>) -> (RoomApi, JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for reply in replies {
+                let (mut socket, _) = timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    let mut chunk = [0; 4096];
+                    let size = socket.read(&mut chunk).await.unwrap();
+                    assert!(size > 0 && head.len() < 64 * 1024);
+                    head.extend_from_slice(&chunk[..size]);
+                }
+                let head = String::from_utf8(head).unwrap();
+                requests.push(head.lines().next().unwrap().to_owned());
+                let body = reply.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let api = RoomApi {
+            http: http_client().unwrap(),
+            live_base: base.clone(),
+            account_base: base,
+        };
+        (api, task)
+    }
+
+    #[tokio::test]
+    async fn missing_room_ends_the_session_instead_of_reconnecting() {
+        let (api, server) = api_fixture(vec![
+            json!({"code":60004,"message":"直播间不存在","data":{}}),
+        ])
+        .await;
+        let (events, _receiver) = mpsc::channel(1);
+        let (state, states) = watch::channel(RoomState::Stopped);
+        let (audience, _) = watch::channel(AudienceSnapshot::default());
+        let room = run_room(
+            api,
+            4242,
+            None,
+            &events,
+            CancellationToken::new(),
+            state,
+            &audience,
+        );
+        let ended = timeout(Duration::from_secs(5), room)
+            .await
+            .expect("a missing room was retried");
+        assert_eq!(ended, RoomState::RoomNotFound { room_id: 4242 });
+        assert!(!matches!(*states.borrow(), RoomState::Reconnecting { .. }));
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /room/v1/Room/room_init?id=4242 HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn api_rejections_keep_reconnecting_with_their_code_and_network_failures_do_not() {
+        let nav = json!({"code":-101,"data":{"isLogin":false,"wbi_img":{
+            "img_url":"https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+            "sub_url":"https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"
+        }}});
+        let rejected_room = vec![json!({"code":-352,"message":"server detail"})];
+        let rejected_danmu = vec![
+            json!({"code":0,"data":{"room_id":800}}),
+            nav,
+            json!({"code":-352,"message":"server detail"}),
+        ];
+        for (replies, stage) in [
+            (rejected_room, "room_init"),
+            (rejected_danmu, "getDanmuInfo"),
+        ] {
+            let (api, server) = api_fixture(replies).await;
+            let (events, _receiver) = mpsc::channel(1);
+            let (state, mut states) = watch::channel(RoomState::Stopped);
+            let cancel = CancellationToken::new();
+            let room = tokio::spawn({
+                let cancel = cancel.clone();
+                async move {
+                    let (audience, _) = watch::channel(AudienceSnapshot::default());
+                    run_room(api, 42, None, &events, cancel, state, &audience).await
+                }
+            });
+            let reconnecting = timeout(
+                Duration::from_secs(5),
+                states.wait_for(|state| matches!(state, RoomState::Reconnecting { .. })),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .clone();
+            assert_eq!(
+                reconnecting,
+                RoomState::Reconnecting {
+                    room_id: 42,
+                    attempt: 1,
+                    delay: Duration::from_secs(1),
+                    api_code: Some(-352),
+                },
+                "{stage}"
+            );
+            assert!(server.await.unwrap().last().unwrap().contains(stage));
+            cancel.cancel();
+            assert_eq!(room.await.unwrap(), RoomState::Stopped);
+        }
+
+        // Nothing listens on the fixture port any more: a plain network failure.
+        let (api, server) = api_fixture(Vec::new()).await;
+        server.await.unwrap();
+        let (events, _receiver) = mpsc::channel(1);
+        let (state, mut states) = watch::channel(RoomState::Stopped);
+        let cancel = CancellationToken::new();
+        let room = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                let (audience, _) = watch::channel(AudienceSnapshot::default());
+                run_room(api, 42, None, &events, cancel, state, &audience).await
+            }
+        });
+        let reconnecting = timeout(
+            Duration::from_secs(15),
+            states.wait_for(|state| matches!(state, RoomState::Reconnecting { .. })),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .clone();
+        assert!(matches!(
+            reconnecting,
+            RoomState::Reconnecting { api_code: None, .. }
+        ));
+        cancel.cancel();
+        assert_eq!(room.await.unwrap(), RoomState::Stopped);
     }
 
     #[test]
@@ -2662,10 +2947,13 @@ mod tests {
     }
     #[test]
     fn standalone_emote_filter_uses_protocol_type_without_guessing_text() {
+        use crate::received_emotes::ReceivedEmoteCatalog;
         use crate::rules::{RuleSet, SoundRule};
         // Protocol-shaped fixtures derived from blivedm/models/web.py:
         // info[0][12]=dm_type, info[0][13]=emoticon_options; these are not
-        // claimed to be a recording of the user's live room.
+        // claimed to be a recording of the user's live room. The parser alone
+        // reads dm_type; live reception then classifies a message made only
+        // of markers verified by the packet's own images (received_emotes.rs).
         let mut rules = RuleSet::default();
         rules.sounds.push(SoundRule {
             trigger: "[表情]".into(),
@@ -2695,6 +2983,13 @@ mod tests {
                     "info":[metadata,text,[7,"Alice"]]});
                 let event = parse_live_event(42, 123, &raw).unwrap();
                 assert_eq!(event.is_bilibili_emoticon, marked, "{kind}: {text}");
+                let mut received = event.clone();
+                ReceivedEmoteCatalog::default().enrich_in_connected_room(&mut received, 42, 42);
+                assert_eq!(
+                    received.is_bilibili_emoticon,
+                    marked || text == "[表情]",
+                    "received {kind}: {text}"
+                );
                 for enabled in [false, true, false] {
                     rules.events.filter_bilibili_emoticons = enabled;
                     let preview = rules.preview(&event, &[], &[]).unwrap();

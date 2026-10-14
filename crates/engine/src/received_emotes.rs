@@ -1,6 +1,11 @@
 //! Resolve received text markers using verified, account-scoped platform metadata.
 //! The platform may deliver personal comment emotes as dm_type=0 without images.
 //! No arbitrary bracket text is classified, and no message body is rewritten.
+//!
+//! Live reception runs this after the dm_type-only packet parser. A danmaku made
+//! only of markers verified by its own packet images or by this catalog is a
+//! standalone emote whatever its dm_type, so "过滤 B站官方表情" skips it as
+//! docs/BROADCAST.md describes. Mixed text, emoji and unknown markers stay speech.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -244,6 +249,43 @@ mod tests {
         assert!(!native.emotes[0].large);
         assert!(native.is_bilibili_emoticon);
     }
+    #[test]
+    fn packet_emote_markers_alone_classify_without_an_account_catalog() {
+        // Anonymous reception has no catalog; the packet's own emots verify markers.
+        let packet = |text: &str| {
+            let mut metadata = vec![Value::Null; 16];
+            metadata[12] = serde_json::json!(0);
+            metadata[15] = serde_json::json!({"extra": serde_json::json!({"emots": {
+                "[dog]": {"url": "https://i0.hdslb.com/bfs/emote/dog.png"}
+            }}).to_string()});
+            crate::bilibili::parse_live_event(
+                999,
+                1,
+                &serde_json::json!({"cmd":"DANMU_MSG","info":[metadata,text,[7,"虚构观众"]]}),
+            )
+            .unwrap()
+        };
+        let catalog = ReceivedEmoteCatalog::default();
+        for (text, standalone) in [
+            ("[dog]", true),
+            (" [dog] [dog] ", true),
+            ("[dog]你好", false),
+            ("[dog][未知]", false),
+            ("[未知]", false),
+        ] {
+            let mut event = packet(text);
+            assert!(!event.is_bilibili_emoticon, "the parser reads dm_type only");
+            catalog.enrich_in_connected_room(&mut event, 999, 999);
+            assert_eq!(event.is_bilibili_emoticon, standalone, "{text}");
+            assert_eq!(
+                RuleSet::default().filter_reason(&event).is_some(),
+                standalone,
+                "{text}"
+            );
+            assert_eq!(event.message, text);
+        }
+    }
+
     #[test]
     fn unsafe_missing_ambiguous_and_nonmarker_images_never_classify_text() {
         for packs in [

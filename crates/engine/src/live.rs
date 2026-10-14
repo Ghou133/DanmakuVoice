@@ -298,21 +298,7 @@ impl LiveController {
     /// and never initiates QR login.
     pub async fn start(&self, room_id: u64, session: Option<BiliSession>) -> Result<(), LiveError> {
         let mut running = self.running.lock().await;
-        self.reap_finished(&mut running).await;
-        if running.is_some() {
-            return Err(LiveError::AlreadyRunning);
-        }
-        if room_id == 0 {
-            return Err(BiliError::InvalidRoom.into());
-        }
-
-        if self
-            .scheduler
-            .as_ref()
-            .is_some_and(|scheduler| !scheduler.state().borrow().accepting)
-        {
-            return Err(LiveError::Scheduler);
-        }
+        self.check_can_start(&mut running, room_id).await?;
         let mut lookup_error = None;
         if let Some(session) = session.as_ref() {
             if !self
@@ -371,7 +357,12 @@ impl LiveController {
             return Ok(());
         };
         slot.cancel.cancel();
-        let scheduler_result = stop_live_jobs(self.scheduler.as_ref()).await;
+        // A dispatch past its cancellation check holds the speech gate until
+        // its submission is acknowledged; stop live jobs only after it.
+        let scheduler_result = {
+            let _gate = self.tts_enabled.lock().await;
+            stop_live_jobs(self.scheduler.as_ref()).await
+        };
         self.room.stop().await;
         let _ = slot.worker.await;
         self.updates.send_modify(|state| {
@@ -425,10 +416,13 @@ impl LiveController {
         }
     }
 
-    #[cfg(test)]
-    async fn start_offline(&self, room_id: u64) -> Result<mpsc::Sender<LiveEvent>, LiveError> {
-        let mut running = self.running.lock().await;
-        self.reap_finished(&mut running).await;
+    /// Shared start preconditions; the caller holds the `running` lock.
+    async fn check_can_start(
+        &self,
+        running: &mut Option<Running>,
+        room_id: u64,
+    ) -> Result<(), LiveError> {
+        self.reap_finished(running).await;
         if running.is_some() {
             return Err(LiveError::AlreadyRunning);
         }
@@ -442,6 +436,13 @@ impl LiveController {
         {
             return Err(LiveError::Scheduler);
         }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn start_offline(&self, room_id: u64) -> Result<mpsc::Sender<LiveEvent>, LiveError> {
+        let mut running = self.running.lock().await;
+        self.check_can_start(&mut running, room_id).await?;
         let (sender, events) = mpsc::channel(LIVE_EVENT_CHANNEL_CAPACITY);
         *running = Some(self.spawn_worker(room_id, events, false));
         Ok(sender)
@@ -609,7 +610,9 @@ async fn run_events(
                     let state = room_state.borrow_and_update().clone();
                     let code = match &state {
                         RoomState::Stopped => DiagnosticCode::RoomStopped,
-                        RoomState::SessionExpired { .. } => DiagnosticCode::RoomFailed,
+                        RoomState::SessionExpired { .. } | RoomState::RoomNotFound { .. } => {
+                            DiagnosticCode::RoomFailed
+                        }
                         RoomState::Connecting { .. } => DiagnosticCode::RoomConnecting,
                         RoomState::Connected { .. } => DiagnosticCode::RoomConnected,
                         RoomState::Reconnecting { .. } => DiagnosticCode::RoomReconnecting,
@@ -624,7 +627,9 @@ async fn run_events(
                     diagnostics::record(code, number);
                     let terminal = matches!(
                         &state,
-                        RoomState::Stopped | RoomState::SessionExpired { .. }
+                        RoomState::Stopped
+                            | RoomState::SessionExpired { .. }
+                            | RoomState::RoomNotFound { .. }
                     );
                     updates.send_modify(|snapshot| {
                         if let RoomState::Connected { room_id, .. } = &state { snapshot.resolved_room_id = Some(*room_id); }
@@ -786,7 +791,11 @@ async fn run_events(
     }
     updates.send_modify(|state| {
         state.running = false;
-        if !matches!(&state.room_state, RoomState::SessionExpired { .. }) {
+        // Keep a terminal cause that needs user action visible after the end.
+        if !matches!(
+            &state.room_state,
+            RoomState::SessionExpired { .. } | RoomState::RoomNotFound { .. }
+        ) {
             state.room_state = RoomState::Stopped;
         }
     });
@@ -1669,6 +1678,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_waits_for_an_in_flight_submission_before_stopping_live_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jobs_tx, _jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: true,
+        }));
+        scheduler.start().await.unwrap();
+        let controller =
+            Arc::new(LiveController::new(dir.path(), scheduler.clone(), None).unwrap());
+        let _events = controller.start_offline(42).await.unwrap();
+        // Stand in for dispatch_event after its cancellation check: it holds
+        // the speech gate until its submission has been acknowledged.
+        let gate = controller.tts_enabled.clone().lock_owned().await;
+        let stopping = controller.clone();
+        let mut stop = tokio::spawn(async move { stopping.stop().await });
+        assert!(
+            timeout(Duration::from_millis(300), &mut stop)
+                .await
+                .is_err(),
+            "stop acknowledged while a live submission held the speech gate"
+        );
+        let voice = VoicePreset {
+            id: "voice".into(),
+            name: "voice".into(),
+            connection_id: "local".into(),
+            provider: Provider::Dots,
+            voice_id: "voice.wav".into(),
+            speed: 1.0,
+            volume: 1.0,
+            sovits: None,
+        };
+        let rules = RuleSet {
+            default_preset_id: Some("voice".into()),
+            ..RuleSet::default()
+        };
+        let late = rules
+            .preview(
+                &LiveEvent::danmaku(42, Some(7), "Alice", "late"),
+                &[voice],
+                &[],
+            )
+            .unwrap();
+        scheduler.submit(late, JobOrigin::Live).await.unwrap();
+        drop(gate);
+        timeout(Duration::from_secs(3), stop)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let queue = scheduler.state().borrow().clone();
+        assert!(queue.current.is_none(), "a live job survived stop");
+        assert!(queue.pending.is_empty(), "a live job survived stop");
+        assert!(queue.accepting);
+    }
+
+    #[tokio::test]
     async fn closed_room_source_discards_buffered_late_events() {
         let dir = tempfile::tempdir().unwrap();
         let _store = configure_store(dir.path());
@@ -1709,41 +1775,44 @@ mod tests {
 
     #[tokio::test]
     async fn saved_session_expiry_ends_room_and_remains_visible_in_snapshot() {
-        let (events_tx, events_rx) = mpsc::channel(1);
-        let (room_tx, room_rx) = watch::channel(RoomState::Connecting { room_id: 42 });
-        let (updates, snapshot) = watch::channel(LiveSnapshot {
-            running: true,
-            room_id: Some(42),
-            room_state: RoomState::Connecting { room_id: 42 },
-            ..LiveSnapshot::default()
-        });
-        let (_playback_tx, playback_rx) = watch::channel(0u64);
-        let worker = tokio::spawn(run_events(
-            events_rx,
-            room_rx,
-            WorkerContext {
-                scheduler: None,
-                tts_enabled: Arc::new(Mutex::new(false)),
-                playback_changes: playback_rx,
-                emote_catalog: watch::channel(Arc::new(ReceivedEmoteCatalog::default())).1,
-                data_dir: PathBuf::from("unused-receive-only"),
-                dobao_device: None,
-                updates,
-                cancel: CancellationToken::new(),
-                room_driven: true,
-            },
-        ));
-        room_tx.send_replace(RoomState::SessionExpired { room_id: 42 });
-        timeout(Duration::from_secs(3), worker)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!snapshot.borrow().running);
-        assert_eq!(
-            snapshot.borrow().room_state,
-            RoomState::SessionExpired { room_id: 42 }
-        );
-        drop(events_tx);
+        // A missing room is terminal in the same way: no retry, cause kept.
+        for terminal in [
+            RoomState::SessionExpired { room_id: 42 },
+            RoomState::RoomNotFound { room_id: 42 },
+        ] {
+            let (events_tx, events_rx) = mpsc::channel(1);
+            let (room_tx, room_rx) = watch::channel(RoomState::Connecting { room_id: 42 });
+            let (updates, snapshot) = watch::channel(LiveSnapshot {
+                running: true,
+                room_id: Some(42),
+                room_state: RoomState::Connecting { room_id: 42 },
+                ..LiveSnapshot::default()
+            });
+            let (_playback_tx, playback_rx) = watch::channel(0u64);
+            let worker = tokio::spawn(run_events(
+                events_rx,
+                room_rx,
+                WorkerContext {
+                    scheduler: None,
+                    tts_enabled: Arc::new(Mutex::new(false)),
+                    playback_changes: playback_rx,
+                    emote_catalog: watch::channel(Arc::new(ReceivedEmoteCatalog::default())).1,
+                    data_dir: PathBuf::from("unused-receive-only"),
+                    dobao_device: None,
+                    updates,
+                    cancel: CancellationToken::new(),
+                    room_driven: true,
+                },
+            ));
+            room_tx.send_replace(terminal.clone());
+            timeout(Duration::from_secs(3), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!snapshot.borrow().running);
+            assert_eq!(snapshot.borrow().room_state, terminal);
+            drop(events_tx);
+        }
     }
 
     #[tokio::test]

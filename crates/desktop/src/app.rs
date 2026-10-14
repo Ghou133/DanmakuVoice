@@ -902,7 +902,7 @@ impl Application {
             "onboarding_done":state.prefs.onboarding_done,
             "setup":{"mode":"account","uid":state.prefs.broadcaster_uid,"room_id":room,"tts_enabled":state.prefs.tts_enabled},
             "account":{"user_id":state.bili_user_id,"name":state.bili_profile.as_ref().map(|p| &p.name),"avatar_url":state.bili_profile.as_ref().and_then(|p| p.avatar_url.as_deref())}, "qr":state.qr,
-            "live":{"running":live.running,"connecting":state.connecting,"room_id":live.room_id.or(room),"state":if state.connecting {"connecting"} else {live_state},"message":live_message,"received":live.received,"events":events,"errors":live.errors,"no_voice":live.no_voice,"audience":state.live.as_ref().map(|live| live.audience_snapshot()).unwrap_or_default()},
+            "live":{"running":live.running,"connecting":state.connecting,"room_id":live.room_id.or(room),"state":if state.connecting {"connecting"} else {live_state},"message":live_message,"reconnect_code":reconnect_code(&live.room_state),"received":live.received,"events":events,"errors":live.errors,"no_voice":live.no_voice,"audience":state.live.as_ref().map(|live| live.audience_snapshot()).unwrap_or_default()},
             "queue":queue_json(&queue), "preferences":state.prefs,
             "received_emotes_error":live.emote_lookup_error,
             "status":{"error":state.status_error || device_lost,"message":status_message},
@@ -4090,9 +4090,28 @@ fn room_state(state: &RoomState) -> (&'static str, String) {
             "session_expired",
             "哔哩哔哩登录已失效，请重新扫码 [DV-B09]".into(),
         ),
+        RoomState::RoomNotFound { .. } => (
+            "room_not_found",
+            "直播间不存在，请检查房间号 [DV-B11]".into(),
+        ),
         RoomState::Connecting { .. } => ("connecting", "正在连接".into()),
         RoomState::Connected { .. } => ("connected", "已连接，等待弹幕".into()),
+        RoomState::Reconnecting {
+            api_code: Some(code),
+            ..
+        } => (
+            "reconnecting",
+            format!("B站拒绝了请求（代码 {code}），正在重试"),
+        ),
         RoomState::Reconnecting { .. } => ("reconnecting", "连接中断，正在重连".into()),
+    }
+}
+
+/// Bilibili's API code for the reconnect in progress; `None` for network loss.
+fn reconnect_code(state: &RoomState) -> Option<i64> {
+    match state {
+        RoomState::Reconnecting { api_code, .. } => *api_code,
+        _ => None,
     }
 }
 

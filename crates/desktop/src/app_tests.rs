@@ -2552,6 +2552,40 @@ fn expired_bilibili_session_has_an_actionable_desktop_state() {
     );
 }
 
+#[test]
+fn missing_room_and_api_rejections_have_distinct_desktop_states() {
+    assert_eq!(
+        room_state(&RoomState::RoomNotFound { room_id: 42 }),
+        (
+            "room_not_found",
+            "直播间不存在，请检查房间号 [DV-B11]".into()
+        )
+    );
+    let reconnecting = |api_code| RoomState::Reconnecting {
+        room_id: 42,
+        attempt: 2,
+        delay: Duration::from_secs(2),
+        api_code,
+    };
+    assert_eq!(
+        room_state(&reconnecting(Some(-352))),
+        (
+            "reconnecting",
+            "B站拒绝了请求（代码 -352），正在重试".into()
+        )
+    );
+    assert_eq!(reconnect_code(&reconnecting(Some(-352))), Some(-352));
+    assert_eq!(
+        room_state(&reconnecting(None)),
+        ("reconnecting", "连接中断，正在重连".into())
+    );
+    assert_eq!(reconnect_code(&reconnecting(None)), None);
+    assert_eq!(
+        reconnect_code(&RoomState::RoomNotFound { room_id: 42 }),
+        None
+    );
+}
+
 #[tokio::test]
 async fn stale_auto_start_does_not_restart_an_unselected_local_service() {
     let (_directory, app) = isolated(false);
