@@ -2442,26 +2442,6 @@ mod tests {
         };
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_endpoint = format!("http://{}", target.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for index in 0..2 {
-                let (mut socket, _) = target.accept().await.unwrap();
-                let request = test_http::read_request(&mut socket).await;
-                if index == 0 {
-                    assert!(request.starts_with(b"GET /health HTTP/1.1"));
-                    test_http::json_response(
-                        &mut socket,
-                        "200 OK",
-                        r#"{"status":"ok","ready":true,"needs_restart":false,"model_loaded":true,"stream_requests":0}"#,
-                    )
-                    .await;
-                } else {
-                    assert!(request.starts_with(b"POST /tts/stream HTTP/1.1"));
-                    test_http::chunked_start(&mut socket, "audio/wav").await;
-                    test_http::chunk(&mut socket, &one_second_wav()).await;
-                    test_http::chunked_end(&mut socket).await;
-                }
-            }
-        });
         let fallback = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let default_endpoint = format!("http://{}", fallback.local_addr().unwrap());
         let temp = tempfile::tempdir().unwrap();
@@ -2477,13 +2457,61 @@ mod tests {
             .await
             .unwrap();
         wait_for_record(&handle, id, JobState::Failed).await;
-        server.await.unwrap();
+        let detail = handle
+            .state()
+            .borrow()
+            .history
+            .iter()
+            .find(|record| record.id == id)
+            .unwrap()
+            .detail
+            .clone();
+        assert!(detail.contains("输出设备已断开"), "{detail}");
+        // A known-dead device sends no readiness probe or synthesis request
+        // to either the selected or the default service.
+        for listener in [&target, &fallback] {
+            assert!(
+                timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
+        handle.stop_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn device_lost_before_a_later_part_sends_no_synthesis_request() {
+        let Some(ffmpeg_path) = ffmpeg_for_test() else {
+            return;
+        };
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", target.local_addr().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let (_, plan) = local_dots_plan(&mut store, endpoint);
+        let writer = test_writer(48_000, 1, 96_000);
+        let executor = PlaybackExecutor::new(writer.clone(), ffmpeg_path).unwrap();
+        let cancel = CancellationToken::new();
+        writer.activate_for(9, &cancel).unwrap();
+        // Earlier parts drained; the device is lost before the text part.
+        writer.disconnect_test_device();
+        let failure = timeout(
+            Duration::from_secs(2),
+            executor.play_plan(&plan, 9, 0, &cancel),
+        )
+        .await
+        .expect("the next part waited for synthesis on a dead device")
+        .err()
+        .expect("a dead device cannot play the next part");
+        assert!(matches!(
+            failure.error,
+            AttemptError::Playback(ref message) if message.contains("输出设备已断开")
+        ));
         assert!(
-            timeout(Duration::from_millis(100), fallback.accept())
+            timeout(Duration::from_millis(100), target.accept())
                 .await
                 .is_err()
         );
-        handle.stop_all().await.unwrap();
     }
 
     #[test]

@@ -708,6 +708,17 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_device_refuses_to_activate_a_job() {
+        let writer = test_writer(48_000, 1, 8);
+        writer.disconnect_test_device();
+        assert!(matches!(
+            writer.activate_for(5, &CancellationToken::new()),
+            Err(AudioError::Disconnected)
+        ));
+        assert_eq!(writer.shared.active_job.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn default_device_change_prefers_identity_and_degrades_to_name() {
         let host = cpal::default_host().id();
         let opened = cpal::DeviceId::new(host, "first-output");
