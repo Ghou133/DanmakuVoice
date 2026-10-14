@@ -9,7 +9,7 @@ use crate::secrets::{self, SecretBytes, SecretError};
 use crate::tts::dobao::DoubaoDevice;
 use crate::tts::fish::{self, FishPlaybackSettings};
 use crate::voice_library::{ReferenceProfile, ReferenceRole};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -523,23 +523,49 @@ impl DataStore {
         fs::create_dir_all(data_dir.join("assets"))?;
         fs::create_dir_all(data_dir.join("backups"))?;
         let db_path = data_dir.join("danmakuvoice.sqlite3");
-        let existed = db_path.metadata().is_ok_and(|metadata| metadata.len() > 0);
-        let mut conn = Connection::open(db_path)?;
+        let mut conn = Connection::open(&db_path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !(0..=CURRENT_SCHEMA).contains(&version) {
-            return Err(StorageError::UnsupportedSchema(version));
+        // Most opens (one per live event) only need this unlocked check.
+        let upgrade_backup = if schema_version(&conn)? < CURRENT_SCHEMA {
+            Self::upgrade(&mut conn, &data_dir, &db_path)?
+        } else {
+            None
+        };
+        Ok(Self {
+            data_dir,
+            conn,
+            upgrade_backup,
+        })
+    }
+
+    /// Create or upgrade the schema under SQLite's write lock. Another
+    /// instance may have finished either step after the unlocked version
+    /// check, so the version is read again inside the transaction.
+    fn upgrade(
+        conn: &mut Connection,
+        data_dir: &Path,
+        db_path: &Path,
+    ) -> Result<Option<PathBuf>, StorageError> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version = schema_version(&tx)?;
+        if version == CURRENT_SCHEMA {
+            return Ok(None);
         }
-        if version == 0 && existed {
-            let has_tables: bool = conn.query_row(
+        if version == 0 {
+            let has_tables: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%')",
                 [], |row| row.get(0))?;
             if has_tables {
                 return Err(StorageError::UnsupportedSchema(0));
             }
         }
-        let upgrade_backup = if existed && version > 0 && version < CURRENT_SCHEMA {
+        let upgrade_backup = if version > 0 {
+            // The backup API cannot read through a connection that holds a
+            // write transaction. The lock keeps the committed state fixed
+            // while a second connection copies it.
+            let source = Connection::open(db_path)?;
+            source.busy_timeout(Duration::from_secs(5))?;
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -548,124 +574,117 @@ impl DataStore {
                 "before-v{version}-to-v{CURRENT_SCHEMA}-{stamp}-{}.sqlite3",
                 Uuid::new_v4()
             ));
-            conn.backup(rusqlite::MAIN_DB, &path, None)?;
+            source.backup(rusqlite::MAIN_DB, &path, None)?;
             Some(path)
         } else {
             None
         };
-        if version < CURRENT_SCHEMA {
-            let tx = conn.transaction()?;
-            if version < 1 {
-                tx.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL);\
-                    CREATE TABLE assets (id TEXT PRIMARY KEY, name TEXT NOT NULL, relative_path TEXT NOT NULL UNIQUE,\
-                    sha256 TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes >= 0));")?;
-            }
-            if version < 2 {
-                tx.execute_batch("CREATE TABLE connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,\
-                    settings_json TEXT NOT NULL, protected_credential BLOB);\
-                    CREATE TABLE presets (id TEXT PRIMARY KEY, name TEXT NOT NULL, connection_id TEXT NOT NULL,\
-                    provider TEXT NOT NULL, settings_json TEXT NOT NULL,\
-                    FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE RESTRICT);\
-                    CREATE TABLE bindings (id TEXT PRIMARY KEY, platform TEXT NOT NULL, user_id TEXT,\
-                    legacy_user_name TEXT, preset_id TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\
-                    FOREIGN KEY(preset_id) REFERENCES presets(id) ON DELETE RESTRICT);")?;
-            }
-            if version < 3 {
-                tx.execute_batch("CREATE TABLE protected_secrets (key TEXT PRIMARY KEY, protected_value BLOB NOT NULL);")?;
-            }
-            if version < 4 {
-                tx.execute_batch("CREATE TABLE reference_profiles (connection_id TEXT NOT NULL, role_key TEXT NOT NULL,
-                    provider TEXT NOT NULL, profile_json TEXT NOT NULL,
-                    PRIMARY KEY(connection_id, role_key),
-                    FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE);")?;
-            } else if version == 4 {
-                // A development-only v4 stored managed copies but not the
-                // original path. Reuse an existing safe copy as a plain path;
-                // missing/unsafe copies remain only in the pre-upgrade backup.
-                // Never delete the old files during this migration.
-                tx.execute_batch("ALTER TABLE reference_profiles RENAME TO reference_profiles_v4;
-                    CREATE TABLE reference_profiles (connection_id TEXT NOT NULL, role_key TEXT NOT NULL,
-                    provider TEXT NOT NULL, profile_json TEXT NOT NULL,
-                    PRIMARY KEY(connection_id, role_key),
-                    FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE);")?;
-                let previous = {
-                    let mut statement = tx.prepare(
-                        "SELECT connection_id,role_key,provider,profile_json FROM reference_profiles_v4",
-                    )?;
-                    let rows = statement.query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    })?;
-                    rows.collect::<Result<Vec<_>, _>>()?
+        if version < 1 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, json TEXT NOT NULL);\
+                CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, name TEXT NOT NULL, relative_path TEXT NOT NULL UNIQUE,\
+                sha256 TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes >= 0));")?;
+        }
+        if version < 2 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,\
+                settings_json TEXT NOT NULL, protected_credential BLOB);\
+                CREATE TABLE IF NOT EXISTS presets (id TEXT PRIMARY KEY, name TEXT NOT NULL, connection_id TEXT NOT NULL,\
+                provider TEXT NOT NULL, settings_json TEXT NOT NULL,\
+                FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE RESTRICT);\
+                CREATE TABLE IF NOT EXISTS bindings (id TEXT PRIMARY KEY, platform TEXT NOT NULL, user_id TEXT,\
+                legacy_user_name TEXT, preset_id TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\
+                FOREIGN KEY(preset_id) REFERENCES presets(id) ON DELETE RESTRICT);")?;
+        }
+        if version < 3 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS protected_secrets (key TEXT PRIMARY KEY, protected_value BLOB NOT NULL);")?;
+        }
+        if version < 4 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS reference_profiles (connection_id TEXT NOT NULL, role_key TEXT NOT NULL,
+                provider TEXT NOT NULL, profile_json TEXT NOT NULL,
+                PRIMARY KEY(connection_id, role_key),
+                FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE);")?;
+        } else if version == 4 {
+            // A development-only v4 stored managed copies but not the
+            // original path. Reuse an existing safe copy as a plain path;
+            // missing/unsafe copies remain only in the pre-upgrade backup.
+            // Never delete the old files during this migration.
+            tx.execute_batch("ALTER TABLE reference_profiles RENAME TO reference_profiles_v4;
+                CREATE TABLE reference_profiles (connection_id TEXT NOT NULL, role_key TEXT NOT NULL,
+                provider TEXT NOT NULL, profile_json TEXT NOT NULL,
+                PRIMARY KEY(connection_id, role_key),
+                FOREIGN KEY(connection_id) REFERENCES connections(id) ON DELETE CASCADE);")?;
+            let previous = {
+                let mut statement = tx.prepare(
+                    "SELECT connection_id,role_key,provider,profile_json FROM reference_profiles_v4",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for (connection_id, role_key, provider, json) in previous {
+                let mut profile: serde_json::Value = serde_json::from_str(&json)?;
+                let fields = profile
+                    .as_object_mut()
+                    .ok_or(StorageError::InvalidReferenceProfile)?;
+                let audio_id = fields
+                    .remove("audio_id")
+                    .and_then(|value| value.as_str().map(str::to_owned));
+                let file_name: Option<String> = audio_id
+                    .as_deref()
+                    .map(|id| {
+                        tx.query_row(
+                            "SELECT file_name FROM reference_audio WHERE id=?1",
+                            params![id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                    })
+                    .transpose()?
+                    .flatten();
+                let Some(audio_path) = file_name
+                    .as_deref()
+                    .and_then(|name| existing_legacy_reference_path(data_dir, name))
+                else {
+                    continue;
                 };
-                for (connection_id, role_key, provider, json) in previous {
-                    let mut profile: serde_json::Value = serde_json::from_str(&json)?;
-                    let fields = profile
-                        .as_object_mut()
-                        .ok_or(StorageError::InvalidReferenceProfile)?;
-                    let audio_id = fields
-                        .remove("audio_id")
-                        .and_then(|value| value.as_str().map(str::to_owned));
-                    let file_name: Option<String> = audio_id
-                        .as_deref()
-                        .map(|id| {
-                            tx.query_row(
-                                "SELECT file_name FROM reference_audio WHERE id=?1",
-                                params![id],
-                                |row| row.get(0),
-                            )
-                            .optional()
-                        })
-                        .transpose()?
-                        .flatten();
-                    let Some(audio_path) = file_name
-                        .as_deref()
-                        .and_then(|name| existing_legacy_reference_path(&data_dir, name))
-                    else {
-                        continue;
-                    };
-                    fields.insert(
-                        "audio_path".into(),
-                        serde_json::Value::String(audio_path.to_string_lossy().into_owned()),
-                    );
-                    tx.execute(
-                        "INSERT INTO reference_profiles(connection_id,role_key,provider,profile_json) VALUES(?1,?2,?3,?4)",
-                        params![connection_id, role_key, provider, serde_json::to_string(&profile)?],
-                    )?;
-                }
-                tx.execute_batch("DROP TABLE reference_profiles_v4; DROP TABLE reference_audio;")?;
-            }
-            if version < 6 {
-                // Older development databases may report an earlier version
-                // while already carrying the column. Keep this upgrade
-                // idempotent for those databases as well as released v5.
-                let has_user_name: Option<i64> = tx
-                    .query_row(
-                        "SELECT 1 FROM pragma_table_info('bindings') WHERE name='user_name' LIMIT 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if has_user_name.is_none() {
-                    tx.execute_batch("ALTER TABLE bindings ADD COLUMN user_name TEXT;")?;
-                }
-                tx.execute_batch(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS bindings_exact_name ON bindings(platform,user_name)
-                     WHERE user_id IS NULL AND user_name IS NOT NULL;",
+                fields.insert(
+                    "audio_path".into(),
+                    serde_json::Value::String(audio_path.to_string_lossy().into_owned()),
+                );
+                tx.execute(
+                    "INSERT INTO reference_profiles(connection_id,role_key,provider,profile_json) VALUES(?1,?2,?3,?4)",
+                    params![connection_id, role_key, provider, serde_json::to_string(&profile)?],
                 )?;
             }
-            tx.pragma_update(None, "user_version", CURRENT_SCHEMA)?;
-            tx.commit()?;
+            tx.execute_batch("DROP TABLE reference_profiles_v4; DROP TABLE reference_audio;")?;
         }
-        Ok(Self {
-            data_dir,
-            conn,
-            upgrade_backup,
-        })
+        if version < 6 {
+            // Older development databases may report an earlier version
+            // while already carrying the column. Keep this upgrade
+            // idempotent for those databases as well as released v5.
+            let has_user_name: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info('bindings') WHERE name='user_name' LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if has_user_name.is_none() {
+                tx.execute_batch("ALTER TABLE bindings ADD COLUMN user_name TEXT;")?;
+            }
+            tx.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS bindings_exact_name ON bindings(platform,user_name)
+                 WHERE user_id IS NULL AND user_name IS NOT NULL;",
+            )?;
+        }
+        tx.pragma_update(None, "user_version", CURRENT_SCHEMA)?;
+        tx.commit()?;
+        Ok(upgrade_backup)
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -2029,6 +2048,14 @@ impl DataStore {
     }
 }
 
+fn schema_version(conn: &Connection) -> Result<i64, StorageError> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if !(0..=CURRENT_SCHEMA).contains(&version) {
+        return Err(StorageError::UnsupportedSchema(version));
+    }
+    Ok(version)
+}
+
 fn provider_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Dots => "dots",
@@ -3205,6 +3232,52 @@ mod tests {
             fs::read(store.asset_path(&asset.id).unwrap()).unwrap(),
             b"RIFF second"
         );
+    }
+
+    #[test]
+    fn first_start_waits_for_another_instance_creating_the_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let template = DataStore::open(temp.path().join("template")).unwrap();
+        let schema = template
+            .conn
+            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(template);
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        // Another instance has switched the new file to WAL and is creating
+        // the schema; its transaction is still open when this one starts.
+        let other = Connection::open(data_dir.join("danmakuvoice.sqlite3")).unwrap();
+        other
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; CREATE TABLE warmup(x); DROP TABLE warmup;
+                 BEGIN IMMEDIATE;",
+            )
+            .unwrap();
+        for sql in &schema {
+            other.execute_batch(sql).unwrap();
+        }
+        other
+            .pragma_update(None, "user_version", CURRENT_SCHEMA)
+            .unwrap();
+        let opening = std::thread::spawn({
+            let data_dir = data_dir.clone();
+            move || DataStore::open(data_dir).map(|store| store.upgrade_backup().is_none())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        other.execute_batch("COMMIT").unwrap();
+        assert!(opening.join().unwrap().unwrap());
+        let store = DataStore::open(&data_dir).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA);
+        assert_eq!(store.load_rules().unwrap(), RuleSet::default());
     }
 
     #[test]
