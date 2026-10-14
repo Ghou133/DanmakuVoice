@@ -114,6 +114,49 @@ impl Drop for ReconfigurationGuard {
     }
 }
 
+/// The one in-flight QR request. An early return, including through `?`,
+/// releases it and expires the code so later polls cannot stall silently.
+/// A newer QR generation owns its own request and display.
+struct QrRequest {
+    app: Application,
+    generation: u64,
+    armed: bool,
+}
+
+impl QrRequest {
+    fn new(app: &Application, generation: u64) -> Self {
+        Self {
+            app: app.clone(),
+            generation,
+            armed: true,
+        }
+    }
+
+    /// Releases the request after its result is shown, under the caller's lock.
+    fn finish(mut self, state: &mut Controller) {
+        self.armed = false;
+        if state.qr_generation == self.generation {
+            state.qr_busy = false;
+        }
+    }
+}
+
+impl Drop for QrRequest {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(mut state) = self.app.lock()
+            && state.qr_generation == self.generation
+        {
+            state.qr_busy = false;
+            state.qr.status = "expired";
+            state.qr.message = "二维码已过期，点击刷新".into();
+            state.qr.image_data_url = None;
+            state.bili_qr = None;
+            state.doubao_qr = None;
+        }
+    }
+}
+
 #[derive(Default, Serialize)]
 struct QrView {
     provider: Option<&'static str>,
@@ -753,9 +796,12 @@ impl Application {
     }
 
     pub fn snapshot_since(&self, known_revision: Option<u64>) -> Result<Value, String> {
+        // Declared before the lock, so exited process trees end after it is
+        // released. The polling command runs this on a blocking thread.
+        let mut exited = Vec::new();
         let mut state = self.lock()?;
-        state.local_services.dots.process_exited();
-        state.local_services.gpt_sovits.process_exited();
+        exited.extend(state.local_services.dots.take_exited());
+        exited.extend(state.local_services.gpt_sovits.take_exited());
         if state.config_snapshot.is_none() {
             for kind in [Kind::Dots, Kind::GptSovits] {
                 if let Ok(endpoint) = state.local_service_endpoint(kind, None) {
@@ -986,7 +1032,7 @@ impl Application {
             "local_services.save" => self.save_local_directory(&payload).await?,
             "local_services.check" => self.check_local_service(&payload).await?,
             "local_services.start" => self.start_local_service(&payload).await?,
-            "local_services.stop" => self.stop_local_service(&payload)?,
+            "local_services.stop" => self.stop_local_service(&payload).await?,
             "fish.connect" => return self.connect_fish(&mut payload).await,
             "fish.voice.lookup" => return self.lookup_fish_voice(&payload).await,
             "presets.default" | "references.save" => {
@@ -2056,13 +2102,13 @@ impl Application {
     async fn begin_bili(&self) -> Result<(), String> {
         self.require_network()?;
         let (generation, cancel) = self.lock()?.begin_qr("bilibili");
+        let request = QrRequest::new(self, generation);
         let client = QrLoginClient::new().map_err(display)?;
         let result = tokio::select! {_=cancel.cancelled()=>return Ok(()),result=client.begin()=>result.map_err(display)};
         let mut state = self.lock()?;
         if state.qr_generation != generation {
             return Ok(());
         }
-        state.qr_busy = false;
         match result {
             Ok(challenge) => {
                 state.qr.image_data_url = Some(qr_url_png(challenge.qr_url())?);
@@ -2072,9 +2118,11 @@ impl Application {
             Err(error) => {
                 state.qr.message = error.clone();
                 state.qr.status = "expired";
+                request.finish(&mut state);
                 return Err(error);
             }
         }
+        request.finish(&mut state);
         Ok(())
     }
 
@@ -2091,12 +2139,34 @@ impl Application {
                 state.bili_qr.clone().expect("checked QR"),
             )
         };
+        let request = QrRequest::new(self, generation);
         let client = QrLoginClient::new().map_err(display)?;
         let result = tokio::select! {
             _=cancel.cancelled()=>return Ok(()),
             result=async {let mut challenge=challenge.lock().await;client.poll(&mut challenge).await}=>result.map_err(display),
         };
+        self.apply_bili_poll(request, &cancel, result, |session| async move {
+            client.own_room_id(&session).await.map_err(display)
+        })
+        .await
+    }
+
+    /// Applies one poll result; split from the request so the login commit
+    /// can be exercised without a live QR code.
+    async fn apply_bili_poll<F, Fut>(
+        &self,
+        request: QrRequest,
+        cancel: &CancellationToken,
+        result: Result<QrPoll, String>,
+        own_room: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(BiliSession) -> Fut,
+        Fut: std::future::Future<Output = Result<u64, String>>,
+    {
+        let generation = request.generation;
         if let Ok(QrPoll::Complete(session)) = result {
+            let uid = session.user_id();
             {
                 let mut state = self.lock()?;
                 if state.qr_generation != generation || cancel.is_cancelled() {
@@ -2118,31 +2188,31 @@ impl Application {
             tokio::spawn(async move {
                 application.refresh_bili_profile().await;
             });
-            let room = tokio::select! {_=cancel.cancelled()=>return Ok(()),result=client.own_room_id(&session)=>result.map_err(display)};
+            let room = tokio::select! {_=cancel.cancelled()=>return Ok(()),result=own_room(session)=>result};
             match room {
                 Ok(room) => {
                     if !self
-                        .commit_room_resolution(generation, &cancel, session.user_id(), room)
+                        .commit_room_resolution(generation, cancel, uid, room)
                         .await?
                     {
                         return Ok(());
                     }
                     let mut state = self.lock()?;
-                    state.qr_busy = false;
                     state.qr.status = "complete";
                     state.qr.message = "登录成功".into();
                     state.status.clear();
                     state.status_error = false;
+                    request.finish(&mut state);
                 }
                 Err(error) => {
                     let mut state = self.lock()?;
                     if state.qr_generation != generation || cancel.is_cancelled() {
                         return Ok(());
                     }
-                    state.qr_busy = false;
                     state.qr.status = "expired";
                     state.qr.message =
                         "登录成功，但未找到本账号直播间；可以在下方填写主播 UID".into();
+                    request.finish(&mut state);
                     return Err(error);
                 }
             }
@@ -2152,7 +2222,6 @@ impl Application {
         if state.qr_generation != generation {
             return Ok(());
         }
-        state.qr_busy = false;
         match result {
             Ok(QrPoll::WaitingForScan) => {
                 state.qr.status = "waiting";
@@ -2170,10 +2239,12 @@ impl Application {
             }
             Err(error) => {
                 state.qr.message = error.clone();
+                request.finish(&mut state);
                 return Err(error);
             }
             Ok(QrPoll::Complete(_)) => unreachable!(),
         }
+        request.finish(&mut state);
         Ok(())
     }
 
@@ -2201,13 +2272,13 @@ impl Application {
             state.doubao_connection = Some(id);
             token
         };
+        let request = QrRequest::new(self, generation);
         let auth = DoubaoQrAuth::new().map_err(display)?;
         let result = auth.start_qr_login(&cancel).await.map_err(display);
         let mut state = self.lock()?;
         if state.qr_generation != generation || cancel.is_cancelled() {
             return Ok(());
         }
-        state.qr_busy = false;
         match result {
             Ok(session) => {
                 state.qr.image_data_url = Some(qr_visual_png(session.qr_visual())?);
@@ -2217,9 +2288,11 @@ impl Application {
             Err(error) => {
                 state.qr.status = "expired";
                 state.qr.message = error.clone();
+                request.finish(&mut state);
                 return Err(error);
             }
         }
+        request.finish(&mut state);
         Ok(())
     }
 
@@ -2236,6 +2309,7 @@ impl Application {
                 state.doubao_qr.clone().expect("checked QR"),
             )
         };
+        let request = QrRequest::new(self, generation);
         let auth = DoubaoQrAuth::new().map_err(display)?;
         let (result, cookie) = {
             let mut session = session.lock().await;
@@ -2254,7 +2328,6 @@ impl Application {
         if state.qr_generation != generation || cancel.is_cancelled() {
             return Ok(());
         }
-        state.qr_busy = false;
         match result {
             Ok(QrStatus::Waiting) => {
                 state.qr.status = "waiting";
@@ -2297,9 +2370,11 @@ impl Application {
             }
             Err(error) => {
                 state.qr.message = error.clone();
+                request.finish(&mut state);
                 return Err(error);
             }
         }
+        request.finish(&mut state);
         Ok(())
     }
 
@@ -2481,6 +2556,13 @@ impl Application {
         }
         self.lock()?.cancel_qr();
         self.stop(true).await?;
+        // End owned services before their stderr logs are removed below, and
+        // outside the state lock because a process tree can take seconds.
+        let retired = self.lock()?.local_services.stop_owned();
+        retired.reap().await;
+        // Declared before the lock: a service started meanwhile ends after
+        // the lock is released.
+        let _late;
         let mut state = self.lock()?;
         state.store.clear_application_data().map_err(display)?;
         state.invalidate_obs_activity(true);
@@ -2514,7 +2596,7 @@ impl Application {
         state.carried_events.clear();
         state.live_receive_only = false;
         state.migration = None;
-        state.local_services.stop_owned();
+        _late = state.local_services.stop_owned();
         state.local_services = LocalServices::new(None, None);
         let mut removed = Vec::new();
         let mut cleanup_errors = Vec::new();
@@ -2863,7 +2945,7 @@ impl Application {
             )?)
         };
         let _transition = self.begin_reconfiguration()?;
-        {
+        let retired = {
             let mut state = self.lock()?;
             if state.connecting || state.live.as_ref().is_some_and(|l| l.snapshot().running) {
                 return Err("请先断开直播再更改本地 TTS 目录".into());
@@ -2885,7 +2967,7 @@ impl Application {
                 return Err(error);
             }
             let slot = state.local_services.get_mut(kind);
-            slot.stop_owned();
+            let retired = slot.stop_owned();
             slot.resume_auto_start();
             slot.set(
                 if slot.directory.is_some() {
@@ -2899,7 +2981,9 @@ impl Application {
                     "尚未配置本地服务目录"
                 },
             );
-        }
+            retired
+        };
+        retired.reap().await;
         let app = self.clone();
         tokio::spawn(async move { app.auto_start_preferred_service().await });
         Ok(())
@@ -2933,21 +3017,24 @@ impl Application {
         Ok(())
     }
 
-    fn stop_local_service(&self, payload: &Value) -> Result<(), String> {
+    async fn stop_local_service(&self, payload: &Value) -> Result<(), String> {
         let kind = Kind::parse(required_str(payload, "provider")?)?;
-        let mut state = self.lock()?;
-        if state.scheduler.as_ref().is_some_and(|scheduler| {
-            let queue = scheduler.state();
-            let queue = queue.borrow();
-            queue.current.is_some() || !queue.pending.is_empty()
-        }) {
-            return Err("请先等待播报队列结束或停止全部播报".into());
-        }
-        let slot = state.local_services.get_mut(kind);
-        if !slot.view().owned {
-            return Err("此服务不是本应用启动，无法在本应用关闭".into());
-        }
-        slot.stop_manual();
+        let retired = {
+            let mut state = self.lock()?;
+            if state.scheduler.as_ref().is_some_and(|scheduler| {
+                let queue = scheduler.state();
+                let queue = queue.borrow();
+                queue.current.is_some() || !queue.pending.is_empty()
+            }) {
+                return Err("请先等待播报队列结束或停止全部播报".into());
+            }
+            let slot = state.local_services.get_mut(kind);
+            if !slot.view().owned {
+                return Err("此服务不是本应用启动，无法在本应用关闭".into());
+            }
+            slot.stop_manual()
+        };
+        retired.reap().await;
         Ok(())
     }
 
@@ -2965,35 +3052,42 @@ impl Application {
             (slot.generation, slot.observation)
         };
         let health = local_service::probe(kind, &parsed_endpoint).await;
-        let mut state = self.lock()?;
-        // The saved address, lifecycle, and newest observation must all still
-        // match. A late probe must never resurrect a stopped/reconfigured service.
-        if state
-            .local_service_endpoint(kind, payload.get("connection_id").and_then(Value::as_str))?
-            != endpoint
-        {
-            return Ok(());
-        }
-        let slot = state.local_services.get_mut(kind);
-        if slot.generation != generation || slot.observation != observation {
-            return Ok(());
-        }
-        slot.process_exited();
-        match health {
-            Health::Ready => slot.set("ready", "本地服务健康检查已就绪"),
-            Health::Offline | Health::Unready | Health::Timeout
-                if slot.view().owned && matches!(slot.state, "checking" | "starting") =>
+        let exited = {
+            let mut state = self.lock()?;
+            // The saved address, lifecycle, and newest observation must all still
+            // match. A late probe must never resurrect a stopped/reconfigured service.
+            if state.local_service_endpoint(
+                kind,
+                payload.get("connection_id").and_then(Value::as_str),
+            )? != endpoint
             {
-                slot.set("starting", "服务正在加载模型")
+                return Ok(());
             }
-            Health::Offline => slot.set("stopped", "本地服务尚未运行"),
-            Health::Timeout => slot.set("unknown", "服务检查超时，请稍后重试"),
-            Health::Unready => slot.set("failed", "本地服务已响应但模型尚未就绪"),
-            Health::Foreign => slot.set("failed", "端口已占用，但不是对应的 TTS 服务"),
-            Health::LegacyDots => slot.set(
-                "failed",
-                "已有旧版 dots 服务不支持任意参考路径；请关闭后用本应用启动",
-            ),
+            let slot = state.local_services.get_mut(kind);
+            if slot.generation != generation || slot.observation != observation {
+                return Ok(());
+            }
+            let exited = slot.take_exited();
+            match health {
+                Health::Ready => slot.set("ready", "本地服务健康检查已就绪"),
+                Health::Offline | Health::Unready | Health::Timeout
+                    if slot.view().owned && matches!(slot.state, "checking" | "starting") =>
+                {
+                    slot.set("starting", "服务正在加载模型")
+                }
+                Health::Offline => slot.set("stopped", "本地服务尚未运行"),
+                Health::Timeout => slot.set("unknown", "服务检查超时，请稍后重试"),
+                Health::Unready => slot.set("failed", "本地服务已响应但模型尚未就绪"),
+                Health::Foreign => slot.set("failed", "端口已占用，但不是对应的 TTS 服务"),
+                Health::LegacyDots => slot.set(
+                    "failed",
+                    "已有旧版 dots 服务不支持任意参考路径；请关闭后用本应用启动",
+                ),
+            }
+            exited
+        };
+        if let Some(exited) = exited {
+            exited.reap().await;
         }
         Ok(())
     }
@@ -3131,7 +3225,7 @@ impl Application {
         requested_generation: Option<u64>,
     ) {
         let requested_endpoint = endpoint;
-        let (endpoint, generation) = {
+        let (endpoint, generation, retired) = {
             let Ok(mut state) = self.lock() else { return };
             if state.shutdown.is_cancelled() || state.network_disabled {
                 return;
@@ -3158,11 +3252,12 @@ impl Application {
                 }
             };
             slot.observe_endpoint(requested_endpoint);
-            slot.switch_endpoint(endpoint.port);
+            let retired = slot.switch_endpoint(endpoint.port);
             slot.generation = slot.generation.wrapping_add(1);
             slot.set("checking", "正在检查本地服务");
-            (endpoint, slot.generation)
+            (endpoint, slot.generation, retired)
         };
+        retired.reap().await;
         match local_service::probe(kind, &endpoint).await {
             Health::Ready => {
                 self.set_local_status(kind, Some(generation), "ready", "本地服务已就绪");
@@ -3206,7 +3301,7 @@ impl Application {
             }
             Health::Offline => {}
         }
-        {
+        let (retired, launched) = {
             let Ok(mut state) = self.lock() else { return };
             if preferred_only
                 && !matches!(state.preferred_local_service(), Ok(Some((current_kind, current_endpoint))) if current_kind == kind && current_endpoint == requested_endpoint)
@@ -3225,22 +3320,32 @@ impl Application {
                 slot.set("unconfigured", "请选择本地 TTS 安装目录");
                 return;
             }
-            if let Err(error) = slot.launch(kind, &endpoint, &data_dir) {
+            let (retired, launched) = slot.launch(kind, &endpoint, &data_dir);
+            if let Err(error) = &launched {
                 slot.set("failed", "本地服务启动失败");
-                slot.message = error;
-                return;
+                slot.message = error.clone();
             }
+            (retired, launched.is_ok())
+        };
+        retired.reap().await;
+        if !launched {
+            return;
         }
         // Model initialization may compile kernels on first run. This task is
         // asynchronous and never blocks the window or retries a failed spawn.
         for _ in 0..360 {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            {
+            let exited = {
                 let Ok(mut state) = self.lock() else { return };
                 let slot = state.local_services.get_mut(kind);
-                if slot.generation != generation || slot.process_exited() {
+                if slot.generation != generation {
                     return;
                 }
+                slot.take_exited()
+            };
+            if let Some(exited) = exited {
+                exited.reap().await;
+                return;
             }
             match local_service::probe(kind, &endpoint).await {
                 Health::Ready => {
@@ -3297,27 +3402,33 @@ impl Application {
 
     /// A terminal barrier, unlike Stop All which allows an explicit restart.
     pub fn stop_owned_local_services(&self) {
-        if let Ok(mut state) = self.lock() {
-            state.shutdown.cancel();
-            state.start_cancel.cancel();
-            state.audition_cancel.cancel();
-            state.qr_cancel.cancel();
-            state.qr_generation = state.qr_generation.wrapping_add(1);
-            state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
-            state.broadcast.invalidate();
-            state.moderation.invalidate();
-            state.chat_send.invalidate();
-            state.invalidate_obs_activity(false);
-            state.overlay_server = None;
-            if let Some(audio) = &state.audio {
-                audio.writer.cancel_active();
-            }
-            state.local_services.stop_owned();
+        // The process trees end after the state lock is released.
+        drop(self.close_owned_local_services());
+    }
+
+    fn close_owned_local_services(&self) -> local_service::Retired {
+        let Ok(mut state) = self.lock() else {
+            return local_service::Retired::default();
+        };
+        state.shutdown.cancel();
+        state.start_cancel.cancel();
+        state.audition_cancel.cancel();
+        state.qr_cancel.cancel();
+        state.qr_generation = state.qr_generation.wrapping_add(1);
+        state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
+        state.broadcast.invalidate();
+        state.moderation.invalidate();
+        state.chat_send.invalidate();
+        state.invalidate_obs_activity(false);
+        state.overlay_server = None;
+        if let Some(audio) = &state.audio {
+            audio.writer.cancel_active();
         }
+        state.local_services.stop_owned()
     }
 
     pub async fn shutdown(&self) {
-        self.stop_owned_local_services();
+        self.close_owned_local_services().reap().await;
         let _ = tokio::time::timeout(Duration::from_secs(3), self.stop(true)).await;
         if let Ok(mut state) = self.lock() {
             state.live = None;
