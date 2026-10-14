@@ -13,8 +13,8 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    AudioEncoding, AudioStream, TtsError, confirmed_loopback_offline, forward_wav_response,
-    network_error, read_limited, spawn_stream,
+    AudioEncoding, AudioStream, ResponseTimeouts, TtsError, confirmed_loopback_offline,
+    forward_wav_response, network_error, read_limited, response_timeout, spawn_stream,
 };
 
 const SERVICE: &str = "dots.tts";
@@ -81,10 +81,16 @@ pub struct DotsClient {
     config: DotsConfig,
     endpoint: Url,
     http: Client,
+    timeouts: ResponseTimeouts,
 }
 
 impl DotsClient {
     pub fn new(config: DotsConfig) -> Result<Self, TtsError> {
+        let timeouts = ResponseTimeouts::configured(config.timeout_secs);
+        Self::with_timeouts(config, timeouts)
+    }
+
+    fn with_timeouts(config: DotsConfig, timeouts: ResponseTimeouts) -> Result<Self, TtsError> {
         if !(5..=600).contains(&config.timeout_secs) {
             return Err(configuration("超时须在 5 到 600 秒之间"));
         }
@@ -100,17 +106,19 @@ impl DotsClient {
             }
         }
         let endpoint = normalize_endpoint(&config.endpoint)?;
+        // No total timeout: a long utterance is read at playback speed.
         let http = Client::builder()
             .no_proxy()
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(config.timeout_secs))
+            .read_timeout(timeouts.read_limit())
             .build()
             .map_err(|_| configuration("无法创建 HTTP 客户端"))?;
         Ok(Self {
             config,
             endpoint,
             http,
+            timeouts,
         })
     }
 
@@ -198,23 +206,27 @@ impl DotsClient {
             .is_some_and(|voice| Path::new(voice).is_absolute())
             .then(|| self.clone());
         let url = self.stream_url();
+        let timeouts = self.timeouts;
         Ok(spawn_stream(
             AudioEncoding::Wav,
             parent,
             move |sender, cancellation| async move {
+                let deadline = timeouts.start();
                 if let Some(check) = reference_check {
                     check.require_absolute_reference(&cancellation).await?;
                 }
                 let response = tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep_until(deadline.next_wait(false)) =>
+                        return Err(response_timeout(SERVICE, false)),
                     result = client.post(url).json(&body).send() =>
                         result.map_err(|error| network_error(SERVICE, &error, false))?,
                 };
                 if !response.status().is_success() {
                     return Err(http_error(response.status().as_u16()));
                 }
-                forward_wav_response(response, &sender, &cancellation, SERVICE).await
+                forward_wav_response(response, &sender, &cancellation, SERVICE, deadline).await
             },
         ))
     }
@@ -521,6 +533,75 @@ mod tests {
         assert_eq!(body["prompt_text"], "参考文本");
         assert_eq!(body["num_steps"], 12);
         assert!(body.get("speed").is_none());
+    }
+
+    fn timed_client(address: std::net::SocketAddr, limit_ms: u64) -> DotsClient {
+        let limit = Duration::from_millis(limit_ms);
+        let timeouts = ResponseTimeouts {
+            first_audio: limit,
+            idle: limit,
+        };
+        DotsClient::with_timeouts(DotsConfig::new(format!("http://{address}")), timeouts).unwrap()
+    }
+
+    #[tokio::test]
+    async fn wav_arriving_for_longer_than_the_timeout_is_not_cut_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            chunked_start(&mut socket, "audio/wav").await;
+            chunk(&mut socket, &wav_fixture()[..44]).await;
+            for sample in 1..=12u8 {
+                tokio::time::sleep(Duration::from_millis(75)).await;
+                chunk(&mut socket, &[sample, 0]).await;
+            }
+            chunked_end(&mut socket).await;
+        });
+        let client = timed_client(address, 300);
+        let mut audio = client.stream("你好", &CancellationToken::new()).unwrap();
+        let mut output = Vec::new();
+        while let Some(next) = audio.recv().await {
+            output.extend_from_slice(&next.unwrap());
+        }
+        assert_eq!(output.len(), 44 + 24);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_wav_fails_after_the_idle_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, released) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            chunked_start(&mut socket, "audio/wav").await;
+            chunk(&mut socket, &wav_fixture()).await;
+            let _ = released.await;
+        });
+        let client = timed_client(address, 300);
+        let mut audio = client.stream("你好", &CancellationToken::new()).unwrap();
+        let error = timeout(Duration::from_secs(3), async {
+            loop {
+                match audio.recv().await.unwrap() {
+                    Ok(_) => continue,
+                    Err(error) => break error,
+                }
+            }
+        })
+        .await
+        .expect("stalled stream was not cut off");
+        assert!(matches!(
+            error,
+            TtsError::Network {
+                stage: "收到部分音频后",
+                ..
+            }
+        ));
+        let _ = release.send(());
+        server.await.unwrap();
     }
 
     #[test]

@@ -21,7 +21,6 @@ pub enum JobOrigin {
 #[derive(Clone, Debug)]
 pub struct SpeechJob {
     pub id: u64,
-    pub generation: u64,
     pub origin: JobOrigin,
     /// An owned snapshot. Edits to rules/presets cannot change queued jobs.
     pub preview: RulePreview,
@@ -62,7 +61,6 @@ impl Default for JobOutcome {
 #[derive(Clone, Debug, Default)]
 pub struct QueueSnapshot {
     pub accepting: bool,
-    pub generation: u64,
     pub current: Option<SpeechJob>,
     pub pending: Vec<SpeechJob>,
     pub history: Vec<JobRecord>,
@@ -259,12 +257,12 @@ impl Scheduler {
         if let Some(current) = self.current.take() {
             // Mark cancellation before silencing the output. A task already
             // running on another thread must not re-activate after invalidate.
+            // `invalidate` deactivates this job id, so the output callback
+            // discards any of its PCM still queued or pushed late.
             current.cancel.cancel();
             self.executor.invalidate(current.job.id);
             current.task.abort();
             self.record(current.job.id, state, detail);
-            // Invalidate any late PCM from this job even if a callback already has it.
-            self.state.generation = self.state.generation.wrapping_add(1);
         }
     }
 
@@ -278,8 +276,7 @@ impl Scheduler {
         if !self.state.accepting || self.current.is_some() {
             return;
         }
-        if let Some(mut job) = self.pending.pop_front() {
-            job.generation = self.state.generation;
+        if let Some(job) = self.pending.pop_front() {
             let cancel = CancellationToken::new();
             let executor = self.executor.clone();
             let task_job = job.clone();
@@ -314,8 +311,7 @@ impl Scheduler {
                                 else {
                                     let id = self.next_id;
                                     self.next_id = self.next_id.wrapping_add(1);
-                                    self.pending.push_back(SpeechJob { id, generation: self.state.generation,
-                                        origin, preview: *preview, prepared });
+                                    self.pending.push_back(SpeechJob { id, origin, preview: *preview, prepared });
                                     self.start_next();
                                     self.publish();
                                     Ok(id)
@@ -370,7 +366,6 @@ impl Scheduler {
                             self.state.accepting = false;
                             self.cancel_current(JobState::Stopped, "全部停止");
                             self.clear_pending_as(JobState::Stopped, "全部停止");
-                            self.state.generation = self.state.generation.wrapping_add(1);
                             self.publish();
                             let _ = reply.send(());
                         }

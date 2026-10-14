@@ -288,7 +288,9 @@ impl PreparedPlayback {
     /// Read the selected connection and protected credential once. Sound asset
     /// IDs are resolved now, so later rule, connection or asset edits cannot
     /// redirect a queued job. `dobao_device` must be stable and persisted by
-    /// the caller; no device ID is regenerated for each utterance.
+    /// the caller; no device ID is regenerated for each utterance. A
+    /// connection's timeout limits the wait for each request's first audio,
+    /// never the length of an utterance that is still streaming.
     pub fn from_store(
         store: &DataStore,
         preview: &RulePreview,
@@ -341,7 +343,7 @@ impl PreparedPlayback {
                         } else {
                             config.voice = Some(preset.voice_id.clone());
                         }
-                        config.timeout_secs = timeout_secs.min(30);
+                        config.timeout_secs = timeout_secs;
                         (
                             PreparedProvider::Dots(DotsClient::new(config)?),
                             preset.speed,
@@ -410,7 +412,7 @@ impl PreparedPlayback {
                             }
                         }
                         config.speed_factor = preset.speed;
-                        config.timeout_secs = timeout_secs.min(30);
+                        config.timeout_secs = timeout_secs;
                         (PreparedProvider::GptSovits(SovitsClient::new(config)?), 1.0)
                     }
                     ConnectionSettings::FishAudio { timeout_secs } => {
@@ -429,7 +431,7 @@ impl PreparedPlayback {
                         )?;
                         config.voice_id = preset.voice_id.clone();
                         config.speed = preset.speed;
-                        config.timeout_secs = timeout_secs.min(30);
+                        config.timeout_secs = timeout_secs;
                         (PreparedProvider::Doubao(DoubaoClient::new(config)?), 1.0)
                     }
                 };
@@ -543,12 +545,11 @@ fn fish_config_from_store(
         secret.as_str().map_err(StorageError::from)?.to_owned(),
         preset.voice_id.clone(),
     );
+    // Product playback is always incremental; a persisted legacy
+    // `streaming: false` is ignored by the client.
     config.apply_playback_settings(&store.fish_audio_settings(connection_id)?);
-    // Product playback is always incremental. Persisted legacy `false` is
-    // ignored now that the user-facing mode switch has been removed.
-    config.streaming = true;
     config.speed = preset.speed;
-    config.timeout_secs = timeout_secs.min(30);
+    config.timeout_secs = timeout_secs;
     Ok(config)
 }
 
@@ -942,7 +943,6 @@ mod tests {
         let executor = PlaybackExecutor::new(writer.clone(), path).unwrap();
         let job = SpeechJob {
             id: 1,
-            generation: 0,
             origin: crate::scheduler::JobOrigin::Audition,
             preview,
             prepared: Some(prepared),
@@ -2408,7 +2408,7 @@ mod tests {
             .await
             .unwrap();
         timeout(Duration::from_secs(5), async {
-            while !writer.has_queued_audio(id) {
+            while writer.progress().job_id != id || writer.progress().queued_ms == 0 {
                 sleep(Duration::from_millis(10)).await;
             }
         })
@@ -2442,26 +2442,6 @@ mod tests {
         };
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_endpoint = format!("http://{}", target.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for index in 0..2 {
-                let (mut socket, _) = target.accept().await.unwrap();
-                let request = test_http::read_request(&mut socket).await;
-                if index == 0 {
-                    assert!(request.starts_with(b"GET /health HTTP/1.1"));
-                    test_http::json_response(
-                        &mut socket,
-                        "200 OK",
-                        r#"{"status":"ok","ready":true,"needs_restart":false,"model_loaded":true,"stream_requests":0}"#,
-                    )
-                    .await;
-                } else {
-                    assert!(request.starts_with(b"POST /tts/stream HTTP/1.1"));
-                    test_http::chunked_start(&mut socket, "audio/wav").await;
-                    test_http::chunk(&mut socket, &one_second_wav()).await;
-                    test_http::chunked_end(&mut socket).await;
-                }
-            }
-        });
         let fallback = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let default_endpoint = format!("http://{}", fallback.local_addr().unwrap());
         let temp = tempfile::tempdir().unwrap();
@@ -2477,13 +2457,61 @@ mod tests {
             .await
             .unwrap();
         wait_for_record(&handle, id, JobState::Failed).await;
-        server.await.unwrap();
+        let detail = handle
+            .state()
+            .borrow()
+            .history
+            .iter()
+            .find(|record| record.id == id)
+            .unwrap()
+            .detail
+            .clone();
+        assert!(detail.contains("输出设备已断开"), "{detail}");
+        // A known-dead device sends no readiness probe or synthesis request
+        // to either the selected or the default service.
+        for listener in [&target, &fallback] {
+            assert!(
+                timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
+        handle.stop_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn device_lost_before_a_later_part_sends_no_synthesis_request() {
+        let Some(ffmpeg_path) = ffmpeg_for_test() else {
+            return;
+        };
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", target.local_addr().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let (_, plan) = local_dots_plan(&mut store, endpoint);
+        let writer = test_writer(48_000, 1, 96_000);
+        let executor = PlaybackExecutor::new(writer.clone(), ffmpeg_path).unwrap();
+        let cancel = CancellationToken::new();
+        writer.activate_for(9, &cancel).unwrap();
+        // Earlier parts drained; the device is lost before the text part.
+        writer.disconnect_test_device();
+        let failure = timeout(
+            Duration::from_secs(2),
+            executor.play_plan(&plan, 9, 0, &cancel),
+        )
+        .await
+        .expect("the next part waited for synthesis on a dead device")
+        .err()
+        .expect("a dead device cannot play the next part");
+        assert!(matches!(
+            failure.error,
+            AttemptError::Playback(ref message) if message.contains("输出设备已断开")
+        ));
         assert!(
-            timeout(Duration::from_millis(100), fallback.accept())
+            timeout(Duration::from_millis(100), target.accept())
                 .await
                 .is_err()
         );
-        handle.stop_all().await.unwrap();
     }
 
     #[test]
@@ -2640,8 +2668,8 @@ mod tests {
         assert_eq!(config.volume_db, -4.0);
         assert_eq!(config.temperature, 0.3);
         assert_eq!(config.top_p, 0.6);
-        assert!(config.streaming);
-        assert_eq!(config.timeout_secs, 30);
+        // The saved limit is used as is, not silently capped.
+        assert_eq!(config.timeout_secs, 75);
         assert!(!format!("{config:?}").contains("sk-test-only-secret"));
     }
 

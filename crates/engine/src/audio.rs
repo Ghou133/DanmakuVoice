@@ -75,10 +75,6 @@ struct Shared {
     control: Mutex<()>,
     samples: ArrayQueue<TaggedSample>,
     active_job: AtomicU64,
-    /// Last job that put PCM into the device queue. A failed synthesis may be
-    /// rerouted only before this boundary; the callback may already have
-    /// consumed any queued sample.
-    queued_audio_job: AtomicU64,
     volume_bits: AtomicU32,
     disconnected: AtomicBool,
     underruns: AtomicU64,
@@ -138,7 +134,6 @@ impl AudioWriter {
     fn activate_unlocked(&self, job_id: u64) {
         self.shared.active_job.store(0, Ordering::Release);
         while self.shared.samples.pop().is_some() {}
-        self.shared.queued_audio_job.store(0, Ordering::Release);
         self.shared.played_samples.store(0, Ordering::Relaxed);
         self.shared.pushed_samples.store(0, Ordering::Relaxed);
         self.shared.active_job.store(job_id, Ordering::Release);
@@ -159,10 +154,6 @@ impl AudioWriter {
             played_ms: played.saturating_mul(1000) / per_second,
             queued_ms: pushed.saturating_sub(played).saturating_mul(1000) / per_second,
         }
-    }
-
-    pub fn has_queued_audio(&self, job_id: u64) -> bool {
-        self.shared.queued_audio_job.load(Ordering::Acquire) == job_id
     }
 
     pub fn cancel_active(&self) {
@@ -278,9 +269,6 @@ impl AudioWriter {
                     return Err(AudioError::Disconnected);
                 }
                 if self.shared.samples.push(sample).is_ok() {
-                    self.shared
-                        .queued_audio_job
-                        .store(job_id, Ordering::Release);
                     self.shared.pushed_samples.fetch_add(1, Ordering::Relaxed);
                     if !marked_progress {
                         if let Some(progress) = progress {
@@ -445,7 +433,6 @@ impl AudioOutput {
             control: Mutex::new(()),
             samples: ArrayQueue::new(capacity),
             active_job: AtomicU64::new(0),
-            queued_audio_job: AtomicU64::new(0),
             volume_bits: AtomicU32::new(master_volume.clamp(0.0, 2.0).to_bits()),
             disconnected: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
@@ -570,7 +557,6 @@ pub(crate) fn test_writer(sample_rate: u32, channels: u16, capacity: usize) -> A
             control: Mutex::new(()),
             samples: ArrayQueue::new(capacity),
             active_job: AtomicU64::new(0),
-            queued_audio_job: AtomicU64::new(0),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             disconnected: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
@@ -722,6 +708,17 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_device_refuses_to_activate_a_job() {
+        let writer = test_writer(48_000, 1, 8);
+        writer.disconnect_test_device();
+        assert!(matches!(
+            writer.activate_for(5, &CancellationToken::new()),
+            Err(AudioError::Disconnected)
+        ));
+        assert_eq!(writer.shared.active_job.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn default_device_change_prefers_identity_and_degrades_to_name() {
         let host = cpal::default_host().id();
         let opened = cpal::DeviceId::new(host, "first-output");
@@ -750,7 +747,6 @@ mod tests {
             control: Mutex::new(()),
             samples: ArrayQueue::new(2),
             active_job: AtomicU64::new(0),
-            queued_audio_job: AtomicU64::new(0),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             disconnected: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
@@ -763,14 +759,12 @@ mod tests {
             channels: 1,
         };
         writer.activate(7);
-        assert!(!writer.has_queued_audio(7));
         writer.set_master_volume(0.5);
         let token = CancellationToken::new();
         writer
             .push_interleaved(7, &[0.8, -0.8], &token)
             .await
             .unwrap();
-        assert!(writer.has_queued_audio(7));
         let mut output = [0f32; 2];
         fill(&mut output, &writer.shared, |sample| sample);
         assert_eq!(output, [0.4, -0.4]);
@@ -780,7 +774,6 @@ mod tests {
             Err(AudioError::Cancelled)
         ));
         writer.activate(8);
-        assert!(!writer.has_queued_audio(8));
         writer.push_interleaved(8, &[0.25], &token).await.unwrap();
         writer.deactivate_if(7);
         assert_eq!(writer.shared.active_job.load(Ordering::Acquire), 8);

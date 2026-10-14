@@ -10,15 +10,14 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use super::{
-    AudioEncoding, AudioStream, TtsError, network_error, network_error_at, read_limited,
-    send_bytes, spawn_stream,
+    AudioEncoding, AudioStream, ResponseTimeouts, TtsError, network_error, network_error_at,
+    read_limited, response_timeout, send_bytes, spawn_stream,
 };
 
 const SERVICE: &str = "Fish Audio";
 const TTS_URL: &str = "https://api.fish.audio/v1/tts";
 const CREDIT_URL: &str = "https://api.fish.audio/wallet/self/api-credit";
 const SAMPLE_RATE: u32 = 44_100;
-const MAX_BUFFERED_PCM_BYTES: usize = 64 * 1024 * 1024;
 
 pub const API_KEYS_URL: &str = "https://fish.audio/zh-CN/app/api-keys/";
 pub const DISCOVERY_URL: &str = "https://fish.audio/zh-CN/app/discovery/";
@@ -135,6 +134,8 @@ pub struct FishPlaybackSettings {
     pub volume_db: f32,
     pub temperature: f32,
     pub top_p: f32,
+    /// Legacy mode switch, still stored and migrated so older settings load.
+    /// Playback always streams PCM and ignores this value.
     pub streaming: bool,
 }
 
@@ -183,7 +184,6 @@ pub struct FishConfig {
     pub temperature: f32,
     pub top_p: f32,
     pub normalize_text: bool,
-    pub streaming: bool,
     pub timeout_secs: u64,
 }
 
@@ -202,7 +202,6 @@ impl FishConfig {
             temperature: 0.7,
             top_p: 0.7,
             normalize_text: true,
-            streaming: true,
             timeout_secs: 180,
         }
     }
@@ -213,7 +212,6 @@ impl FishConfig {
         self.volume_db = settings.volume_db;
         self.temperature = settings.temperature;
         self.top_p = settings.top_p;
-        self.streaming = settings.streaming;
     }
 }
 
@@ -230,7 +228,6 @@ impl fmt::Debug for FishConfig {
             .field("temperature", &self.temperature)
             .field("top_p", &self.top_p)
             .field("normalize_text", &self.normalize_text)
-            .field("streaming", &self.streaming)
             .field("timeout_secs", &self.timeout_secs)
             .finish()
     }
@@ -240,6 +237,7 @@ pub struct FishClient {
     config: FishConfig,
     endpoint: Url,
     http: Client,
+    timeouts: ResponseTimeouts,
 }
 
 impl FishClient {
@@ -248,7 +246,16 @@ impl FishClient {
         Self::with_endpoint(config, endpoint)
     }
 
-    fn with_endpoint(mut config: FishConfig, endpoint: Url) -> Result<Self, TtsError> {
+    fn with_endpoint(config: FishConfig, endpoint: Url) -> Result<Self, TtsError> {
+        let timeouts = ResponseTimeouts::configured(config.timeout_secs);
+        Self::with_timeouts(config, endpoint, timeouts)
+    }
+
+    fn with_timeouts(
+        mut config: FishConfig,
+        endpoint: Url,
+        timeouts: ResponseTimeouts,
+    ) -> Result<Self, TtsError> {
         validate_api_key(&config.api_key)?;
         config.reference_id = normalize_voice_id(&config.reference_id)?;
         if !config.speed.is_finite() || !(0.5..=2.0).contains(&config.speed) {
@@ -270,13 +277,15 @@ impl FishClient {
             // certificate validation remains enabled for the official URL.
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(config.timeout_secs))
+            // No total timeout: a long utterance is read at playback speed.
+            .read_timeout(timeouts.read_limit())
             .build()
             .map_err(|_| configuration("无法创建 HTTPS 客户端"))?;
         Ok(Self {
             config,
             endpoint,
             http,
+            timeouts,
         })
     }
 
@@ -344,6 +353,7 @@ impl FishClient {
         });
         let client = self.http.clone();
         let url = self.endpoint.clone();
+        let timeouts = self.timeouts;
         Ok(spawn_stream(
             AudioEncoding::PcmS16Le {
                 sample_rate: SAMPLE_RATE,
@@ -351,10 +361,13 @@ impl FishClient {
             },
             parent,
             move |sender, cancellation| async move {
+                let deadline = timeouts.start();
                 let authorization = authorization_header(&config.api_key)?;
                 let response = tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep_until(deadline.next_wait(false)) =>
+                        return Err(response_timeout(SERVICE, false)),
                     result = client.post(url)
                         .header(reqwest::header::AUTHORIZATION, authorization)
                         .header("model", config.model.as_str())
@@ -373,11 +386,12 @@ impl FishClient {
                 let mut packets = response.bytes_stream();
                 let mut odd_byte = None;
                 let mut received = false;
-                let mut buffered = (!config.streaming).then(Vec::new);
                 loop {
                     let packet = tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep_until(deadline.next_wait(received)) =>
+                            return Err(response_timeout(SERVICE, received)),
                         result = packets.next() => result,
                     };
                     let Some(packet) = packet else { break };
@@ -386,16 +400,7 @@ impl FishClient {
                     let mut data = packet.as_ref();
                     if let Some(previous) = odd_byte.take() {
                         if let Some((&first, remainder)) = data.split_first() {
-                            if let Some(buffer) = buffered.as_mut() {
-                                if buffer.len() > MAX_BUFFERED_PCM_BYTES - 2 {
-                                    return Err(TtsError::InvalidAudio {
-                                        service: SERVICE,
-                                        reason: "完整音频超过 64 MiB 限制",
-                                    });
-                                }
-                                buffer.extend_from_slice(&[previous, first]);
-                            } else if !send_bytes(&sender, &cancellation, &[previous, first]).await
-                            {
+                            if !send_bytes(&sender, &cancellation, &[previous, first]).await {
                                 return Ok(());
                             }
                             received = true;
@@ -407,15 +412,7 @@ impl FishClient {
                     }
                     let complete = data.len() & !1;
                     if complete > 0 {
-                        if let Some(buffer) = buffered.as_mut() {
-                            if complete > MAX_BUFFERED_PCM_BYTES.saturating_sub(buffer.len()) {
-                                return Err(TtsError::InvalidAudio {
-                                    service: SERVICE,
-                                    reason: "完整音频超过 64 MiB 限制",
-                                });
-                            }
-                            buffer.extend_from_slice(&data[..complete]);
-                        } else if !send_bytes(&sender, &cancellation, &data[..complete]).await {
+                        if !send_bytes(&sender, &cancellation, &data[..complete]).await {
                             return Ok(());
                         }
                         received = true;
@@ -435,11 +432,6 @@ impl FishClient {
                         service: SERVICE,
                         reason: "服务未返回音频",
                     });
-                }
-                if let Some(buffer) = buffered
-                    && !send_bytes(&sender, &cancellation, &buffer).await
-                {
-                    return Ok(());
                 }
                 Ok(())
             },
@@ -740,18 +732,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn whole_response_mode_waits_for_completion_before_emitting_pcm() {
+    async fn saved_generation_options_reach_the_streaming_request() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (first_sender, first_receiver) = oneshot::channel();
-        let (finish_sender, finish_receiver) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_request(&mut socket).await;
             chunked_start(&mut socket, "audio/pcm").await;
             chunk(&mut socket, &[1, 0]).await;
-            first_sender.send(()).unwrap();
-            finish_receiver.await.unwrap();
             chunk(&mut socket, &[2, 0]).await;
             chunked_end(&mut socket).await;
             request
@@ -760,24 +748,23 @@ mod tests {
             "sk-test-only-secret-key-12345678901234567890",
             DEFAULT_VOICE_ID,
         );
-        config.streaming = false;
-        config.model = FishModel::S2Pro;
-        config.latency = FishLatency::Balanced;
-        config.volume_db = -2.0;
-        config.temperature = 0.3;
-        config.top_p = 0.6;
+        // A legacy whole-response setting no longer changes playback.
+        config.apply_playback_settings(&FishPlaybackSettings {
+            model: FishModel::S2Pro,
+            latency: FishLatency::Balanced,
+            volume_db: -2.0,
+            temperature: 0.3,
+            top_p: 0.6,
+            streaming: false,
+        });
         let endpoint = Url::parse(&format!("http://{address}/v1/tts")).unwrap();
         let client = FishClient::with_endpoint(config, endpoint).unwrap();
         let mut audio = client.stream("测试", &CancellationToken::new()).unwrap();
-        first_receiver.await.unwrap();
-        assert!(
-            timeout(Duration::from_millis(100), audio.recv())
-                .await
-                .is_err()
-        );
-        finish_sender.send(()).unwrap();
-        assert_eq!(audio.recv().await.unwrap().unwrap(), [1, 0, 2, 0]);
-        assert!(audio.recv().await.is_none());
+        let mut output = Vec::new();
+        while let Some(next) = audio.recv().await {
+            output.extend_from_slice(&next.unwrap());
+        }
+        assert_eq!(output, [1, 0, 2, 0]);
         let request = server.await.unwrap();
         let headers_end = request
             .windows(4)
@@ -856,6 +843,135 @@ mod tests {
         assert_eq!(body["format"], "pcm");
         assert_eq!(body["sample_rate"], 44_100);
         assert_eq!(body["prosody"]["speed"], 1.0);
+    }
+
+    fn short_timeouts(first_audio_ms: u64, idle_ms: u64) -> ResponseTimeouts {
+        ResponseTimeouts {
+            first_audio: Duration::from_millis(first_audio_ms),
+            idle: Duration::from_millis(idle_ms),
+        }
+    }
+
+    fn timed_client(address: std::net::SocketAddr, timeouts: ResponseTimeouts) -> FishClient {
+        let config = FishConfig::new(
+            "sk-test-only-secret-key-12345678901234567890",
+            DEFAULT_VOICE_ID,
+        );
+        let endpoint = Url::parse(&format!("http://{address}/v1/tts")).unwrap();
+        FishClient::with_timeouts(config, endpoint, timeouts).unwrap()
+    }
+
+    #[tokio::test]
+    async fn audio_arriving_for_longer_than_the_timeout_is_not_cut_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            chunked_start(&mut socket, "audio/pcm").await;
+            // About three times the limit in total, never idle for long.
+            for sample in 1..=12u8 {
+                chunk(&mut socket, &[sample, 0]).await;
+                tokio::time::sleep(Duration::from_millis(75)).await;
+            }
+            chunked_end(&mut socket).await;
+        });
+        let client = timed_client(address, short_timeouts(300, 300));
+        let mut audio = client.stream("测试", &CancellationToken::new()).unwrap();
+        let mut output = Vec::new();
+        while let Some(next) = audio.recv().await {
+            output.extend_from_slice(&next.unwrap());
+        }
+        assert_eq!(output.len(), 24);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn playback_paced_reading_longer_than_the_timeout_is_not_cut_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            chunked_start(&mut socket, "audio/pcm").await;
+            // More than the bounded channel holds, so the rest of the body is
+            // read only as the consumer (playback) frees space.
+            for _ in 0..12 {
+                chunk(&mut socket, &[7; crate::tts::MAX_CHUNK_BYTES]).await;
+            }
+            chunked_end(&mut socket).await;
+        });
+        let client = timed_client(address, short_timeouts(300, 300));
+        let mut audio = client.stream("测试", &CancellationToken::new()).unwrap();
+        let mut total = audio.recv().await.unwrap().unwrap().len();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        while let Some(next) = audio.recv().await {
+            total += next.unwrap().len();
+        }
+        assert_eq!(total, 12 * crate::tts::MAX_CHUNK_BYTES);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_audio_fails_after_the_idle_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, released) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            chunked_start(&mut socket, "audio/pcm").await;
+            chunk(&mut socket, &[1, 0]).await;
+            let _ = released.await;
+        });
+        let client = timed_client(address, short_timeouts(300, 300));
+        let mut audio = client.stream("测试", &CancellationToken::new()).unwrap();
+        assert_eq!(audio.recv().await.unwrap().unwrap(), [1, 0]);
+        let error = timeout(Duration::from_secs(3), audio.recv())
+            .await
+            .expect("stalled stream was not cut off")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TtsError::Network {
+                stage: "收到部分音频后",
+                ..
+            }
+        ));
+        let _ = release.send(());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_first_audio_fails_at_the_timeout_not_per_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, released) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            chunked_start(&mut socket, "audio/pcm").await;
+            // Headers and half a sample arrive, but no complete audio.
+            chunk(&mut socket, &[1]).await;
+            let _ = released.await;
+        });
+        let client = timed_client(address, short_timeouts(400, 5_000));
+        let mut audio = client.stream("测试", &CancellationToken::new()).unwrap();
+        let error = timeout(Duration::from_secs(3), audio.recv())
+            .await
+            .expect("first-audio deadline was not applied")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TtsError::Network {
+                stage: "尚未收到音频时",
+                ..
+            }
+        ));
+        let _ = release.send(());
+        server.await.unwrap();
     }
 
     #[tokio::test]
