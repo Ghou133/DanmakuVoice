@@ -103,9 +103,7 @@ impl BroadcastSessionTracker {
         self.key == uid.zip(room_id) && self.record.active.is_some()
     }
 
-    /// Every successful refresh, title update, start and stop uses this method.
-    /// A changed live_since starts a new observation without pretending that we
-    /// saw the previous stream finish while this application was absent.
+    #[cfg(test)]
     fn observe_room(
         &mut self,
         store: &mut DataStore,
@@ -116,6 +114,9 @@ impl BroadcastSessionTracker {
         self.observe_room_with_start_authority(store, uid, room, observation, true)
     }
 
+    /// Every successful refresh, title update, start and stop uses this method.
+    /// A changed live_since starts a new observation without pretending that we
+    /// saw the previous stream finish while this application was absent.
     /// start() may fill live_since from the local clock. That start is
     /// provisional: the first authoritative start of the same observation run
     /// replaces it in place instead of beginning a new session.
