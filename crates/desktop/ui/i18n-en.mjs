@@ -366,7 +366,8 @@ https://fish.audio/m/… 或 32 位 ID	https://fish.audio/m/… or a 32-characte
 礼物类型	Gift type
 付费礼物	Paid gift
 过滤 B站官方表情	Filter Bilibili standalone emotes
-仅跳过单独发送的 B站表情播报，仍显示在聊天中。普通文字、emoji 和行内表情照常播报。	Skips speech for standalone Bilibili emotes while keeping them in chat. Text, emoji, and inline emotes are still read.
+跳过单独发送的 B站表情，仍显示在聊天中。纯 emoji 无可读内容时自动忽略，带文字的弹幕照常播报。	Skips standalone Bilibili emotes while keeping them in chat. Emoji-only messages without readable content are always skipped; messages with text are still read.
+消息没有可播报内容	This message has no readable content
 B站官方表情已过滤	Bilibili standalone emote filtered
 返回主界面	Back to chat
 免费礼物	Free gift
@@ -733,6 +734,12 @@ OBS 叠加层	OBS overlay
 亮色	Light
 透明	Transparent
 位置	Position
+位置微调	Fine positioning
+横向微调	Horizontal offset
+纵向微调	Vertical offset
+正数向右，负数向左；每次调整 1 像素。	Positive moves right, negative moves left; adjust by 1 pixel.
+正数向下，负数向上；填 0 恢复原位。	Positive moves down, negative moves up; enter 0 to reset.
+位置偏移需为 -8192 到 8192 之间的整数	Position offsets must be whole numbers from -8192 to 8192
 左上	Top left
 右上	Top right
 左下	Bottom left
@@ -746,6 +753,9 @@ OBS 叠加层	OBS overlay
 冷场时显示。建议写英文，留空用默认的一句。	Shown when chat is quiet. English reads best; leave empty for the default line.
 刊头文字	Masthead text
 标题	Title
+主标题	Heading
+最多 24 个字，例如“今晚的弹幕”。	Up to 24 characters, for example “Tonight's chat”.
+请填写 1 到 24 字的叠加层主标题	Enter an overlay heading of 1 to 24 characters
 副标题	Tagline
 最多 12 个字，例如“今晚的弹幕”。	Up to 12 characters, for example “Tonight's chat”.
 单独显示在画面上方正中。	Shown on its own at the top center of the scene.
@@ -757,11 +767,11 @@ OBS 叠加层	OBS overlay
 在 OBS 里添加“浏览器”来源，粘贴地址，宽和高填 OBS 的画布分辨率（设置 → 视频 → 基础分辨率）。叠加层按画面大小自动缩放，1080p、2K、4K、16:10 和带鱼屏都能直接用。	In OBS, add a Browser source, paste the address, and set its width and height to the OBS canvas resolution (Settings → Video → Base Resolution). The overlay scales with the scene, so 1080p, 2K, 4K, 16:10 and ultrawide all work.
 地址只在本机可用，重新生成会让旧地址失效	The address works only on this computer. Regenerating it disables the old one
 复制地址	Copy address
-重新生成	Regenerate
 OBS 已连接 · 	OBS connected ·\u0020
 无法复制到剪贴板，请稍后重试	Could not copy to the clipboard. Try again
 显示内容	What to show
 晚上好呀，今天也来听你读弹幕	Good evening, here to hear you read chat again
+刚下班，来听听歌	Just off work, here for the songs
 这一波要是没闪现就寄了，主播反应好快	That dodge saved the round, what a quick reaction
 未启用 · 打开右上角的开关后，OBS 才能显示叠加层	Off · Turn on the switch at the top right so OBS can show the overlay
 样式	Style
@@ -1024,6 +1034,257 @@ B站直播间	Bilibili live room
 开播前需要验证本人	Verify your identity before streaming
 用哔哩哔哩 App 扫码完成人脸验证，	Scan with the Bilibili app to verify your identity,
 再回来点继续。	then come back and select Continue.
+1 天	1 day
+10 分钟	10 minutes
+API 密钥	API key
+OBS 没开时先自动启动	Launch OBS automatically when needed
+OBS 画布	OBS canvas
+OBS 高级	Advanced OBS settings
+TA 的声音	Their voice
+不读弹幕也能照常显示。	Messages still appear with speech turned off.
+之后的改动会自动同步到 OBS	Changes sync to OBS automatically
+二维码两分钟后会过期	The QR code expires in two minutes
+云端声音，音色多、发音稳	A wide choice of reliable cloud voices
+仅礼物	Gifts only
+今晚的弹幕	Tonight's chat
+今晚还没说过话	No messages tonight yet
+从备份恢复	Restore backup
+从电脑选择音频	Choose audio from this computer
+从这份备份恢复？	Restore this backup?
+位朋友说过话	friends joined the conversation
+你好，欢迎来到直播间。	Hello, welcome to the stream.
+保存	Save
+先打开 OBS	Open OBS first
+先选一个声音服务，再挑具体的声音。	Choose a service, then find your voice.
+免费礼物也读	Include free gifts
+入夜	Nightfall
+全部声音	All voices
+关闭后，尚未保存的码率修改会丢失。	Closing discards unsaved bitrate changes.
+内容	Message
+准备好服务的安装目录和模型。	Have the service folder and models ready.
+切换直播间会先断开当前连接。	Changing rooms disconnects the current room first.
+刚沉下去的弹幕	Recently settled messages
+删除这个声音	Delete this voice
+删除这个声音？	Delete this voice?
+删除这条	Delete this entry
+副标题最多 64 个字	Subtitle: up to 64 characters
+历史弹幕	Chat history
+原文	Original
+叠加层已放进场景	Overlay added to the scene
+已放进场景「	Added to scene “
+叠加层显示	Overlay display
+叠加层还没放进场景	Overlay has not been added to a scene
+句弹幕沉在湖里	messages rest in the lake
+句新弹幕	new messages
+只存在这台电脑上，不会被导出	Stored only on this computer; never exported
+可以先试听，添加后再设为默认。	Preview first. Add a voice before making it the default.
+可以用一段录音克隆声音	Clone a voice from a recording
+名字	Name
+哔哩哔哩登录已失效 · 重新扫码	Bilibili sign-in expired · Scan again
+在 OBS 里打开「工具 › WebSocket 服务器设置」，勾上「开启 WebSocket 服务器」，把端口和密码填在下面。	In OBS, open Tools › WebSocket Server Settings, enable the server, then enter its port and password below.
+在下面选一个声音，设为默认。	Choose a voice below and make it your default.
+地址	Address
+填写表情的完整名字，例如 [doge]。没有读法的表情只显示，不播报。	Enter the full emoticon name, such as [doge]. Emoticons without a reading appear without speech.
+填写读法，或给这位观众选一个声音。	Enter a pronunciation or choose a voice for this viewer.
+声音名称	Voice name
+备份与迁移	Backup and migration
+大约一分钟	About a minute
+好了	Done
+安装目录	Installation folder
+密码	Password
+密钥使用 Windows 加密保存在本机。	Your key is encrypted by Windows and stored locally.
+导出备份	Export backup
+已完成	Completed
+已添加	Added
+已自动找到 obs64.exe	Found obs64.exe automatically
+开始	Start
+开播、下播时同步控制 OBS 推流	Start and stop OBS streaming with your broadcast
+开播联动	Broadcast linking
+弹幕默认用	Default chat voice
+当前接收和播报会停止。会先备份当前数据，再恢复声音、读法和规则；登录和密钥不会被导入。	Receiving and playback will stop. Current data is backed up before restoring voices, readings and rules. Logins and keys are never imported.
+恢复	Restore
+恢复这句	Reset this sentence
+恢复高级设置的默认值？	Reset advanced settings?
+恢复默认	Restore defaults
+想让谁来读弹幕？	Who should read your chat?
+打开 Fish Audio，登录你的账号。	Open Fish Audio and sign in.
+打开密钥页面	Open API keys
+拉黑	Block
+拖动摆放，拖右下角缩放，靠近四角会自动贴合	Drag to position; resize from the lower-right corner; snap near any corner
+挑一个你喜欢的声音，让弹幕有声音。	Choose a voice to bring your chat to life.
+挑一个喜欢的声音	Find a voice you like
+换一个	Change
+换一张	Get a new code
+插入	Insert
+撤销	Undo
+播报哪些消息	Messages to read
+播报消息、模板、关键词音效和礼物合并会恢复默认。声音和记住的读法会保留。	Reset message types, templates, keyword sounds and gift merging. Voices and saved readings are kept.
+教它几个名字、词和表情，下次就会这样读。	Teach it names, words and emoticons for next time.
+数量	Quantity
+新建一个 API 密钥，复制到上面。	Create an API key and paste it above.
+显示哪些	Messages shown
+显示密码	Show password
+更改	Change
+服务没开	Service is stopped
+本地合成，不用联网	Local speech, no internet needed
+正在同步到 OBS…	Syncing to OBS…
+正在读	Now reading
+永远的神	The greatest
+没有匹配的声音	No matching voices
+添加	Add
+添加关键词	Add a keyword
+添加声音	Add a voice
+添加角色声音	Add a character voice
+添加音色链接	Add a voice link
+点一个时长就生效	Select a duration to apply
+点连接启动服务，再选择声音。	Select Connect to start the service, then choose a voice.
+点连接，验证后就能添加声音。	Select Connect. Once verified, you can add voices.
+狗头	Doge
+现在	Now
+用哔哩哔哩 App 扫一扫	Scan with the Bilibili app
+用哔哩哔哩 App 扫一扫，完成验证后会自动开播。	Scan with the Bilibili app. Streaming starts automatically after verification.
+用过的音效	Recent sounds
+登录和密钥不会导出。音效文件需要另行保留。	Logins and keys are excluded. Keep a separate copy of your sound files.
+登录和密钥只存在这台电脑上，不会跟着备份导出。	Logins and keys stay on this computer and are excluded from backups.
+直播时点一下右下角的声音，就能切换。	Select the voice at the lower right to switch during a stream.
+直播时点一下观众名字，也能在观众卡片里改 TA 的读法和声音。	Select a viewer during a stream to change their pronunciation and voice.
+直播间号	Room number
+种类	Type
+端口	Port
+等待验证…	Waiting for verification…
+简体中文	Simplified Chinese
+编辑声音	Edit voice
+编辑读法	Edit reading
+至少	At least
+蘑菇七	Mushroom Seven
+表情	Emoticon
+观众	Viewer
+观众名字、词和表情	Viewer names, words and emoticons
+观众绑定和播报规则仍在使用时，需要先解除引用。	Remove any viewer bindings and speech rules that still use this voice first.
+解除	Remove
+记住的读法	Saved readings
+设为默认	Make default
+词	Word
+试听音效	Preview sound
+读法	Reading
+读法已记住	Reading saved
+豆	D
+跑在你电脑上的本地模型	A local model running on your computer
+返回设置	Back to settings
+返回预览	Back to preview
+还没开播	Not streaming
+还没有可选声音	No voices available yet
+还没有声音	No voices yet
+还没有记住的读法	No saved readings yet
+还没有默认声音	No default voice yet
+还没登录	Not signed in
+还没设置	Not set up
+还没连上	Not connected
+还没连上 OBS	Not connected to OBS
+还没选择默认声音	Choose your default voice
+这些一般不用动，改乱了可以一键恢复。	You rarely need to change these. Reset them anytime.
+连上以后，抽屉会变宽，让你直接在画面上摆放弹幕。	Once connected, this drawer expands so you can position chat directly on the canvas.
+连接后，就能挑选声音了。	Connect to start choosing voices.
+连接声音服务	Connect a voice service
+退出这个账号	Sign out
+选好本机的安装目录，就能添加声音。	Choose the local installation folder to add voices.
+选择参考音频添加	Add from reference audio
+选择目录，程序会记住这个位置。	Choose the folder. The app will remember it.
+选择音效	Choose a sound
+重复的话合成一条	Combine repeated messages
+金额	Amount
+隐藏密码	Hide password
+验证等待已超时，请重新开播。	Verification timed out. Start the broadcast again.
+高级	Advanced
+黄昏	Dusk
+默认	Default
+历史弹幕读取失败，请重试	Could not load chat history. Try again.
+正在读取更深处的弹幕	Loading older messages
+再往深处看看	Explore deeper
+拖动摆放叠加层，也可用方向键微调	Drag the overlay or fine-tune with the arrow keys
+拖动摆放叠加层, 也可用方向键微调	Drag the overlay or fine-tune with the arrow keys
+双击编辑主标题	Double-click to edit the heading
+双击编辑副标题	Double-click to edit the subtitle
+双击编辑刊头	Double-click to edit the heading
+双击编辑标语	Double-click to edit the tagline
+双击文字编辑，回车保存	Double-click to edit, press Enter to save
+双击文字编辑, 回车保存	Double-click to edit, press Enter to save
+拖动缩放，也可用方向键调整大小	Drag to resize or use the arrow keys
+拖动缩放, 也可用方向键调整大小	Drag to resize or use the arrow keys
+声音服务	Voice services
+当前平台接口仅支持按小时禁言	The platform currently supports whole-hour mutes only
+找一个名字、词或表情	Find a name, word or emoticon
+搜索声音	Search voices
+试听称呼	Preview pronunciation
+默认声音	Default voice
+用哔哩哔哩 App 扫码，自动找到你的直播间。	Scan with the Bilibili app to find your room automatically.
+接下来，就让弹幕落在湖面上。	Let your chat settle onto the lake.
+OBS 可以稍后在设置里连接。	You can connect OBS later in Settings.
+句沉在湖里	messages rest in the lake
+滚轮调节	Scroll to adjust
+回到水面	Back to the surface
+播报声音	Reading voice
+把直播间的弹幕，用你喜欢的声音读出来。	Give your live chat a voice you love.
+准备好了	You're ready
+进入直播间	Enter the room
+连接设置	Connection settings
+模型与参考音频	Model and reference audio
+更换参考音频	Change reference audio
+改标题	Edit title
+更多设置	More settings
+没查到，再试一次	Couldn't check — try again
+OBS 还没打开	OBS isn't open
+正在打开 OBS…	Opening OBS…
+打开 OBS	Open OBS
+重新连接	Reconnect
+打开后会自动连上，在这里摆好的位置会同步过去	It connects on its own once open; the layout you set here carries over
+OBS 在另一台电脑上，它开着就会自动连上	OBS is on another computer; it connects whenever it is running
+没能连上：OBS 没打开，或者 WebSocket 服务器没开启	Couldn't connect: OBS isn't open, or its WebSocket server is off
+由 Microsoft Store 自动更新	Updated automatically by Microsoft Store
+挑一个声音	Pick a voice
+豆包还没有返回可用的声音，稍后再试。	Doubao has not returned any voices yet. Try again shortly.
+收藏一个 Fish 声音	Save a Fish voice
+在 Fish Audio 找到喜欢的声音，把页面链接贴到这里。	Find a voice you like on Fish Audio and paste its page link here.
+去找声音	Find voices
+声音链接或 ID	Voice link or ID
+正在查找…	Looking it up…
+Fish 声音	Fish voice
+选一个角色模型	Pick a model
+重新查找	Look again
+安装目录里还没找到成对的模型。	No paired models were found in the install folder yet.
+选一段参考音频	Choose a reference recording
+更换	Change
+参考音频里说的话	What the recording says
+不用参考文本	No reference text
+用一段录音做一个声音	Make a voice from a recording
+选一段几秒钟、只有一个人说话的录音。	Choose a few seconds of one person speaking.
+录音里说的话	What the recording says
+用豆包 App 扫码，在手机上确认登录。	Scan with the Doubao app and confirm on your phone.
+登录只存在这台电脑上，不会跟着备份导出。	The sign-in stays on this computer and is not exported with backups.
+连接 Fish Audio	Connect Fish Audio
+在 Fish Audio 新建一个 API 密钥，复制到这里。	Create an API key on Fish Audio and paste it here.
+只存在这台电脑上，不会被导出。	Stays on this computer and is never exported.
+选一下它在这台电脑上的安装目录。	Choose where it is installed on this computer.
+这是默认声音	This is the default voice
+找不到这个声音的模型，请重新添加。	This voice's model is missing. Add it again.
+参考音频已更换	Reference audio changed
+参考文本已保存	Reference text saved
+已添加「	Added “
+记住	Remember
+填表情的完整名字，例如 [doge]。	Use the full emote name, e.g. [doge].
+用豆包播报	Read with Doubao
+扫码连接豆包，使用默认音色播报新弹幕。	Scan to connect Doubao and read new messages with the default voice.
+已经登录了，可以直接继续。	You are signed in already, so you can go on.
+换一个账号	Use another account
+没读到开播状态	Could not read broadcast status
+B站目前只能按小时禁言	Bilibili only supports whole-hour mutes
+立即播报	Read now
+收起	Dismiss
+日间 · afternoon	afternoon
+夜间 · evening	evening
+播报音量	Speech volume
+已静音	Muted
+已开播，但 OBS 没能自动推流，请检查「设置 → OBS」：	Live room opened, but OBS could not start streaming. Check Settings → OBS:\u0020
 `.trim().split('\n').map(line => {
   const tab = line.indexOf('\t');
   return [line.slice(0, tab), line.slice(tab + 1)];

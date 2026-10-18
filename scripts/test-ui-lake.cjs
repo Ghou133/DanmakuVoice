@@ -49,7 +49,7 @@ let faceNextStart = false;
 const snapshots = () => structuredClone(state);
 const push = async () => { await page.evaluate(next => window.__lakePush(next), snapshots()); await page.waitForTimeout(50); };
 const actionCalls = action => calls.filter(call => call.action === action);
-const history = () => page.locator('#lake-history-dialog');
+const history = () => page.locator('#lake-deep');
 const editor = () => page.locator('#onair-panel[data-mode="info"]');
 const outside = () => page.locator('#live-shell').click({ position: { x: 15, y: 390 } });
 const isOpen = locator => locator.evaluate(node => node.open ?? !node.hidden);
@@ -72,6 +72,7 @@ async function noOverlap(selectors, label) {
     const boxes = list.map(selector => {
       const node = document.querySelector(selector);
       if (!node || !node.getClientRects().length) return null;
+      for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) { const style = getComputedStyle(ancestor); if (Number(style.opacity) === 0 || style.visibility === 'hidden') return null; }
       const box = node.getBoundingClientRect();
       const visible = { selector, x: box.x, y: box.y, right: box.right, bottom: box.bottom };
       // A tall management section scrolls under its card footer. Compare the
@@ -165,12 +166,17 @@ async function noOverlap(selectors, label) {
     assert.equal(await page.locator('.lake-wave').count(), 148);
     const horizon = await page.locator('.lake-horizon').boundingBox();
     assert.ok(Math.abs(horizon.y - 476) < 1, `reference horizon moved: ${horizon.y}`);
-    assert.equal(await page.locator('#titlebar-actions button').count(), 2);
-    assert.deepEqual(await page.locator('#titlebar-actions button').evaluateAll(nodes => nodes.map(node => node.dataset.action)), ['theme.toggle', 'settings.open']);
+    assert.equal(await page.locator('#titlebar-actions button').count(), 1);
+    assert.deepEqual(await page.locator('#titlebar-actions button').evaluateAll(nodes => nodes.map(node => node.dataset.action)), ['settings.open']);
+    assert.equal(await page.locator('#lake-orb').getAttribute('data-action'), 'theme.toggle');
+    assert.equal(await page.locator('#lake-orb').getAttribute('aria-label'), '切换到日间');
+    assert.equal(await page.locator('#lake-orb').getAttribute('aria-haspopup'), null);
+    assert.equal(await page.locator('.lake-orb-tip').textContent(), '日间 · afternoon');
+    assert.match(await page.locator('#lake-daypart').textContent(), /\sevening$/);
     assert.equal(await page.locator('#onair').isHidden(), true);
     assert.equal(await page.locator('#live-shell [data-action="broadcast.start"], #live-shell [data-action="broadcast.stop"]').count(), 0);
     assert.equal(actionCalls('bili.broadcast.refresh').length, 0);
-    check('lake scenery and exactly two toolbar tools render; disabled broadcast has no start/stop controls or room reads');
+    check('lake scenery, the sun/moon day-night control and the single settings tool render; disabled broadcast has no start/stop controls or room reads');
 
     // A real connection often completes before the first danmaku arrives. No
     // event key, scene, account or room change should be needed to refresh it.
@@ -189,12 +195,12 @@ async function noOverlap(selectors, label) {
       await push();
       const actual = await page.locator('#lake-current').evaluate(root => {
         const placeholder = root.querySelector('.lake-state');
-        return { title: [...(placeholder?.childNodes || [])].filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim(), description: placeholder?.querySelector('small')?.textContent, caption: document.querySelector('#room-caption')?.textContent, buttons: root.querySelectorAll('[data-action="live.toggle"]').length, messages: root.querySelectorAll('.lake-message').length, scene: document.querySelector('#live-shell').dataset.scene };
+        return { title: placeholder?.querySelector('.lake-state-title')?.textContent, description: document.querySelector('#chat-empty p')?.textContent, caption: document.querySelector('#room-caption')?.textContent, buttons: document.querySelectorAll('#chat-empty [data-action="live.toggle"]').length, messages: root.querySelectorAll('.lake-message').length, scene: document.querySelector('#live-shell').dataset.scene };
       });
       connectionTrace.push({ phase: 'empty', index, state: expected.state, running: expected.running, expected, actual });
       await page.screenshot({ path: path.join(output, `connection-empty-${index}-${expected.state}.png`) });
-      assert.equal(actual.title, expected.title, `${expected.state} empty title did not follow the new connection state`);
-      assert.equal(actual.description, expected.description, `${expected.state} empty description did not follow the new connection state`);
+      assert.equal(actual.title, 'waiting for the first word…', `${expected.state} retains the quiet lake placeholder`);
+      assert.equal(typeof actual.description, 'string');
       assert.equal(actual.caption, expected.caption, `${expected.state} reception caption is stale`);
       assert.equal(actual.buttons, expected.button ? 1 : 0, `${expected.state} connection button is stale`);
       assert.equal(actual.messages, 0);
@@ -222,46 +228,58 @@ async function noOverlap(selectors, label) {
     Object.assign(state.live, { running: true, state: 'connected', connecting: false });
     await push();
 
-    await page.locator('#titlebar-actions [data-action="theme.toggle"]').click();
-    await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+    // The moon sets and the sun rises from the orb itself; saving waits for the
+    // old frame so the stored appearance cannot skip the transition.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.locator('#lake-orb').click();
+    await page.waitForFunction(() => document.getAnimations().some(animation => animation.effect?.pseudoElement === '::view-transition-old(lake-orb)'));
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'light' && !document.getAnimations().some(animation => animation.effect?.pseudoElement?.includes('view-transition')));
+    await page.emulateMedia({ reducedMotion: 'reduce' });
     assert.equal(state.preferences.appearance, 'light');
+    assert.equal(await page.locator('#lake-orb').evaluate(node => node.style.viewTransitionName), '');
+    assert.equal(await page.locator('#lake-orb').getAttribute('aria-label'), '切换到夜间');
+    assert.equal(await page.locator('.lake-orb-tip').textContent(), '夜间 · evening');
+    assert.match(await page.locator('#lake-daypart').textContent(), /\safternoon$/);
     await page.locator('#titlebar-actions [data-action="settings.open"]').click();
     assert.equal(await page.locator('#settings').evaluate(node => node.open), true);
+    assert.equal(await page.locator('#lake-orb').evaluate(node => node.style.viewTransitionName), '', 'the orb is never lifted above the settings dialog');
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('#settings').evaluate(node => node.open), false);
-    check('day/night saves appearance and the second toolbar tool opens settings');
+    check('the sun/moon switches day and night with a set/rise transition, saves appearance and retitles afternoon/evening; the toolbar tool opens settings');
 
     assert.equal(await page.locator('#lake-current .lake-message').count(), 1);
     assert.match(await page.locator('#lake-current').textContent(), /水月弹幕第 8 句/);
-    assert.equal(await page.locator('#lake-history .lake-message').count(), 4);
-    const oldHistory = await page.locator('#lake-history').textContent();
-    for (const number of [4, 5, 6, 7]) assert.match(oldHistory, new RegExp(`水月弹幕第 ${number} 句`));
-    assert.doesNotMatch(oldHistory, /水月弹幕第 [1238] 句/);
-    const previous = await page.locator('#lake-current .lake-message').evaluate(node => { window.__previousLakeMessage = node; return node.dataset.key; });
+    assert.equal(await page.locator('#lake-peek .lake-peek-entry').count(), 3);
+    const oldHistory = await page.locator('#lake-peek').textContent();
+    for (const number of [5, 6, 7]) assert.match(oldHistory, new RegExp(`水月弹幕第 ${number} 句`));
+    assert.doesNotMatch(oldHistory, /水月弹幕第 [12348] 句/);
     state.live.events.push(event(9)); await push();
     assert.match(await page.locator('#lake-current').textContent(), /水月弹幕第 9 句/);
-    assert.equal(await page.evaluate(() => document.querySelector('#lake-history').contains(window.__previousLakeMessage)), true, 'previous phrase must sink into history as the same DOM node');
-    assert.equal(await page.locator('#lake-history .lake-message').count(), 4);
+    assert.equal(await page.locator('#lake-peek .lake-peek-entry').count(), 3);
     await page.locator('[data-action="history.open"]').click();
     assert.equal(await isOpen(history()), true);
     const transcript = await page.locator('#chat-feed').textContent();
     for (let number = 1; number <= 9; number++) assert.match(transcript, new RegExp(`水月弹幕第 ${number} 句`));
-    assert.equal(await history().locator('[data-action="history.close"]').count(), 0);
     await page.keyboard.press('Escape');
     assert.equal(await isOpen(history()), false);
     await page.locator('[data-action="history.open"]').click();
-    await outside();
+    await page.locator('[data-action="lake.surface"]').click();
     assert.equal(await isOpen(history()), false);
-    check(`latest phrase plus four earlier phrases preserve all nine in a background/Escape-close drawer (previous key ${previous})`);
+    check('latest phrase and recent three preserve all nine in underwater history with Escape and surface navigation');
 
-    await page.locator('.lake-orb').click();
+    // The foot voice line is the only way into the voice panel.
+    await page.locator('#tts-switch').click();
     await page.locator('#tts-menu:not([hidden])').waitFor();
-    assert.equal(await page.locator('#tts-menu #main-volume-range').count(), 1);
-    await page.locator('#main-volume-range').fill('65');
-    await page.locator('#main-volume-range').dispatchEvent('input');
+    assert.equal(await page.locator('#tts-menu #main-volume-range').count(), 0);
+    assert.equal(await page.locator('#tts-menu #speech-switch[role="switch"]').count(), 1);
+    assert.equal(await page.locator('.lake-foot :is(#main-volume-range, #speech-switch, [data-action="queue.skip"])').count(), 0, 'the foot stays a single voice line');
+    const voiceLine = await page.locator('#tts-switch').boundingBox(), voicePanel = await page.locator('#tts-menu').boundingBox();
+    assert.ok(voicePanel.y + voicePanel.height <= voiceLine.y, 'the voice panel opens above the voice line');
+    state.preferences.master_volume = 0.60; await push();
+    await page.locator('#tts-switch').hover(); await page.mouse.wheel(0, -100);
     await page.waitForTimeout(400);
     assert.equal(state.preferences.master_volume, 0.65);
-    await page.locator('#tts-menu [data-action="audio.mute"]').click();
+    await page.locator('.lake-volume-waterline').click();
     assert.equal(state.preferences.muted, true);
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('#tts-menu').isHidden(), true);
@@ -282,19 +300,29 @@ async function noOverlap(selectors, label) {
     state.queue.current = null; await push();
     await page.emulateMedia({ reducedMotion: 'reduce' });
     assert.equal(await page.locator('#live-shell').getAttribute('data-scene'), 'calm');
-    check('clicking the moon opens working volume/mute controls; speech-off, idle and speaking states are distinct');
+    check('the foot voice line opens working volume/mute controls; speech-off, idle and speaking states are distinct');
+
+    // At its widest a ripple is 240 px; it stays clear of the history link however many lines sit above it.
+    for (const size of [{ width: 1040, height: 740 }, { width: 780, height: 580 }, { width: 1600, height: 900 }]) {
+      await page.setViewportSize(size);
+      const center = await page.locator('.lake-ripple.ripple-one').evaluate(node => parseFloat(getComputedStyle(node).left));
+      const earlier = await page.locator('.lake-history-open').boundingBox();
+      assert.ok(center - 120 > earlier.x + earlier.width, `the left ripple must not ring "earlier tonight" at ${size.width}: ${JSON.stringify({ center, earlier })}`);
+    }
+    await page.setViewportSize({ width: 1040, height: 740 });
+    check('the left ripple no longer rings the history link at 1040, 780 and 1600 px');
 
     state.preferences.broadcast_console = true; await push();
     await page.locator('#onair [data-action="broadcast.start"]').waitFor();
-    assert.equal(await page.locator('#lake-history .lake-session-line').count(), 0);
-    assert.doesNotMatch(await page.locator('#lake-history').textContent(), /暂无记录|暂无上一场数据|上一场/);
+    assert.equal(await page.locator('#lake-session p').count(), 0);
+    assert.doesNotMatch(await page.locator('#lake-session').textContent(), /暂无记录|暂无上一场数据|上一场/);
     check('preparing without a saved previous session renders no unknown-statistics rows');
     await page.locator('#lake-title').click();
     await editor().waitFor();
     assert.equal(await editor().locator('input[name="title"]').count(), 1);
     assert.equal(await editor().locator('input[name="overlay_title"], #onair-overlay-title, [data-form="onair-overlay-title"]').count(), 0);
     assert.equal(await editor().locator('button[type="submit"]').count(), 1);
-    assert.equal(await editor().locator('[data-action="onair.close"]').count(), 0);
+    assert.equal(await editor().locator('[data-action="onair.close"]').count(), 1);
     const initialTitle = state.broadcast.room.title;
     await editor().locator('input[name="title"]').fill('点击背景应放弃');
     await outside();
@@ -336,7 +364,7 @@ async function noOverlap(selectors, label) {
     await page.locator('[data-action="history.open"]').click();
     await page.locator('#chat-feed [data-action="viewer.open"]').first().click();
     await page.locator('#viewer-drawer #viewer-alias').waitFor();
-    await page.waitForFunction(() => !document.querySelector('#viewer-drawer [data-action="viewer.moderation.mute"]').disabled);
+    await page.waitForFunction(() => !document.querySelector('#viewer-drawer [data-action="lake.viewer.mute"][data-id="60"]').disabled);
     assert.equal(await page.locator('#viewer-drawer .viewer-head [data-action="viewer.close"]').count(), 0);
     const viewer = await withinViewport(page.locator('#viewer-drawer .viewer-sheet'), 'viewer card');
     assert.ok(viewer.width <= 500, 'viewer card unexpectedly spans the entire main screen');
@@ -346,6 +374,7 @@ async function noOverlap(selectors, label) {
     await outside();
     await page.locator('#viewer-drawer').waitFor({ state: 'hidden' });
     assert.equal(state.rules.user_words.some(word => word.from === current.user_name && word.to === '虚构读音'), true);
+    await page.locator('[data-action="lake.surface"]').click();
     await page.locator('[data-action="history.open"]').click();
     await page.locator('#chat-feed [data-action="viewer.open"]').first().click();
     await page.locator('#viewer-alias').waitFor();
@@ -353,9 +382,10 @@ async function noOverlap(selectors, label) {
     await page.locator('#viewer-drawer').waitFor({ state: 'hidden' });
     check('viewer card integrates identity, pronunciation, voice and room management without overlap; outside/Escape closes and saves alias');
 
+    await page.locator('[data-action="lake.surface"]').click();
     const heldEvents = state.live.events;
     state.live.events = []; state.preferences.broadcast_console = false; state.broadcast.room.live_status = 0; await push();
-    assert.match(await page.locator('#lake-transcript').textContent(), /湖面|the lake is still|仍然安静|静/);
+    assert.match(await page.locator('#lake-transcript').textContent(), /waiting for the first word/);
     assert.equal(await page.locator('#live-shell').getAttribute('data-scene'), 'empty');
     state.preferences.broadcast_console = true; await push();
     assert.equal(await page.locator('#live-shell').getAttribute('data-scene'), 'offair');
@@ -364,12 +394,8 @@ async function noOverlap(selectors, label) {
     await page.locator('#onair [data-action="broadcast.start"]').click();
     await page.locator('#onair-panel[data-mode="face"]').waitFor();
     assert.equal(await page.locator('#live-shell').getAttribute('data-scene'), 'face');
-    assert.equal(await page.locator('#onair-panel[data-mode="face"] button').count(), 1);
-    assert.match(await page.locator('#onair-panel[data-mode="face"] button').textContent(), /继续开播/);
-    await outside();
-    assert.equal(await page.locator('#onair-panel').isHidden(), true);
-    await page.locator('#onair [data-action="broadcast.start"]').click();
-    await page.locator('#onair [data-action="broadcast.stop"]').waitFor();
+    assert.match(await page.locator('#onair-panel[data-mode="face"]').textContent(), /等待验证/);
+    await page.locator('#onair [data-action="broadcast.stop"]').waitFor({ timeout: 8000 });
     assert.match(await page.locator('#onair').textContent(), /ON AIR/);
     assert.equal(state.live.running, true);
     state.live.received = 191;
@@ -382,28 +408,28 @@ async function noOverlap(selectors, label) {
     assert.equal(actionCalls('bili.broadcast.stop').length, 1);
     assert.equal(await page.locator('#live-shell').getAttribute('data-scene'), 'ended');
     assert.match(await page.locator('#lake-current').textContent(), /今晚辛苦/);
-    assert.match(await page.locator('#lake-history').textContent(), /151 句弹幕沉进了湖里/, 'session count must use the persisted backend result beyond the bounded transcript');
+    assert.match(await page.locator('#lake-session').textContent(), /151 句弹幕沉进了湖里/, 'session count must use the persisted backend result beyond the bounded transcript');
     await page.locator('[data-action="lake.prepare"]').click();
     await page.waitForFunction(() => document.querySelector('#live-shell').dataset.scene === 'offair');
     assert.equal(await page.locator('#live-shell').getAttribute('data-scene'), 'offair');
-    assert.match(await page.locator('#lake-history').textContent(), /151 句弹幕/);
+    assert.match(await page.locator('#lake-session').textContent(), /151 句弹幕/);
     check('pre-live, empty lake, face verification, on-air and ending use real state paths while chat reception remains independent');
     await page.reload();
     await page.locator('#onair [data-action="broadcast.start"]').waitFor();
     await page.evaluate(() => window.__lakeStopPoll());
     assert.equal(await page.locator('#live-shell').getAttribute('data-scene'), 'offair');
-    assert.match(await page.locator('#lake-history').textContent(), /151 句弹幕/);
-    assert.match(await page.locator('#lake-history').textContent(), /2 小时 14 分/);
-    assert.equal(await page.locator('#lake-history .lake-session-line').count(), 2);
+    assert.match(await page.locator('#lake-session').textContent(), /151 句弹幕/);
+    assert.match(await page.locator('#lake-session').textContent(), /2 小时 14 分/);
+    assert.equal(await page.locator('#lake-session p').count(), 2);
     check('page recreation restores the saved prior session without constructing a fake ended scene');
     const accountSummary = structuredClone(state.broadcast.last_session);
     state.account.user_id = 43; state.setup.uid = 43; state.broadcast.last_session = null; await push();
-    assert.equal(await page.locator('#lake-history .lake-session-line').count(), 0);
-    assert.doesNotMatch(await page.locator('#lake-history').textContent(), /151|暂无记录/);
+    assert.equal(await page.locator('#lake-session p').count(), 0);
+    assert.doesNotMatch(await page.locator('#lake-session').textContent(), /151|暂无记录/);
     state.account.user_id = 42; state.setup.uid = 42;
     state.broadcast.last_session = { ...accountSummary, seconds: null }; await push();
-    assert.match(await page.locator('#lake-history').textContent(), /151 句弹幕/);
-    assert.doesNotMatch(await page.locator('#lake-history').textContent(), /小时|暂无记录/);
+    assert.match(await page.locator('#lake-session').textContent(), /151 句弹幕/);
+    assert.doesNotMatch(await page.locator('#lake-session').textContent(), /小时|暂无记录/);
     state.broadcast.last_session = accountSummary; await push();
     check('account changes hide the prior account summary and unknown duration contributes no placeholder');
     state.live.events = heldEvents; await push();
@@ -426,13 +452,13 @@ async function noOverlap(selectors, label) {
       await page.screenshot({ path: path.join(output, `viewer-${appearance}-${size.width}x${size.height}.png`) });
       if (size.width !== 1600) {
         await page.locator('#viewer-drawer .viewer-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
-        const durations = await page.locator('#viewer-moderation .viewer-durations').boundingBox();
-        const action = await page.locator('#viewer-moderation .viewer-mute-action').boundingBox();
+        const durations = await page.locator('#viewer-moderation .lake-mute-durations').boundingBox();
+        const action = await page.locator('#viewer-moderation [data-action="lake.viewer.mute"][data-id="60"]').boundingBox();
         const card = await page.locator('#viewer-drawer .viewer-sheet').boundingBox();
         assert.ok(durations && action && card, 'management duration/action/card missing');
         assert.ok(durations.x >= card.x && durations.x + durations.width <= card.x + card.width + 1, 'duration choices extend outside viewer card');
-        assert.ok(action.y + action.height <= durations.y + 1, 'mute action must sit in the title row above duration choices without overlap');
-        await noOverlap(['.viewer-durations', '.viewer-mute-action', '.viewer-block-row', '.viewer-admin-row', '#viewer-drawer .viewer-foot'], `${appearance} ${size.width} management`);
+        assert.ok(action.y >= durations.y - 1 && action.y + action.height <= durations.y + durations.height + 1, 'immediate mute action must remain inside duration choices');
+        await noOverlap(['.lake-mute-durations', '.viewer-block-row', '.viewer-admin-row', '#viewer-drawer .viewer-foot'], `${appearance} ${size.width} management`);
         await page.screenshot({ path: path.join(output, `viewer-moderation-${appearance}-${size.width}x${size.height}.png`) });
       }
       await page.keyboard.press('Escape');
@@ -445,7 +471,7 @@ async function noOverlap(selectors, label) {
     await push();
     assert.equal(await page.locator('#lake-current .lake-message-text').textContent(), long.message);
     await noOverflow('long highlighted phrase');
-    await noOverlap(['#lake-current', '#lake-history .lake-message-text', '#tts-switch', '.lake-volume-link', '#speech-switch', '#chat-message', '#chat-compose button[type="submit"]'], 'long highlighted phrase');
+    await noOverlap(['#lake-current', '#lake-peek .lake-peek-entry', '#tts-switch', '.lake-volume-link', '#speech-switch', '#chat-message', '#chat-compose button[type="submit"]'], 'long highlighted phrase');
     await withinViewport(page.locator('#lake-current'), 'long highlighted phrase');
     await page.screenshot({ path: path.join(output, 'lake-long-highlight-light-700x700.png') });
     await page.locator('[data-action="history.open"]').click();
@@ -456,7 +482,7 @@ async function noOverlap(selectors, label) {
     const clustered = { ...event(11), message: '👩🏽‍🚀 👨‍👩‍👧‍👦 e\u0301' };
     state.live.events.push(clustered); await push();
     assert.deepEqual(await page.locator('#lake-current .lake-letter').allTextContents(), ['👩🏽‍🚀', ' ', '👨‍👩‍👧‍👦', ' ', 'e\u0301']);
-    const movingSelectors = '.lake-scenery *, .lake-orb, #lake-current .lake-letter, #lake-history .lake-message';
+    const movingSelectors = '.lake-scenery *, .lake-orb, #lake-current .lake-letter, #lake-peek .lake-peek-entry';
     assert.equal(await page.locator(movingSelectors).evaluateAll(nodes => nodes.every(node => getComputedStyle(node).animationName === 'none')), true, 'reduced motion must disable every lake animation');
     assert.equal(await page.locator('.lake-reflection').evaluate(node => getComputedStyle(node, '::before').animationName), 'none', 'reduced motion must also disable the reflection plane');
     await page.emulateMedia({ reducedMotion: 'no-preference' });

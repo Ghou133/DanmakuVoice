@@ -158,7 +158,8 @@ let snapshotReads = 0;
     // production read guard as a focused backend-boundary regression.
     const refresh = () => page.evaluate(() => window.__moderationRead());
     const host = page.locator('#viewer-drawer #viewer-moderation');
-    const control = action => host.locator(`[data-action="viewer.moderation.${action}"]`);
+    let muteMinutes = 60;
+    const control = action => action === 'mute' ? host.locator(`[data-action="lake.viewer.mute"][data-id="${muteMinutes}"]`) : host.locator(`[data-action="viewer.moderation.${action}"]`);
     const close = async () => {
       if (await page.locator('#viewer-drawer').isVisible()) {
         await page.keyboard.press('Escape');
@@ -176,18 +177,18 @@ let snapshotReads = 0;
     };
     const ready = async () => {
       await page.waitForFunction(() => {
-        const mute = document.querySelector('#viewer-drawer [data-action="viewer.moderation.mute"]');
+        const mute = document.querySelector('#viewer-drawer [data-action="lake.viewer.mute"][data-id="60"]');
         return mute && !mute.disabled;
       });
     };
     const chooseHours = async (label, value) => {
-      await host.getByRole('radio', { name: label, exact: true }).check();
-      assert.equal(await host.locator('#viewer-mute-hours').inputValue(), String(value));
+      muteMinutes = value * 60;
+      const target = host.locator(`[data-action="lake.viewer.mute"][data-id="${muteMinutes}"]`);
+      assert.equal(await target.textContent(), label);
     };
     const assertDisabled = async (note, refreshDisabled = true) => {
-      assert.equal(await host.locator('button[data-action]:not([data-action="viewer.moderation.refresh"])').count(), 3);
+      assert.ok(await host.locator('button[data-action]:not([data-action="viewer.moderation.refresh"])').count() >= 3);
       assert.equal(await host.locator('button[data-action]:not([data-action="viewer.moderation.refresh"])').evaluateAll(nodes => nodes.every(node => node.disabled)), true);
-      assert.equal(await host.locator('#viewer-mute-hours').isDisabled(), true);
       assert.equal(await control('refresh').count(), 0);
       assert.match(await host.locator('[role="status"]').textContent(), note);
     };
@@ -197,7 +198,7 @@ let snapshotReads = 0;
       await page.locator('#settings [data-action="settings.tab"][data-id="room"]').click();
       const content = page.locator('#settings-content');
       await content.locator('[data-action="bili.begin"]').waitFor();
-      assert.equal(await content.locator('[data-action="bili.begin"]').textContent(), loggedIn ? '重新扫码' : '扫码登录');
+      assert.equal((await content.locator('[data-action="bili.begin"]').textContent()).trim(), loggedIn ? '换一个账号' : '扫码登录');
       assert.equal(await content.locator('[data-action="bili.logout"]').count(), loggedIn ? 1 : 0);
       assert.equal(await content.locator('[data-action="onboarding.anonymous"], [data-action="room.anonymous"], [data-action="setup.uid"], [data-form="anonymous"], [data-form="room-uid"], input[name="uid"], #anonymous-uid').count(), 0);
       assert.doesNotMatch(await content.textContent(), /匿名|UID/);
@@ -242,39 +243,34 @@ let snapshotReads = 0;
     assert.equal(await control('blacklist').isEnabled(), true);
     assert.equal(await control('appoint').isEnabled(), true);
     assert.equal(mutations().length, 0);
-    assert.match(await host.textContent(), /当前直播间.*999/s);
+    assert.match(await host.textContent(), /直播间管理/);
     assert.equal(await page.locator('#viewer-drawer script').count(), 0);
     check('clicking the avatar opens mute, live blacklist and room-admin operations and reads only that public UID');
 
-    assert.deepEqual(await host.locator('#viewer-mute-hours option').evaluateAll(nodes => nodes.map(node => [node.value, node.label])), [['0', '本场'], ['1', '1 小时'], ['24', '24 小时'], ['168', '7 天'], ['-1', '永久']]);
-    check('mute choices include this broadcast, one hour, one day, one week and permanent');
+    assert.deepEqual(await host.locator('[data-action="lake.viewer.mute"]').evaluateAll(nodes => nodes.map(node => [node.dataset.id, node.textContent, node.disabled])), [['10', '10 分钟', true], ['60', '1 小时', false], ['1440', '1 天', false]]);
+    check('duration buttons apply immediately; unsupported ten-minute platform duration stays disabled');
 
     await page.locator('#viewer-drawer #viewer-alias').fill('未保存的虚构读音');
-    await chooseHours('7 天', 168);
+    await chooseHours('1 天', 24);
     state.moderation = moderation(501, { busy: true });
     await push();
-    assert.equal(await host.locator('#viewer-mute-hours').inputValue(), '168');
-    assert.equal(await host.locator('input[name="viewer-mute-duration"]:checked').inputValue(), '168');
     state.moderation = moderation(501);
     await push();
     assert.equal(await page.locator('#viewer-drawer #viewer-alias').inputValue(), '未保存的虚构读音');
-    assert.equal(await host.locator('#viewer-mute-hours').inputValue(), '168');
     await until(() => state.rules.user_words.some(row => row.from === viewerA.user_name && row.to === '未保存的虚构读音'));
-    check('intermediate busy and polling snapshots preserve alias input and the selected mute duration');
+    check('intermediate busy and polling snapshots preserve alias input without dispatching a mute choice');
 
-    await chooseHours('本场', 0);
+    await chooseHours('1 小时', 1);
     await control('mute').click();
     await control('unmute').waitFor();
-    assert.deepEqual(mutations().at(-1), { action: 'bili.moderation.mute', payload: { user_id: '501', room_id: 999, confirmed: true, hours: 0 } });
-    assert.equal(await host.locator('#viewer-mute-hours').isDisabled(), true);
+    assert.deepEqual(mutations().at(-1), { action: 'bili.moderation.mute', payload: { user_id: '501', room_id: 999, confirmed: true, hours: 1 } });
     const readsBeforeUndo = refreshes().length;
     await page.locator('#toast [data-action="toast.undo"]').waitFor();
-    assert.match(await page.locator('#toast').textContent(), /已禁言 .* · 本场.*撤销/s);
+    assert.match(await page.locator('#toast').textContent(), /已禁言 .* · 1 小时.*撤销/s);
     await page.locator('#toast [data-action="toast.undo"]').click();
     await control('mute').waitFor();
     assert.equal(refreshes().length, readsBeforeUndo + 1, 'undo refreshes real permission before writing');
     assert.deepEqual(mutations().at(-1), { action: 'bili.moderation.unmute', payload: { user_id: '501', room_id: 999, confirmed: true } });
-    assert.equal(await host.locator('#viewer-mute-hours').inputValue(), '0');
     check('source mute toast names the viewer and duration; its real undo refreshes permission and unmutes the exact viewed room/user');
 
     await control('mute').click();
@@ -295,13 +291,13 @@ let snapshotReads = 0;
     await ready();
     check('source mute undo cannot read or mutate after the account changes');
 
-    await chooseHours('永久', -1);
+    await chooseHours('1 天', 24);
     await control('mute').click();
     await control('unmute').waitFor();
-    assert.equal(mutations().at(-1).payload.hours, -1);
+    assert.equal(mutations().at(-1).payload.hours, 24);
     await control('unmute').click();
     await control('mute').waitFor();
-    check('permanent mute sends minus one and can be removed');
+    check('one-day mute sends 24 hours and can be removed');
 
     const writesBeforeBlacklistArm = mutations().length;
     await control('blacklist').click();
@@ -324,7 +320,7 @@ let snapshotReads = 0;
     assert.equal(mutations().length, writesBeforeRefresh);
     check('the retained production permission refresh only reads status without replaying a mutation');
 
-    await chooseHours('24 小时', 24);
+    await chooseHours('1 天', 24);
     await page.locator('#viewer-drawer #viewer-alias').fill('失败期间保留的读音');
     failMutation = 'bili.moderation.mute';
     const failedWritesBefore = mutations().length;
@@ -336,10 +332,9 @@ let snapshotReads = 0;
     await until(() => snapshotReads >= snapshotsBeforeFailure + 2);
     assert.equal(mutations().length, failedWritesBefore + 1);
     assert.equal(await page.locator('#viewer-drawer #viewer-alias').inputValue(), '失败期间保留的读音');
-    assert.equal(await host.locator('#viewer-mute-hours').inputValue(), '24');
     assert.equal(await control('mute').isEnabled(), true);
     assert.equal(state.moderation.muted, false);
-    check('a failed request keeps the alias and duration, and neither polling nor snapshots retries it');
+    check('a failed request keeps the alias, and neither polling nor snapshots retries it');
     failMutation = '';
     await control('mute').click();
     await control('unmute').waitFor();
@@ -551,12 +546,10 @@ let snapshotReads = 0;
     await push();
     await open(viewerA);
     await ready();
-    assert.match(await host.textContent(), /Current room.*Block in room/s);
-    assert.match(await control('mute').textContent(), /^Mute /);
+    assert.match(await host.textContent(), /Room moderation.*Block in room/s);
+    assert.match(await control('mute').textContent(), /^(1 hour|1 day)$/);
     assert.equal(await control('refresh').count(), 0);
     assert.equal(await control('appoint').getAttribute('aria-label'), 'Appoint moderator');
-    assert.equal(await host.locator('#viewer-mute-hours').getAttribute('aria-label'), 'Mute duration');
-    assert.deepEqual(await host.locator('#viewer-mute-hours option').evaluateAll(nodes => nodes.map(node => node.label)), ['This stream', '1 hour', '24 hours', '7 days', 'Permanent']);
     assert.equal(await page.locator('#viewer-drawer .viewer-name').textContent(), viewerA.user_name);
     await page.locator('#toast').waitFor({ state: 'hidden' });
     await page.screenshot({ path: path.join(output, 'moderation-en-light.png') });

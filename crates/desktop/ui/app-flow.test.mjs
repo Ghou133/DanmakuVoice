@@ -10,7 +10,7 @@ import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, header
 // overrides replace harness stubs before app.js runs (for example the real autosave queue).
 function appContext(overrides = {}) {
   setLanguage('zh-CN');
-  const surface = { listeners: {}, classList: { add() {}, remove() {}, toggle() {} }, addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }, querySelector() { return null; }, querySelectorAll() { return []; } };
+  const surface = { listeners: {}, dataset: {}, show() { this.open = true; }, classList: { add() {}, remove() {}, toggle() {} }, addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }, querySelector() { return null; }, querySelectorAll() { return []; } };
   const document = { querySelector(selector) { return selector?.startsWith('[data-brand') ? null : surface; }, addEventListener() {}, hasFocus() { return true; }, documentElement: { dataset: {} } };
   const context = vm.createContext({
     document,
@@ -53,7 +53,7 @@ function appContext(overrides = {}) {
   vm.runInContext(source, context, { filename: 'app.js' });
   vm.runInContext(`snapshot = {
     connections: [{ id: 'dots-connection', name: 'dots', settings: { provider: 'dots' } }],
-    presets: [], rules: { default_preset_id: null }
+    presets: [], assets: [], bindings: [], rules: { default_preset_id: null }
   }; editor = { type: 'preset', id: '', connectionId: 'dots-connection', makePreferred: true }; referenceProfiles = [];`, context);
   return context;
 }
@@ -328,34 +328,34 @@ test('multiline templates preserve line breaks and escape user text', () => {
   context.multilineTemplate = '第一行\n第二行<&';
   vm.runInContext('snapshot.rules.templates.danmaku = multilineTemplate', context);
   const html = vm.runInContext('renderRulesSettings()', context);
-  assert.match(html, /<textarea[^>]+name="template_danmaku"[^>]*>第一行\n第二行&lt;&amp;<\/textarea>/);
-  assert.match(html, /<textarea[^>]+name="message"/);
+  assert.match(html, /data-lake-template="danmaku"[^>]*>第一行\n第二行&lt;&amp;<\/div>/);
+  assert.match(html, /name="template_danmaku" value="第一行\n第二行&lt;&amp;"/);
+  assert.doesNotMatch(html, /data-form="preview"/);
 });
 
-test('sound settings put service choice and audition voice first with compact selectable services', () => {
+test('voice drawer has default audition followed by one flat editable list', () => {
   const context = appContext();
   vm.runInContext("snapshot.presets = [{ id: 'dots-voice', name: '木兰', connection_id: 'dots-connection', provider: 'dots', voice_id: 'role', speed: 1, volume: 1 }]; snapshot.rules.default_preset_id = 'dots-voice'; snapshot.bindings = []; snapshot.preferences = { tts_enabled: true }; editor = null;", context);
   const html = vm.runInContext('renderVoicesSettings()', context);
-  assert.ok(html.indexOf('data-form="tts-toggle"') < html.indexOf('data-form="voice-audition"'));
-  assert.ok(html.indexOf('<section class="s-hero voice-audition"') < html.indexOf('service-grid"'));
-  assert.ok(html.indexOf('service-grid"') < html.indexOf('data-form="voice-audition"'));
-  assert.ok(html.indexOf('name="preset_id"') < html.indexOf('name="text" aria-label="试听文字"'));
-  assert.ok(html.indexOf('data-form="voice-audition"') < html.indexOf('>音色管理<'));
-  assert.ok(html.indexOf('>音色管理<') < html.indexOf('>观众专属声音<'));
-  assert.ok(html.indexOf('>观众专属声音<') < html.indexOf('>服务连接<'));
-  assert.match(html, /class="s-tile-wrap preferred"/);
-  assert.match(html, /class="service-card-select s-tile" data-action="service\.prefer"[^>]+aria-pressed="true"/);
+  assert.ok(html.indexOf('data-form="voice-audition"') < html.indexOf('id="voice-management"'));
+  assert.match(html, /data-default-voice-name>木兰<\/h2>/);
   assert.match(html, /data-form="voice-audition" data-provider="dots"/);
-  assert.match(html, /role="radiogroup" aria-label="直播首选音色"/);
-  assert.match(html, /name="preset_id" value="dots-voice" checked>/);
-  assert.doesNotMatch(html, /<select name="provider"/);
-  assert.match(html, /data-action="service\.configure"/);
-  assert.match(html, /data-action="binding\.new"/);
-  assert.doesNotMatch(html, /data-action="preset\.default"/);
-  assert.doesNotMatch(html, /<details[^>]*><summary>为观众指定声音/);
-  const rules = vm.runInContext("snapshot.rules.events = { danmaku_on: true, gift_on: true, free_gift_on: false, super_chat_on: true, guard_on: true, gift_threshold_yuan: 0, super_chat_threshold_yuan: 0 }; snapshot.rules.templates = { danmaku: '{message}', gift: '礼物', super_chat: '醒目留言', guard: '大航海' }; snapshot.rules.user_words = []; snapshot.rules.message_words = []; renderRulesSettings()", context);
-  assert.match(rules, /<summary>预览规则<\/summary>/);
-  assert.doesNotMatch(rules, /value="audition"|<button[^>]*>实际试听<\/button>/);
+  assert.match(html, /type="hidden" name="preset_id" value="dots-voice"/);
+  assert.match(html, /data-action="voice\.add"/);
+  assert.match(html, /data-action="voice\.edit" data-id="dots-voice"/);
+  assert.match(html, /data-action="voice\.preview" data-id="dots-voice"/);
+  assert.doesNotMatch(html, /tts-toggle|service-grid|service\.prefer|binding\.new|<select name="provider"/);
+  vm.runInContext("lakeVoiceEditId = 'dots-voice'", context);
+  const edit = vm.runInContext('renderVoicesSettings()', context);
+  assert.match(edit, /data-form="lake-voice-edit"/);
+  // The default voice says so instead of offering a disabled button.
+  assert.match(edit, /<span class="voice-edit-default">这是默认声音/);
+  assert.match(edit, /data-action="voice\.default" data-id="dots-voice" hidden/);
+  assert.match(edit, /data-action="voice\.remove"/);
+  // A local voice shows its reference recording first; speed and volume are waterlines, not number fields.
+  assert.match(edit, /data-action="voice\.reference\.pick" data-id="dots-voice"/);
+  assert.ok(edit.indexOf('voice.reference.pick') < edit.indexOf('name="speed"'));
+  assert.doesNotMatch(edit, /type="number"/);
 });
 
 test('GPT-SoVITS names omit the prefix in both save paths and existing voice displays', async () => {
@@ -371,7 +371,7 @@ test('GPT-SoVITS names omit the prefix in both save paths and existing voice dis
     snapshot.rules.default_preset_id = 'old'; editor = null; voiceBrowse = 'gpt_sovits';`, context);
   context.testForm.dataset.id = 'old';
   assert.equal(vm.runInContext('collectAutosave(testForm).payload.preset.name', context), '流萤');
-  assert.match(vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[0])', context), /value="old" checked><span>流萤<\/span>/);
+  assert.match(vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[0])', context), /data-default-voice-name>流萤<\/h2>/);
   assert.doesNotMatch(vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[0])', context), /GPT-SoVITS · 流萤/);
   const panel = context.document.querySelector('#tts-menu');
   vm.runInContext('renderVoicePanel()', context);
@@ -411,7 +411,7 @@ test('service card choice saves its first voice as the live default and keeps au
   assert.equal(vm.runInContext('voiceAuditionDraft.text', context), '比较音色');
   const html = vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[1])', context);
   assert.match(html, /data-provider="fish_audio"/);
-  assert.match(html, /name="preset_id" value="fish-voice" checked>/);
+  assert.match(html, /name="preset_id" value="fish-voice">/);
   assert.match(html, />比较音色<\/textarea>/);
 });
 
@@ -453,7 +453,7 @@ test('unconnected Doubao selection opens QR instead of replacing the live voice'
   context.document.querySelector = selector => selector === '#tts-menu' ? menu : { setAttribute() {} };
   await vm.runInContext('handleAction', context)('tts.open', '', { getBoundingClientRect: () => ({ left: 10, bottom: 10 }), setAttribute() {} });
   assert.match(menu.innerHTML, /data-action="voice\.pick" data-id="doubao-voice"/);
-  assert.match(menu.innerHTML, /data-action="voice\.pick" data-id="dots-voice"/);
+  assert.match(menu.innerHTML, /data-action="lake\.voice\.wake" data-id="dots-voice"/);
 });
 
 test('an expired Bilibili session opens QR instead of repeating the failed live connection', async () => {
@@ -792,28 +792,39 @@ test('a failed volume save does not block later mute clicks', async () => {
   assert.deepEqual(calls.map(preferences => preferences.muted), [true]);
 });
 
-test('muted volume control has a different icon and accessible toggle state', () => {
+test('muted waterline shows zero and retains the saved gain with accessible slider values', () => {
   const context = appContext();
-  const slider = {value: ''};
   const output = {textContent: ''};
-  const control = {dataset: {}, attrs: {}, setAttribute(name, value) {this.attrs[name] = value;}};
-  context.document.querySelector = selector => selector === '#main-volume-range' ? slider : selector === '#main-volume-value' ? output : control;
+  const host = { muted: false, classList: { toggle(name, value) { host[name] = value; } } };
+  const control = {dataset: {}, attrs: {}, style: { setProperty(name, value) { control[name] = value; } }, setAttribute(name, value) {this.attrs[name] = value;}};
+  context.document.querySelector = selector => selector === '.lake-voice-control' ? host : selector === '#main-volume-value' ? output : control;
   vm.runInContext('snapshot.preferences = {master_volume: 0.65, muted: false}; updateVolumeControls();', context);
-  const unmutedIcon = control.innerHTML;
-  assert.equal(control.attrs['aria-label'], '静音');
+  assert.equal(control.attrs['aria-label'], '播报音量');
+  assert.equal(control.attrs['aria-valuenow'], '65');
+  assert.equal(control.attrs['aria-valuetext'], '65%');
+  assert.equal(control.attrs['aria-valuemax'], '100');
+  assert.equal(control['--volume'], '65%');
   assert.equal(output.textContent, '65');
   vm.runInContext('snapshot.preferences.muted = true; updateVolumeControls();', context);
-  assert.notEqual(control.innerHTML, unmutedIcon);
-  assert.equal(control.attrs['aria-pressed'], 'true');
+  assert.equal(host.muted, true);
+  assert.equal(control.attrs['aria-valuenow'], '0');
+  assert.equal(control.attrs['aria-valuetext'], '0% · 已静音');
   assert.equal(control.title, '取消静音');
   // Muting shows zero while the saved level is kept for unmuting.
   assert.equal(output.textContent, '0');
-  assert.equal(slider.value, '0');
+  assert.equal(control['--volume'], '0%');
+  assert.equal(vm.runInContext('snapshot.preferences.master_volume', context), .65);
   vm.runInContext('snapshot.preferences.master_volume = 0; snapshot.preferences.muted = false; updateVolumeControls();', context);
-  assert.equal(control.attrs['aria-pressed'], 'true');
+  assert.equal(control.attrs['aria-valuetext'], '0% · 已静音');
   vm.runInContext('volumeDraft = 80; updateVolumeControls();', context);
-  assert.equal(control.attrs['aria-pressed'], 'false');
-  assert.equal(control.innerHTML, unmutedIcon);
+  assert.equal(control.attrs['aria-valuenow'], '80');
+  assert.equal(control.attrs['aria-valuetext'], '80%');
+  assert.equal(control['--volume'], '80%');
+  assert.equal(host.muted, false);
+  vm.runInContext('volumeDraft = null; snapshot.preferences.master_volume = 2; updateVolumeControls();', context);
+  assert.equal(control.attrs['aria-valuenow'], '200');
+  assert.equal(control.attrs['aria-valuemax'], '200', 'a legacy amplified level remains a valid ARIA value until explicitly adjusted');
+  assert.equal(vm.runInContext('snapshot.preferences.master_volume', context), 2);
 });
 
 test('failed audition voice switch restores the saved default', async () => {
@@ -1071,9 +1082,10 @@ test('an old dots preset without a reference path only saves its preset fields',
 test('Fish account form uses read-only verification before storing the key', async () => {
   const context = appContext();
   vm.runInContext(`snapshot.local_services = {}; editor = { type: 'service', provider: 'fish_audio' }; renderSettings = () => {}; showToast = () => {};`, context);
-  const html = vm.runInContext('renderServiceEditor("fish_audio")', context);
+  const html = vm.runInContext('renderVoiceConnect("fish_audio", snapshot.connections?.[0])', context);
   assert.match(html, /fish\.open_keys/);
-  assert.match(html, /fish\.open_discovery/);
+  assert.doesNotMatch(html, /fish\.open_discovery/);
+  assert.match(html, /只存在这台电脑上，不会被导出/);
   assert.match(html, /data-form="service-fish"/);
   assert.doesNotMatch(html, /data-form="fish-settings"/);
   const calls = [];
@@ -1092,17 +1104,21 @@ test('an unconnected Fish service opens account setup before adding a voice', as
   context.mockCommand = () => { throw new Error('voice creation must not reach the backend'); };
   vm.runInContext('command = mockCommand', context);
   await vm.runInContext('handleAction', context)('preset.new', '', {});
-  assert.equal(vm.runInContext('editor.type', context), 'service');
+  assert.equal(vm.runInContext('editor.type', context), 'voice-add');
+  await vm.runInContext('handleAction', context)('voice.provider', 'fish_audio', {});
+  // Connecting happens in place on the Fish tab of the add page.
+  assert.equal(vm.runInContext('editor.type', context), 'voice-add');
   assert.equal(vm.runInContext('editor.provider', context), 'fish_audio');
-  assert.equal(vm.runInContext('editor.makePreferred', context), true);
+  assert.match(vm.runInContext('renderLakeVoiceAdd()', context), /data-form="service-fish"/);
+  assert.equal(vm.runInContext('snapshot.rules.default_preset_id', context), null);
 });
 
-test('Fish custom voice lookup precedes save and the free model is the default', async () => {
+test('Fish custom voice lookup precedes save without exposing generation tuning', async () => {
   const context = appContext();
   vm.runInContext(`snapshot.connections = [{ id: 'fish-1', name: 'Fish Audio', settings: { provider: 'fish_audio' }, has_credential: true }]; snapshot.fish_audio_settings = {}; snapshot.local_services = {}; editor = { type: 'preset', id: '', connectionId: 'fish-1', makePreferred: false }; renderSettings = () => {}; showToast = () => {};`, context);
-  const serviceHtml = vm.runInContext('renderServiceEditor("fish_audio")', context);
-  assert.match(serviceHtml, /value="s2\.1-pro-free" selected/);
-  assert.match(serviceHtml, /data-form="fish-settings"/);
+  const serviceHtml = vm.runInContext('renderVoiceConnect("fish_audio", snapshot.connections?.[0])', context);
+  assert.doesNotMatch(serviceHtml, /data-form="fish-settings"|name="model"/);
+  assert.match(serviceHtml, /data-form="service-fish"/);
   const voiceHtml = vm.runInContext('renderPresetEditor("")', context);
   assert.match(voiceHtml, /data-form="fish-voice"/);
   assert.match(voiceHtml, /fish\.voice\.lookup/);
@@ -1122,7 +1138,7 @@ test('Fish custom voice lookup precedes save and the free model is the default',
 test('Fish generation settings and targeted audition use their dedicated IPC', async () => {
   const context = appContext();
   vm.runInContext(`snapshot.connections = [{ id: 'fish-1', name: 'Fish Audio', settings: { provider: 'fish_audio' }, has_credential: true }]; snapshot.presets = [{ id: 'preset-fish', connection_id: 'fish-1', provider: 'fish_audio', voice_id: '${'a'.repeat(32)}', name: '测试音色', speed: 1, volume: 1 }]; snapshot.fish_audio_settings = { 'fish-1': { streaming: false } }; snapshot.local_services = {}; editor = { type: 'service', provider: 'fish_audio' }; renderSettings = () => {}; showToast = () => {}; confirmAction = async () => true;`, context);
-  const html = vm.runInContext('renderServiceEditor("fish_audio")', context);
+  const html = vm.runInContext('renderVoiceConnect("fish_audio", snapshot.connections?.[0])', context);
   assert.doesNotMatch(html, /name="streaming"|流式接收音频/);
   const calls = [];
   context.mockCommand = async (action, payload) => { calls.push({ action, payload }); return { result: null }; };
@@ -1145,7 +1161,7 @@ test('Fish generation settings and targeted audition use their dedicated IPC', a
 test('Fish accepts a manually pasted key without a clipboard watcher', async () => {
   const context = appContext();
   vm.runInContext(`snapshot.local_services = {}; editor = { type: 'service', provider: 'fish_audio' }; renderSettings = () => {};`, context);
-  const html = vm.runInContext('renderServiceEditor("fish_audio")', context);
+  const html = vm.runInContext('renderVoiceConnect("fish_audio", snapshot.connections?.[0])', context);
   assert.doesNotMatch(html, /剪贴板|检测复制|可能产生费用/);
   const calls = [];
   context.mockCommand = async (action, payload) => { calls.push({ action, payload }); return { result: null }; };
@@ -1161,8 +1177,8 @@ test('settings merge legacy categories, and 开播 and OBS 叠加层 into one OB
   const context = appContext();
   context.document.querySelector().focus = () => {};
   vm.runInContext(`settingsTab = 'voices'; editor = null; renderSettings = () => {}; allowLeaveSettings = async () => true;`, context);
-  assert.equal(vm.runInContext('tabs.map(([id]) => id).join()', context), 'room,voices,rules,assets,live,general,data');
-  for (const [legacy, page] of [['audio', 'general'], ['appearance', 'general'], ['about', 'data'], ['missing', 'voices'], ['overlay', 'live'], ['live', 'live'], ['broadcast', 'live']]) {
+  assert.equal(vm.runInContext('tabs.map(([id]) => id).join()', context), 'home,room,voices,overlay,readings,general,advanced');
+  for (const [legacy, page] of [['audio', 'general'], ['appearance', 'general'], ['about', 'general'], ['rules', 'advanced'], ['assets', 'advanced'], ['missing', 'home'], ['overlay', 'overlay'], ['live', 'overlay'], ['broadcast', 'overlay']]) {
     await vm.runInContext('handleAction', context)('settings.tab', legacy);
     assert.equal(vm.runInContext('settingsTab', context), page);
     if (legacy === 'overlay' || legacy === 'live') assert.equal(vm.runInContext('livePanel', context), 'overlay', 'the old overlay entry opens its panel and the page keeps it');
@@ -1325,7 +1341,7 @@ test('failed settings flush or language save leaves the current language intact'
   assert.equal(getLanguage(), 'zh-CN');
 });
 
-test('language rerenders both surfaces without restarting QR login or changing speech drafts', () => {
+test('language rerenders both surfaces without restarting QR login, translating only the untouched sample', () => {
   const context = appContext();
   const calls = [];
   context.languageRenderApp = () => calls.push('app');
@@ -1335,7 +1351,10 @@ test('language rerenders both surfaces without restarting QR login or changing s
   const next = vm.runInContext("({...snapshot, preferences:{language:'en'}})", context);
   vm.runInContext('acceptSnapshot', context)(next);
   assert.deepEqual(calls, ['app','settings']);
-  assert.equal(vm.runInContext('voiceAuditionDraft.text', context), '你好，欢迎来到直播间。');
+  assert.equal(vm.runInContext('voiceAuditionDraft.text', context), 'Hello, welcome to the stream.');
+  vm.runInContext(`voiceAuditionDraft.text = '我的自定义试听句'; voiceAuditionDraft.customText = true;`, context);
+  vm.runInContext('acceptSnapshot', context)(vm.runInContext("({...snapshot, preferences:{language:'zh-CN'}})", context));
+  assert.equal(vm.runInContext('voiceAuditionDraft.text', context), '我的自定义试听句');
 });
 
 test('snapshot polling leaves the shell title unchanged until the language changes', () => {
@@ -1390,11 +1409,13 @@ test('chat keeps updating during a long command and polls started before its rep
 
 test('leaving the main screen stops the lake clock', () => {
   const context = appContext();
+  context.lakeSceneMarkup = () => '';
+  context.document.querySelectorAll = () => [];
   const cleared = [];
   context.clearInterval = id => cleared.push(id);
   const surface = context.document.querySelector('#surface');
   surface.setAttribute = () => {};
-  context.document.querySelector = selector => selector.startsWith('#titlebar') || selector === '[data-titlebar-name]' ? null : surface;
+  context.document.querySelector = selector => selector.startsWith('#titlebar') || selector === '[data-titlebar-name]' || selector === '#lake-orb' ? null : surface;
   vm.runInContext("lakeClockTimer = 41; step = 'welcome'; renderApp();", context);
   assert.deepEqual(cleared, [41]);
   assert.equal(vm.runInContext('lakeClockTimer', context), null);
@@ -1407,9 +1428,10 @@ test('new messages entering the open history keep the entry being read in place'
     this.children = [...html.matchAll(/data-id="([^"]+)"/g)].map((match, index) => ({ dataset: { id: match[1] },
       getBoundingClientRect: () => ({ top: 100 + index * 40 - scroll.scrollTop, bottom: 140 + index * 40 - scroll.scrollTop }) }));
   } };
-  const nodes = new Map([['#chat-feed', feed], ['#chat-scroll', scroll], ['#lake-history-dialog', { open: true }]]);
+  const nodes = new Map([['#chat-feed', feed], ['#chat-scroll', scroll]]);
   const surface = context.document.querySelector('#surface');
   context.document.querySelector = selector => nodes.has(selector) ? nodes.get(selector) : surface;
+  vm.runInContext('lakeDeep = true;', context);
   const events = count => Array.from({ length: count }, (_, index) => ({ kind: 'danmaku', user_name: `观众${index}`, message: `第${index}句`, observed_at_ms: 1_700_000_000_000 + index }));
   const render = list => { context.list = list; vm.runInContext('renderLakeHistory(list, list.map((event, index) => `k${event.observed_at_ms}`))', context); };
   render(events(10));
@@ -1537,7 +1559,7 @@ test('a failing viewer alias save is shown but never traps the card or settings,
 
   vm.runInContext("viewerContext = { user_name: 'Bob', user_id: 8 }; errorText = ''; scheduleViewerAlias('鲍勃')", context);
   await vm.runInContext("handleAction('settings.open', '', null)", context);
-  assert.deepEqual(context.opened, ['voices'], 'settings still open');
+  assert.deepEqual(context.opened, ['home'], 'settings still open');
   assert.equal(vm.runInContext('viewerContext', context), null);
   assert.match(vm.runInContext('errorText', context), /rules save failed/);
 
@@ -1548,25 +1570,21 @@ test('a failing viewer alias save is shown but never traps the card or settings,
   assert.equal(vm.runInContext('viewerAliasDrafts.size', context), 0);
 });
 
-test('standalone emote filter defaults on, preserves disabled settings, and autosaves either value', () => {
+test('advanced message settings pin emote filtering and preserve readings and templates', () => {
   const context = appContext();
   vm.runInContext(`snapshot.rules = {events:{danmaku_on:true,gift_on:true,free_gift_on:false,super_chat_on:true,guard_on:true,gift_threshold_yuan:8,super_chat_threshold_yuan:30},templates:{danmaku:'{message}',gift:'{gift_name}',super_chat:'{message}',guard:'{guard_name}'},user_words:[],message_words:[],sounds:[]}`, context);
   const html = vm.runInContext('renderRulesSettings()', context);
-  assert.match(html, /过滤 B站官方表情/);
-  assert.match(html, /仍显示在聊天中/);
-  assert.match(html, /role="switch" name="filter_bilibili_emoticons" checked><\/div>/);
+  assert.doesNotMatch(html, /过滤 B站官方表情|name="filter_bilibili_emoticons"|data-form="preview"/);
+  assert.match(html, /data-form="lake-thresholds"/);
+  assert.match(html, /data-form="lake-templates"/);
   vm.runInContext('snapshot.rules.events.filter_bilibili_emoticons = false', context);
-  assert.match(vm.runInContext('renderRulesSettings()', context), /role="switch" name="filter_bilibili_emoticons"><\/div>/);
-  context.testForm = { dataset:{form:'rules'}, fields:{danmaku_on:'on',gift_on:'on',super_chat_on:'on',guard_on:'on',filter_bilibili_emoticons:'on',gift_threshold_yuan:'8',super_chat_threshold_yuan:'30',template_danmaku:'{message}',template_gift:'{gift_name}',template_super_chat:'{message}',template_guard:'{guard_name}'},querySelectorAll:()=>[],checkValidity:()=>true };
+  context.testForm = { dataset:{form:'lake-thresholds'}, fields:{danmaku_on:'on',gift_on:'on',super_chat_on:'on',guard_on:'on',gift_threshold_yuan:'8',super_chat_threshold_yuan:'30'},querySelectorAll:()=>[],checkValidity:()=>true };
   const saved = vm.runInContext('collectAutosave(testForm)', context);
   assert.equal(saved.action, 'rules.save');
   assert.equal(saved.payload.rules.events.filter_bilibili_emoticons, true);
   assert.equal(saved.payload.rules.events.gift_threshold_yuan, 8);
-  delete context.testForm.fields.filter_bilibili_emoticons;
-  assert.equal(vm.runInContext('collectAutosave(testForm).payload.rules.events.filter_bilibili_emoticons', context), false);
-  setLanguage('en');
-  assert.match(vm.runInContext('renderRulesSettings()', context), /Filter Bilibili standalone emotes/);
-  setLanguage('zh-CN');
+  assert.equal(saved.payload.rules.templates.danmaku, '{message}');
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.payload.rules.user_words)), []);
 });
 
 function aliasContext() {
@@ -1598,7 +1616,7 @@ test('viewer alias save returns to chat and restores previous settings navigatio
   const {context,dialog,form,updates} = aliasContext();
   await vm.runInContext('handleAction', context)('viewer.alias','',null);
   assert.equal(dialog.open, true);
-  assert.equal(vm.runInContext('settingsTab', context), 'rules');
+  assert.equal(vm.runInContext('settingsTab', context), 'readings');
   await vm.runInContext('handleForm', context)(form);
   assert.equal(dialog.open, false);
   assert.equal(updates.length, 1);
@@ -1657,7 +1675,7 @@ test('alias managed inside settings saves and cancels within settings', async ()
     if(save) await vm.runInContext('handleForm', context)(form);
     else await vm.runInContext('handleAction', context)('editor.cancel','',null);
     assert.equal(dialog.open, true);
-    assert.equal(vm.runInContext('settingsTab', context), 'rules');
+    assert.equal(vm.runInContext('settingsTab', context), 'readings');
     assert.equal(vm.runInContext('editor', context), null);
   }
 });
@@ -1742,91 +1760,146 @@ test('feed groups one viewer, adds time breaks and keeps the read line as its ow
 });
 
 const overlaySnapshot = () => ({
-  settings: { enabled: true, style: 'spine', corner: 'top_right', scale: 1.100000023841858, vignette: 0.6000000238418579, title: '今晚的弹幕', tagline: '', show_danmaku: true, show_gift: true, show_super_chat: true, show_guard: false, names: 'special', merge_duplicates: true, linger_seconds: 14, port: 47823, token: '0123456789abcdef0123456789abcdef' },
+  settings: { enabled: true, style: 'spine', corner: 'top_right', offset_x: 0, offset_y: 0, scale: 1.100000023841858, vignette: 0.6000000238418579, title: '今晚的弹幕', tagline: '', show_danmaku: true, show_gift: true, show_super_chat: true, show_guard: false, names: 'special', merge_duplicates: true, linger_seconds: 14, port: 47823, token: '0123456789abcdef0123456789abcdef' },
   running: true, port: 47823, url: 'http://127.0.0.1:47823/overlay?token=0123456789abcdef0123456789abcdef', error: null, clients: [{ width: 3840, height: 1728 }],
 });
 
-test('overlay settings render every choice and keep the token off the page', () => {
+test('overlay settings render connection, placement and advanced without retired controls', () => {
   const context = appContext();
   context.overlay = overlaySnapshot();
-  vm.runInContext("snapshot.overlay = overlay; settingsTab = 'live'; livePanel = 'overlay';", context);
+  context.overlay.settings.enabled = false;
+  vm.runInContext("snapshot.overlay = overlay; settingsTab = 'overlay'; editor = null; snapshot.obs = { settings: { host: '127.0.0.1', port: 4455 }, status: { state: 'idle' } };", context);
+  const connect = vm.runInContext('renderSettingsPage()', context);
+  assert.match(connect, /data-obs-view="connect"/);
+  assert.match(connect, /data-form="obs"/);
+  assert.match(connect, /data-obs-secret/);
+  assert.doesNotMatch(connect, /data-form="overlay"/);
+  // Once the overlay was added, a closed OBS keeps the stage instead of the form.
+  context.overlay.settings.enabled = true;
+  vm.runInContext("snapshot.obs.status = { state: 'error', message: '无法连接 OBS（连接被拒绝） [DV-OB01]' };", context);
+  const offline = vm.runInContext('renderSettingsPage()', context);
+  assert.match(offline, /data-obs-view="offline"/);
+  assert.match(offline, /data-ovp-drag/);
+  assert.match(offline, /data-action="lake\.obs\.launch"/);
+  assert.doesNotMatch(offline, /data-form="obs"/);
+  assert.equal(vm.runInContext('isLakeObsWide()', context), true);
+  // A rejected password still needs the connection form.
+  vm.runInContext("snapshot.obs.status = { state: 'error', message: 'OBS WebSocket 密码不正确 [DV-OB03]' };", context);
+  assert.match(vm.runInContext('renderSettingsPage()', context), /data-obs-view="connect"/);
+  vm.runInContext("snapshot.obs.status = { state: 'ok' };", context);
   const html = vm.runInContext('renderSettingsPage()', context);
   assert.match(html, /data-form="overlay"/);
-  assert.match(html, /data-live-panel="overlay" role="tabpanel" aria-labelledby="live-tab-overlay">/);
-  assert.match(html, /data-live-panel="broadcast"[^>]+hidden/);
+  assert.match(html, /data-ovp-drag/);
+  assert.match(html, /data-ovp-resize/);
+  assert.match(html, /data-ovp-edit="title"/);
+  assert.match(html, /data-ovp-edit="tagline"/);
   assert.match(html, /data-action="overlay\.obs_add"/);
-  assert.match(html, /data-form="obs"/);
-  assert.match(html, /data-form="obs-link"/);
-  assert.match(html, /name="enabled" checked/);
-  assert.match(html, /name="style" value="spine" checked/);
-  assert.match(html, /name="corner" value="top_right" checked/);
-  assert.match(html, /name="names" value="special" checked/);
-  assert.match(html, /name="show_guard">/);
-  assert.match(html, /name="scale"[^>]+value="1\.1"/);
-  assert.match(html, /name="vignette"[^>]+value="0\.6"/);
-  assert.doesNotMatch(html, /name="title"/);
-  assert.match(html, /data-action="overlay\.copy"/);
-  assert.match(html, /data-action="overlay\.token\.reset"/);
-  assert.match(html, /data-action="overlay\.test" data-id="super_chat"/);
-  assert.match(html, /data-id="backdrop=dark" aria-pressed="true"/);
-  assert.doesNotMatch(html, /aspect=/);
+  assert.match(html, /type="hidden" name="corner" value="top_right"/);
+  assert.match(html, /type="hidden" name="title" value="今晚的弹幕"/);
+  assert.match(html, /type="hidden" name="offset_x" value="0"/);
+  assert.match(html, /type="hidden" name="offset_y" value="0"/);
+  assert.doesNotMatch(html, /data-action="overlay\.(?:copy|test)"|name="(?:style|vignette|linger_seconds)"|实验/);
   assert.doesNotMatch(html, /0123456789abcdef0123456789abcdef/);
-  assert.equal(vm.runInContext("overlayMaskedUrl(overlay.url, overlay.settings.token)", context), 'http://127.0.0.1:47823/overlay?token=0123••••••••cdef');
-  assert.equal(vm.runInContext('overlayStatus().text', context), 'OBS 已连接 · 3840 × 1728');
+  assert.equal(vm.runInContext('isLakeObsWide()', context), true);
+  const advanced = vm.runInContext("lakeObsPage = 'advanced'; renderSettingsPage()", context);
+  assert.match(advanced, /data-form="obs-link"/);
+  assert.match(advanced, /name="names" value="special" checked/);
+  assert.match(advanced, /name="show_guard" value="on"/);
+  assert.doesNotMatch(advanced, /data-action="overlay\.token\.reset"|lake-obs-advanced-foot/);
+  assert.equal(vm.runInContext('isLakeObsWide()', context), false);
   assert.equal(vm.runInContext('overlayPreviewSize().width', context), 3840);
 });
 
-test('overlay connection states read plainly in both languages', () => {
+test('overlay binding state is independent from browser clients and reports actual canvas', () => {
   const context = appContext();
   context.overlay = overlaySnapshot();
-  vm.runInContext("snapshot.overlay = overlay;", context);
+  vm.runInContext("snapshot.overlay = overlay; snapshot.obs = { status: { state: 'ok' } };", context);
   const status = () => vm.runInContext('overlayStatus()', context);
   context.overlay.clients.push({ width: 1920, height: 1080 });
-  assert.equal(status().text, 'OBS 已连接 · 3840 × 1728 · 2 个画面');
-  context.overlay.clients = [];
-  assert.equal(status().tone, 'pending');
-  assert.match(status().text, /等待 OBS 连接/);
+  assert.equal(status().tone, 'pending', 'ordinary browser clients are not evidence of a managed OBS source');
+  assert.equal(status().text, '叠加层还没放进场景');
+  vm.runInContext("snapshot.obs.status.overlay_sync = {state:'ready', scene:'游戏场景', width:2560, height:1440};", context);
+  assert.equal(status().text, '已放进场景「游戏场景」');
+  assert.equal(vm.runInContext('overlayPreviewSize().width', context), 2560);
+  vm.runInContext('snapshot.obs.status.canvas_width = 1080; snapshot.obs.status.canvas_height = 1920;', context);
+  assert.equal(vm.runInContext('overlayPreviewSize().width', context), 1080, 'the current base canvas supersedes an older source size');
+  assert.equal(vm.runInContext('overlayPreviewSize().height', context), 1920);
   context.overlay.error = 'OBS 叠加层无法使用本机端口 47823 起的 10 个端口：拒绝访问 [DV-O01]';
   assert.equal(status().tone, 'error');
   assert.match(status().text, /DV-O01/);
-  context.overlay.settings.enabled = false;
-  assert.equal(status().tone, 'idle');
-  vm.runInContext("snapshot.preferences = { language: 'en' }; applyLanguage(); overlay.settings.title = 'Tonight'; overlay.error = null; overlay.settings.enabled = true; overlay.clients = [{ width: 2560, height: 1600 }];", context);
-  assert.equal(status().text, 'OBS connected · 2560 × 1600');
-  const html = vm.runInContext("settingsTab = 'live'; renderSettingsPage()", context);
+  vm.runInContext("snapshot.preferences = { language: 'en' }; applyLanguage(); overlay.settings.title = 'Tonight'; overlay.error = null; snapshot.obs.status.overlay_sync = {state:'ready'};", context);
+  assert.equal(status().tone, 'ready');
+  assert.doesNotMatch(status().text, /\p{Script=Han}/u);
+  const html = vm.runInContext("settingsTab = 'overlay'; editor = null; renderSettingsPage()", context);
   assert.doesNotMatch(html, /\p{Script=Han}/u);
   assert.match(html, /Add to OBS/);
 });
 
-test('overlay autosave sends the edited settings and keeps app-owned fields', () => {
+test('overlay partial autosave preserves source identity and unrelated choices while retiring style controls', () => {
   const context = appContext();
   context.overlay = overlaySnapshot();
   vm.runInContext("snapshot.overlay = overlay;", context);
-  const fields = { enabled: 'on', style: 'card', corner: 'bottom_left', scale: '1.25', vignette: '0.3', title: ' 深夜电台 ', tagline: 'one more round.', show_danmaku: 'on', show_super_chat: 'on', names: 'none', linger_seconds: '20' };
-  context.overlayForm = { dataset: { form: 'overlay' }, fields, checkValidity: () => true };
+  const fields = { corner: 'bottom_left', offset_x: '-37', offset_y: '121', scale: '1.25', title: ' 深夜电台 ', tagline: 'one more round.' };
+  context.overlayForm = { dataset: { form: 'overlay' }, fields, elements: Object.fromEntries(Object.keys(fields).map(key => [key, {}])), checkValidity: () => true };
   const envelope = vm.runInContext('collectAutosave(overlayForm)', context);
   assert.equal(envelope.action, 'overlay.save');
-  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.settings)), { ...context.overlay.settings, enabled: true, style: 'card', corner: 'bottom_left', scale: 1.25, vignette: 0.3, title: context.overlay.settings.title, tagline: 'one more round.', show_danmaku: true, show_gift: false, show_super_chat: true, show_guard: false, names: 'none', merge_duplicates: false, linger_seconds: 20 });
-  fields.linger_seconds = '2';
-  assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /停留时间/);
-  fields.linger_seconds = '20'; fields.title = '  ';
-  assert.equal(vm.runInContext('collectAutosave(overlayForm).payload.settings.title', context), context.overlay.settings.title);
+  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.settings)), { ...context.overlay.settings, style: 'spine', corner: 'bottom_left', offset_x: -37, offset_y: 121, scale: 1.25, vignette: .6, title: '深夜电台', tagline: 'one more round.', linger_seconds: 14 });
+  fields.title = '  ';
+  assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /主标题/);
+  for (const invalid of ['字'.repeat(25), '坏\u0085标题']) {
+    fields.title = invalid;
+    assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /主标题/);
+  }
+  fields.title = '字'.repeat(24);
+  assert.equal(vm.runInContext('collectAutosave(overlayForm).payload.settings.title', context), fields.title);
+  for (const key of ['offset_x', 'offset_y']) {
+    for (const invalid of ['1.5', '-8193', '8193', 'NaN']) {
+      fields[key] = invalid;
+      assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /位置偏移/);
+    }
+    for (const valid of ['-8192', '8192', '0']) {
+      fields[key] = valid;
+      assert.equal(vm.runInContext('collectAutosave(overlayForm)', context).payload.settings[key], Number(valid));
+    }
+  }
+  context.overlayForm.fields = { names: 'none', show_danmaku: 'on' };
+  context.overlayForm.elements = { names: {}, show_danmaku: {}, show_gift: {}, merge_duplicates: {} };
+  const partial = vm.runInContext('collectAutosave(overlayForm).payload.settings', context);
+  assert.equal(partial.enabled, true); assert.equal(partial.corner, 'top_right');
+  assert.equal(partial.show_gift, false); assert.equal(partial.merge_duplicates, false); assert.equal(partial.show_super_chat, true);
 });
 
-test('overlay actions copy the full address, confirm a new token and send test items', async () => {
+test('overlay canvas snapping converts all four anchors and keeps offsets in source pixels', () => {
+  const context = appContext();
+  const place = vm.runInContext('lakeOverlayPlacement', context);
+  const canvas = { width: 640, height: 300, canvasWidth: 1920, canvasHeight: 1080, scale: 1, corner: 'top_left', snap: 24 };
+  for (const [corner, x, y] of [['top_left', 72, 48], ['top_right', 1208, 48], ['bottom_left', 72, 732], ['bottom_right', 1208, 732]]) {
+    const found = place({ ...canvas, x: x + 9, y: y - 8 });
+    assert.equal(found.corner, corner); assert.equal(found.offset_x, 0); assert.equal(found.offset_y, 0); assert.equal(found.snapped, true);
+  }
+  const moved = place({ ...canvas, corner: 'bottom_right', x: 1000, y: 700, snap: 0 });
+  assert.equal(moved.offset_x, -208); assert.equal(moved.offset_y, -32);
+  const scaled = place({ ...canvas, canvasWidth: 3840, canvasHeight: 2160, width: 1280, height: 600, x: 219, y: 145 });
+  assert.equal(scaled.offset_x, 75); assert.equal(scaled.offset_y, 49);
+  // Sliding along the left edge sticks to that edge only.
+  const edge = place({ ...canvas, x: 80, y: 400, follow: true });
+  assert.equal(edge.snapX, 'left'); assert.equal(edge.snapY, ''); assert.equal(edge.snapped, false); assert.equal(edge.offset_x, 0);
+  // Below the middle, the block anchors to the bottom so new lines grow upwards.
+  const low = place({ ...canvas, x: 600, y: 600, follow: true });
+  assert.equal(low.corner, 'bottom_left'); assert.equal(low.offset_x, 528); assert.equal(low.offset_y, -132);
+});
+
+test('overlay actions copy the full address and send test items', async () => {
   const context = appContext();
   context.overlay = overlaySnapshot();
   context.calls = [];
   vm.runInContext(`snapshot.overlay = overlay;
     copyText = async text => calls.push({ copied: text });
     showToast = message => calls.push({ toast: message });
-    confirmAction = async () => { calls.push('confirm'); return true; };
     command = async (action, payload) => calls.push({ action, payload });`, context);
   const act = vm.runInContext('handleAction', context);
   await act('overlay.copy');
   assert.equal(context.calls[0].copied, context.overlay.url);
-  await act('overlay.token.reset');
-  assert.deepEqual(JSON.parse(JSON.stringify(context.calls.slice(2))), ['confirm', { action: 'overlay.token.reset', payload: {} }, { action: 'obs.overlay.sync', payload: {} }, { toast: '已生成新地址，记得更新 OBS 里的地址' }]);
   await act('overlay.test', 'super_chat');
   await act('overlay.test', 'danmaku');
   assert.deepEqual([...context.calls.slice(-2).map(call => call.payload.kind)], ['super_chat', 'danmaku']);
@@ -1960,25 +2033,24 @@ test('ending the stream is one click, reports the OBS link and never touches cha
   ]);
 });
 
-test('OBS page: one connection card, separate forms, launch/test/add send their own commands', async () => {
+test('OBS connection and overlay actions retain their separate command scopes', async () => {
   const context = appContext();
   context.overlay = overlaySnapshot();
   context.calls = [];
   vm.runInContext(`snapshot.overlay = overlay; snapshot.preferences = { broadcast_console: true };
-    snapshot.obs = { settings: { enabled: true, host: '127.0.0.1', port: 4455, auto_launch: true, executable: null }, has_password: true, status: { state: 'ok', streaming: false, obs_version: '31.0.0' }, detected: 'C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe', local: true };
+    snapshot.obs = { settings: { enabled: true, host: '127.0.0.1', port: 4455, auto_launch: true, executable: null }, has_password: true, status: { state: 'ok', streaming: false, obs_version: '31.0.0' }, detected: 'C:/OBS/bin/64bit/obs64.exe', local: true };
     showToast = (message, error = false) => calls.push({ toast: message, error });
     command = async (action, payload) => { calls.push({ action, payload });
       return { result: action === 'obs.overlay.add' ? { created: true, added_to_scene: true, found: true, scene: '游戏场景', width: 2560, height: 1440 } : action === 'obs.launch' ? { launched: true } : { streaming: false } }; };`, context);
-  const html = vm.runInContext("settingsTab = 'live'; livePanel = 'broadcast'; renderSettingsPage()", context);
+  const html = vm.runInContext("settingsTab = 'overlay'; editor = null; lakeObsPage = 'advanced'; renderSettingsPage()", context);
   assert.equal((html.match(/data-obs-root/g) || []).length, 1);
   assert.match(html, /已连接 OBS 31\.0\.0/);
-  assert.match(html, /自动：C:\\Program Files\\obs-studio\\bin\\64bit\\obs64\.exe/);
+  assert.match(html, /已自动找到 obs64\.exe/);
   assert.match(html, /name="auto_launch" checked/);
-  assert.match(html, /data-action="obs\.launch"/);
-  assert.doesNotMatch(html, /data-obs-more open/, 'a working connection keeps its details folded');
+  assert.match(html, /data-action="lake\.obs\.launch"/);
   const act = vm.runInContext('handleAction', context);
-  await act('obs.launch');
-  await act('obs.test');
+  await act('lake.obs.launch');
+  await act('lake.obs.connect');
   await act('overlay.obs_add');
   assert.deepEqual(context.calls.filter(call => call.action).map(call => call.action), ['obs.launch', 'obs.test', 'obs.overlay.add']);
   assert.deepEqual(context.calls.filter(call => call.toast).map(call => call.toast), ['OBS 已启动并连上', 'OBS 连接正常 · 未在推流', '已添加到 OBS · “游戏场景” · 2560 × 1440']);
@@ -2096,4 +2168,316 @@ test('reference edits during a save are serialized and the latest text is retain
   release(); await Promise.all([first, duplicate]);
   assert.deepEqual(writes.map(profile => profile.reference_text), ['first', 'new edit']);
   assert.equal(form.dataset.dirty, undefined);
+});
+
+test('adding voices: every service completes on one page with its essential setting up front', async () => {
+  const context = appContext();
+  context.calls = [];
+  context.pairs = [{ name: '流萤', version: 'v4', gpt_path: 'D:/m/流萤.ckpt', sovits_path: 'D:/m/流萤.pth' }, { name: '伊蕾娜', version: 'v4', gpt_path: 'D:/m/伊蕾娜.ckpt', sovits_path: 'D:/m/伊蕾娜.pth' }];
+  vm.runInContext(`snapshot.connections = [{ id: 'db', settings: { provider: 'doubao' }, has_credential: true }, { id: 'fish', settings: { provider: 'fish_audio' }, has_credential: true }, { id: 'gpt', settings: { provider: 'gpt_sovits' } }, { id: 'dots', settings: { provider: 'dots' } }];
+    snapshot.local_services = { gpt_sovits: { state: 'ready', directory: 'D:/GPT-SoVITS' }, dots: { state: 'ready', directory: 'D:/dots' } };
+    snapshot.doubao_voices = [{ id: 'zh_a', name: '温柔' }, { id: 'zh_b', name: '元气' }]; snapshot.presets = []; snapshot.rules.default_preset_id = null;
+    modelScan = { pairs, issues: [] }; referenceProfiles = [];
+    renderSettings = () => {}; showToast = () => {};
+    command = async (action, payload) => { calls.push({ action, payload }); return { result: action === 'presets.save' ? { id: 'new-' + calls.length } : action === 'fish.voice.lookup' ? { voice_id: 'f'.repeat(32), name: '官方名' } : action === 'references.list' ? [] : { id: 'new-' + calls.length } }; };
+    window.__TAURI__ = { dialog: { open: async () => 'D:/参考/流萤_今天也要加油哦.wav' } };`, context);
+  // Doubao: no search for a short list, and each row adds with one click.
+  vm.runInContext(`editor = { type: 'voice-add', provider: 'doubao', connectionId: 'db' }`, context);
+  const doubao = vm.runInContext('renderLakeVoiceAdd()', context);
+  assert.doesNotMatch(doubao, /data-voice-search/);
+  assert.match(doubao, /data-action="voice\.catalog\.add" data-id="zh_a"/);
+  await vm.runInContext('handleAction', context)('voice.catalog.add', 'zh_a', {});
+  assert.equal(context.calls.at(-1).action, 'presets.save');
+  assert.equal(context.calls.at(-1).payload.preset.voice_id, 'zh_a');
+  // GPT-SoVITS: picking a model asks for the recording right there; the transcript comes from the file name.
+  vm.runInContext(`editor = { type: 'voice-add', provider: 'gpt_sovits', connectionId: 'gpt' }`, context);
+  await vm.runInContext('handleAction', context)('voice.catalog.pick', '1', {});
+  const picked = vm.runInContext('renderLakeVoiceAdd()', context);
+  assert.match(picked, /data-action="voice\.reference\.pick"/);
+  assert.match(picked, /data-action="voice\.sovits\.add"[^>]*disabled/);
+  await vm.runInContext('handleAction', context)('voice.reference.pick', '', {});
+  assert.equal(vm.runInContext('lakeVoiceDraft.reference_text', context), '今天也要加油哦');
+  context.calls.length = 0;
+  await vm.runInContext('handleAction', context)('voice.sovits.add', '', {});
+  assert.deepEqual(context.calls.map(call => call.action), ['presets.save', 'references.save']);
+  assert.equal(context.calls[0].payload.preset.sovits.gpt_weights_path, 'D:/m/伊蕾娜.ckpt');
+  assert.equal(context.calls[1].payload.profile.audio_path, 'D:/参考/流萤_今天也要加油哦.wav');
+  // Fish: a pasted link is looked up, then saved under the name found.
+  vm.runInContext(`editor = { type: 'voice-add', provider: 'fish_audio', connectionId: 'fish' }; lakeVoiceDraft = { fish: 'https://fish.audio/m/${'f'.repeat(32)}', fishFound: { voice_id: '${'f'.repeat(32)}', name: '官方名' }, name: '官方名' }`, context);
+  context.calls.length = 0;
+  await vm.runInContext('handleAction', context)('voice.fish.add', '', {});
+  assert.deepEqual(context.calls.map(call => call.action), ['fish.voice.save']);
+  assert.equal(context.calls[0].payload.name, '官方名');
+  // dots: one recording and a name make a voice.
+  vm.runInContext(`editor = { type: 'voice-add', provider: 'dots', connectionId: 'dots' }; lakeVoiceDraft = {}`, context);
+  await vm.runInContext('handleAction', context)('voice.reference.pick', '', {});
+  context.calls.length = 0;
+  await vm.runInContext('handleAction', context)('voice.dots.add', '', {});
+  assert.deepEqual(context.calls.map(call => call.action), ['dots.voice.save']);
+  assert.equal(context.calls[0].payload.profile.audio_path, 'D:/参考/流萤_今天也要加油哦.wav');
+  assert.equal(context.calls[0].payload.preset.name, '流萤_今天也要加油哦');
+});
+
+test('viewer card finds a name binding when the viewer also has a UID, as playback does', () => {
+  const context = appContext();
+  vm.runInContext(`snapshot.bindings = [{ id: 'by-name', binding: { platform: 'bilibili', user_id: null, user_name: 'Kinoko7', preset_id: 'fish', enabled: true } }];`, context);
+  assert.equal(vm.runInContext(`viewerBinding({ user_id: 504, user_name: 'Kinoko7' })?.id`, context), 'by-name');
+  vm.runInContext(`snapshot.bindings.push({ id: 'by-uid', binding: { platform: 'bilibili', user_id: 504, user_name: null, preset_id: 'dots', enabled: true } });`, context);
+  assert.equal(vm.runInContext(`viewerBinding({ user_id: 504, user_name: 'Kinoko7' })?.id`, context), 'by-uid');
+});
+
+test('voice-panel audition follows UI language and preserves an explicitly edited sample', async () => {
+  const context = appContext();
+  context.calls = [];
+  vm.runInContext(`snapshot.presets = ['doubao', 'fish_audio', 'dots', 'gpt_sovits'].map(provider => ({ id: provider, provider, connection_id: provider, sovits: { text_language: 'auto' } }));
+    renderVoicePanel = () => {};
+    command = async (action, payload) => { calls.push({ action, payload }); return { result: [] }; };`, context);
+  const action = vm.runInContext('handleAction', context);
+  setLanguage('en');
+  for (const provider of ['doubao', 'fish_audio', 'dots', 'gpt_sovits']) {
+    await action('voice.audition', provider, null);
+    assert.equal(context.calls.at(-1).action, 'audition');
+    assert.equal(context.calls.at(-1).payload.text, 'Hello, welcome to the stream.');
+    assert.equal(context.calls.at(-1).payload.preset_id, provider);
+  }
+  setLanguage('zh-CN');
+  await action('voice.audition', 'dots', null);
+  assert.equal(context.calls.at(-1).payload.text, '你好，欢迎来到直播间。');
+  setLanguage('en');
+  vm.runInContext(`voiceAuditionDraft.customText = true; voiceAuditionDraft.text = '用户自己写的试听句';`, context);
+  await action('voice.audition', 'dots', null);
+  assert.equal(context.calls.at(-1).payload.text, '用户自己写的试听句');
+  vm.runInContext(`voiceAuditionDraft.text = '';`, context);
+  await action('voice.audition', 'dots', null);
+  assert.equal(context.calls.at(-1).payload.text, 'Hello, welcome to the stream.');
+  assert.equal(context.calls.some(call => call.action === 'presets.default'), false);
+});
+
+test('GPT-SoVITS preview respects the effective saved text language without changing model configuration', async () => {
+  const context = appContext();
+  context.calls = [];
+  vm.runInContext(`snapshot.presets = [{ id: 'gpt', provider: 'gpt_sovits', connection_id: 'local', sovits: { model_selection: 'per_request_atomic', gpt_weights_path: 'D:/voice.ckpt', sovits_weights_path: 'D:/voice.pth', text_language: 'en' } }];
+    renderVoicePanel = () => {};
+    referenceOverride = 'all_zh';
+    command = async (action, payload) => { calls.push({ action, payload }); return { result: [{ profile: { role: referenceRole('gpt_sovits', snapshot.presets[0]), text_language: referenceOverride } }] }; };`, context);
+  setLanguage('en');
+  const action = vm.runInContext('handleAction', context);
+  await action('voice.audition', 'gpt', null);
+  assert.deepEqual(context.calls.map(call => call.action), ['references.list', 'audition']);
+  assert.equal(context.calls.at(-1).payload.text, '你好，欢迎来到直播间。');
+  vm.runInContext(`referenceOverride = 'auto'; snapshot.presets[0].sovits.text_language = 'all_zh';`, context);
+  await action('voice.audition', 'gpt', null);
+  assert.equal(context.calls.at(-1).payload.text, 'Hello, welcome to the stream.');
+  assert.equal(context.calls.some(call => /save|default/.test(call.action)), false);
+});
+
+test('current-message relative time uses the design just-now accent only for recent messages', () => {
+  const context = appContext();
+  const label = vm.runInContext('lakeMessageTime', context);
+  assert.equal(label(1_000, 1_000), 'just now');
+  assert.equal(label(1_000, 60_999), 'just now');
+  assert.notEqual(label(1_000, 61_000), 'just now');
+  assert.notEqual(label(1_001, 1_000), 'just now');
+  assert.notEqual(label(0, 1_000), 'just now');
+});
+
+
+test('lake captions preserve spaces and whole Latin words without changing grapheme reveal order', () => {
+  const context = appContext();
+  const render = vm.runInContext('lakeLettersHtml', context);
+  const sentences = [
+    ['Good evening by the lake', ['Good', 'evening', 'by', 'the', 'lake']],
+    ['主播  Good evening 今晚好 ', ['Good', 'evening']],
+    ["Café naïve don't stop", ['Café', 'naïve', "don't", 'stop']],
+    ['Supercalifragilisticexpialidocious', ['Supercalifragilisticexpialidocious']],
+  ];
+  for (const [sentence, words] of sentences) {
+    const { html } = render([{ type: 'text', text: sentence }]);
+    const letters = [...html.matchAll(/<span class="lake-letter [ab]" style="--letter-delay:(\d+)ms">([^<]*)<\/span>/gu)];
+    assert.equal(letters.map(match => match[2]).join(''), escapeHtml(sentence), 'no character or space is dropped');
+    assert.deepEqual(letters.map(match => Number(match[1])), letters.map((_, index) => index * 160), 'word grouping preserves the reveal/read position of every grapheme');
+    const lines = html.split('<span class="lake-text-line">').slice(1).map(line => line.replace(/<[^>]+>/gu, ''));
+    assert.ok(lines.length <= 3);
+    for (const word of words) assert.equal(lines.filter(line => line.includes(escapeHtml(word))).length, 1, `word stays on one line: ${word}`);
+    assert.equal((html.match(/class="lake-word"/gu) || []).length, words.length);
+  }
+});
+
+test('lake caption grouping preserves CJK line sizes, combining graphemes and accessible emotes', () => {
+  const context = appContext();
+  const render = vm.runInContext('lakeLettersHtml', context);
+  for (const [count, size, rows] of [[8, 'normal', 1], [16, 'normal', 2], [24, 'medium', 3], [30, 'small', 3]]) {
+    const { html, size: actualSize } = render([{ type: 'text', text: '湖'.repeat(count) }]);
+    assert.equal(actualSize, size);
+    assert.equal((html.match(/class="lake-letter /gu) || []).length, count);
+    assert.equal((html.match(/class="lake-text-line"/gu) || []).length, rows);
+    assert.doesNotMatch(html, /class="lake-word"/u);
+  }
+  const { html } = render([{ type: 'text', text: 'e\u0301 ' }, { type: 'emote', text: '[妙]', url: 'https://i0.hdslb.com/bfs/live/a.png', large: true }, { type: 'text', text: ' 湖' }]);
+  assert.equal((html.match(/class="lake-letter /gu) || []).length, 5, 'a combining grapheme and an emote each keep one reading position');
+  assert.match(html, /alt="" aria-label="\[妙\]"/u);
+  assert.deepEqual([...html.matchAll(/--letter-delay:(\d+)ms/gu)].map(match => Number(match[1])), [0, 160, 320, 480, 640]);
+});
+
+test('lake reading progress still marks identical grapheme positions in caption and reflection', () => {
+  const context = appContext();
+  const makeLetters = () => Array.from({ length: 8 }, () => ({ unread: false, classList: { toggle(name, value) { assert.equal(name, 'lake-unread'); this.node.unread = value; } } }));
+  const lists = [makeLetters(), makeLetters()];
+  for (const letters of lists) for (const node of letters) node.classList.node = node;
+  context.document.querySelectorAll = selector => {
+    assert.equal(selector, '#lake-current .lake-message-text, #lake-text-reflection');
+    return lists.map(letters => ({ querySelectorAll(selector) { assert.equal(selector, '.lake-letter'); return letters; } }));
+  };
+  vm.runInContext("snapshot.queue = { current: { id: 'job' } }; snapshot.playback = { job_id: 'job', queued_ms: 1000, played_ms: 500 }; syncLakeReadingProgress();", context);
+  for (const letters of lists) assert.deepEqual(letters.map(node => node.unread), [false, false, false, false, true, true, true, true]);
+  vm.runInContext("snapshot.playback.job_id = 'different-job'; syncLakeReadingProgress();", context);
+  for (const letters of lists) assert.equal(letters.some(node => node.unread), false, 'unmatched audio never invents reading progress');
+});
+
+test('lake history count changes between English singular and plural on both surface and deep summary', () => {
+  const context = appContext();
+  const nodes = new Map(['#chat-feed', '#lake-history-total', '#lake-history-label', '#lake-deep-new', '#lake-deep-reading', '#lake-deep-stats'].map(selector => [selector, { innerHTML: '', textContent: '', hidden: false }]));
+  context.document.querySelector = selector => nodes.get(selector) || null;
+  const render = vm.runInContext('renderLakeHistory', context);
+  setLanguage('en');
+  for (const count of [0, 1, 2, 1]) {
+    context.count = count;
+    vm.runInContext('snapshot.live_history = { messages: count, unique_viewers: 1 };', context);
+    render([], []);
+    const label = count === 1 ? 'message rests in the lake' : 'messages rest in the lake';
+    assert.equal(nodes.get('#lake-history-total').textContent, String(count));
+    assert.equal(nodes.get('#lake-history-label').innerHTML, label);
+    assert.ok(nodes.get('#lake-deep-stats').innerHTML.includes(`<span>${label}</span>`));
+  }
+  setLanguage('zh-CN');
+  render([], []);
+  assert.equal(nodes.get('#lake-history-label').innerHTML, '句沉在湖里');
+  assert.ok(nodes.get('#lake-deep-stats').innerHTML.includes('<span>句弹幕沉在湖里</span>'));
+});
+
+
+test('lake visual-width table keeps short English and mixed captions on two balanced lines', () => {
+  const render = vm.runInContext('lakeLettersHtml', appContext());
+  const cases = [
+    ['Good evening by the lake', ['Good evening ', 'by the lake']],
+    ['主播 晚上好 Hello lake', ['主播 晚上好 ', 'Hello lake']],
+    ['6666666666 哈哈哈哈哈', ['6666666666 ', '哈哈哈哈哈']],
+    ['2333333333333333 笑死', ['2333333333333333 ', '笑死']],
+  ];
+  for (const [text, expectedLines] of cases) {
+    const { html, size } = render([{ type: 'text', text }]);
+    const lines = html.split('<span class="lake-text-line">').slice(1).map(line => line.replace(/<[^>]+>/gu, ''));
+    assert.deepEqual(lines, expectedLines, text);
+    assert.equal(size, 'normal', text);
+    assert.equal(lines.join(''), text, 'line balancing preserves the original spaces');
+  }
+});
+
+test('lake word grouping preserves numbers and other scripts without swallowing CJK boundaries', () => {
+  const render = vm.runInContext('lakeLettersHtml', appContext());
+  const cases = [
+    ['AWSL2333 Привет Γειά مرحبا नमस्ते', ['AWSL2333', 'Привет', 'Γειά', 'مرحبا', 'नमस्ते']],
+    ['abc漢字123 カタカナABC123 かなDEF456 한국어AWSL2333', ['abc', '123', 'ABC123', 'DEF456', 'AWSL2333']],
+    ['ПриветAWSL2333 ١٢٣٤٥٦٧٨٩٠', ['ПриветAWSL2333', '١٢٣٤٥٦٧٨٩٠']],
+    ['ＡＢＣ１２３ 湖', ['ＡＢＣ１２３']],
+  ];
+  for (const [text, expectedWords] of cases) {
+    const { html } = render([{ type: 'text', text }]);
+    const wordMarkup = /<span class="lake-word">((?:<span class="lake-letter [ab]" style="--letter-delay:\d+ms">[^<]*<\/span>)+)<\/span>/gu;
+    const words = [...html.matchAll(wordMarkup)].map(match => match[1].replace(/<[^>]+>/gu, '').trimEnd());
+    assert.deepEqual(words, expectedWords, text);
+    const letters = [...html.matchAll(/<span class="lake-letter [ab]" style="--letter-delay:(\d+)ms">([^<]*)<\/span>/gu)];
+    assert.deepEqual(letters.map(match => match[2]), [...new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(text)].map(({ segment }) => escapeHtml(segment)));
+    assert.deepEqual(letters.map(match => Number(match[1])), letters.map((_, index) => index * 160), 'visual widths never change reading/reveal indices');
+  }
+});
+
+test('lake width thresholds distinguish half-width text, full-width punctuation and emote images', () => {
+  const render = vm.runInContext('lakeLettersHtml', appContext());
+  const cases = [
+    ['A'.repeat(10) + '湖湖', 'normal', 1],
+    ['A'.repeat(10) + '湖湖湖', 'normal', 2],
+    ['a '.repeat(10) + '湖'.repeat(5), 'normal', 2], // 16 visual units exactly.
+    ['a '.repeat(10) + '湖'.repeat(5) + ' ', 'medium', 3],
+    ['a '.repeat(20) + '湖'.repeat(4), 'medium', 3], // 26 visual units exactly.
+    ['a '.repeat(20) + '湖'.repeat(4) + ' ', 'small', 3],
+    ['！'.repeat(9), 'normal', 2],
+    ['，'.repeat(17), 'medium', 3],
+    ['\u3000'.repeat(17), 'medium', 3],
+    ['\uffe5'.repeat(17), 'medium', 3],
+    ['Ａ'.repeat(17), 'medium', 1], // A full-width word remains indivisible.
+  ];
+  for (const [text, expectedSize, expectedRows] of cases) {
+    const { html, size } = render([{ type: 'text', text }]);
+    assert.equal(size, expectedSize, JSON.stringify(text));
+    assert.equal((html.match(/class="lake-text-line"/gu) || []).length, expectedRows, JSON.stringify(text));
+  }
+  for (const [count, expectedSize, expectedRows] of [[7, 'normal', 1], [8, 'normal', 2], [15, 'normal', 2], [16, 'medium', 3]]) {
+    const { html, size } = render([{ type: 'text', text: '湖'.repeat(count) }, { type: 'emote', text: '[妙]', url: 'https://i0.hdslb.com/bfs/live/a.png' }]);
+    assert.equal(size, expectedSize);
+    assert.equal((html.match(/class="lake-text-line"/gu) || []).length, expectedRows);
+    assert.equal((html.match(/class="lake-letter /gu) || []).length, count + 1, 'an image retains one full-width unit and one reading position');
+    assert.match(html, new RegExp(`--letter-delay:${count * 160}ms"><img`));
+  }
+});
+
+test('lake pure-CJK captions retain the previous exact line markup and size at every boundary', () => {
+  const render = vm.runInContext('lakeLettersHtml', appContext());
+  const cases = [
+    [1, 'normal', [1]], [8, 'normal', [8]], [9, 'normal', [5, 4]], [16, 'normal', [8, 8]],
+    [17, 'medium', [6, 6, 5]], [19, 'medium', [7, 7, 5]], [24, 'medium', [8, 8, 8]], [26, 'medium', [9, 9, 8]],
+    [27, 'small', [9, 9, 9]], [80, 'small', [27, 27, 26]],
+  ];
+  for (const [count, expectedSize, previousRows] of cases) {
+    let index = 0;
+    const previousHtml = previousRows.map(length => `<span class="lake-text-line">${Array.from({ length }, () => `<span class="lake-letter b" style="--letter-delay:${index++ * 160}ms">湖</span>`).join('')}</span>`).join('');
+    const { html, size } = render([{ type: 'text', text: '湖'.repeat(count) }]);
+    assert.equal(size, expectedSize, `${count} CJK graphemes`);
+    assert.equal(html, previousHtml, `${count} CJK graphemes preserve exact markup, line lengths and delays`);
+  }
+});
+
+
+test('lake common Chinese punctuation preserves the previous exact CJK line markup and size', () => {
+  const render = vm.runInContext('lakeLettersHtml', appContext());
+  const cases = [
+    ['湖边晚安……大家好', 'normal', ['湖边晚安…', '…大家好']],
+    ['“湖”“风”“月”', 'normal', ['“湖”“风', '”“月”']],
+    ['‘湖’‘风’‘月’', 'normal', ['‘湖’‘风', '’‘月’']],
+    ['等等——等等——我', 'normal', ['等等——等', '等——我']],
+    ['湖'.repeat(13) + '“”……', 'medium', ['湖'.repeat(6), '湖'.repeat(6), '湖“”……']],
+  ];
+  for (const [text, expectedSize, previousLines] of cases) {
+    let index = 0;
+    const previousHtml = previousLines.map(line => `<span class="lake-text-line">${[...line].map(letter => `<span class="lake-letter b" style="--letter-delay:${index++ * 160}ms">${letter}</span>`).join('')}</span>`).join('');
+    const { html, size } = render([{ type: 'text', text }]);
+    assert.equal(size, expectedSize, text);
+    assert.equal(html, previousHtml, text);
+  }
+});
+
+test('lake enumerated Chinese punctuation is full width while ASCII punctuation stays half width', () => {
+  const render = vm.runInContext('lakeLettersHtml', appContext());
+  for (const language of ['zh-CN', 'en']) {
+    setLanguage(language);
+    for (const character of '“”‘’…—') {
+      for (const [count, expectedSize, expectedRows] of [[8, 'normal', 1], [9, 'normal', 2], [16, 'normal', 2], [17, 'medium', 3], [26, 'medium', 3], [27, 'small', 3]]) {
+        const { html, size } = render([{ type: 'text', text: character.repeat(count) }]);
+        assert.equal(size, expectedSize, `${language}/${character}/${count}`);
+        assert.equal((html.match(/class="lake-text-line"/gu) || []).length, expectedRows, `${language}/${character}/${count}`);
+      }
+    }
+    for (const character of ['"', "'", '.', '-']) {
+      for (const [count, expectedSize, expectedRows] of [[9, 'normal', 1], [17, 'normal', 2], [27, 'normal', 2], [30, 'medium', 3]]) {
+        const { html, size } = render([{ type: 'text', text: character.repeat(count) }]);
+        assert.equal(size, expectedSize, `${language}/ASCII ${character}/${count}`);
+        assert.equal((html.match(/class="lake-text-line"/gu) || []).length, expectedRows, `${language}/ASCII ${character}/${count}`);
+      }
+    }
+    const { html } = render([{ type: 'text', text: 'don’t' }]);
+    assert.equal((html.match(/class="lake-word"/gu) || []).length, 1, 'the enumerated curly apostrophe still belongs to the same intact word');
+    assert.equal(html.replace(/<[^>]+>/gu, ''), 'don’t');
+    assert.deepEqual([...html.matchAll(/--letter-delay:(\d+)ms/gu)].map(match => Number(match[1])), [0, 160, 320, 480, 640]);
+  }
+  setLanguage('zh-CN');
 });

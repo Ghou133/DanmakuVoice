@@ -24,11 +24,12 @@ use danmakuvoice_engine::{
     model::{EventKind, LiveEvent, Provider, VoiceBinding, VoicePreset},
     obs::ObsSettings,
     playback::{PlaybackExecutor, PreparedPlayback},
-    rules::{RulePreview, RuleSet},
+    rules::{PlanPart, RulePreview, RuleSet},
     scheduler::{self, JobOrigin, QueueSnapshot, SchedulerHandle, SpeechJob},
     storage::{
-        ConnectionSettings, DataStore, DesktopPreferences, OverlayNames, OverlaySettings,
-        OverlayStyle, ServiceConnection, StorageError,
+        ConfigurationExport, ConnectionSettings, DataStore, DesktopPreferences,
+        OVERLAY_TITLE_LIMIT, OverlayNames, OverlaySettings, OverlayStyle, ServiceConnection,
+        StorageError,
     },
     tts::{
         dobao::{self, DEFAULT_VOICE_ID},
@@ -59,6 +60,7 @@ const ANONYMOUS_DISABLED: &str = "匿名模式已关闭，请先扫码登录 B �
 pub struct LaunchOptions {
     pub data_dir: PathBuf,
     pub disable_network: bool,
+    pub show_setup: bool,
 }
 
 impl LaunchOptions {
@@ -70,6 +72,7 @@ impl LaunchOptions {
         let mut args = args.into_iter();
         let mut directory = None;
         let mut disable_network = false;
+        let mut show_setup = false;
         while let Some(arg) = args.next() {
             if arg == "--data-dir" {
                 if directory.is_some() {
@@ -82,6 +85,8 @@ impl LaunchOptions {
                 directory = Some(PathBuf::from(value));
             } else if arg == "--disable-network" {
                 disable_network = true;
+            } else if arg == "--setup" {
+                show_setup = true;
             } else {
                 return Err(format!("不支持的参数：{}", arg.to_string_lossy()));
             }
@@ -97,6 +102,7 @@ impl LaunchOptions {
                 std::env::current_dir().map_err(display)?.join(directory)
             },
             disable_network,
+            show_setup,
         })
     }
 }
@@ -199,6 +205,7 @@ struct Controller {
     doubao_connection: Option<String>,
     live: Option<Arc<LiveController>>,
     last_live: LiveSnapshot,
+    live_history: danmakuvoice_engine::live_history::LiveHistory,
     /// Chat kept on screen while only the speech switch restarts the live session.
     carried_events: Vec<LiveEvent>,
     connecting: bool,
@@ -260,13 +267,18 @@ impl Application {
         Ok(ReconfigurationGuard(self.clone()))
     }
     pub fn new(data_dir: PathBuf, network_disabled: bool) -> Result<Self, String> {
-        let store = DataStore::open(&data_dir).map_err(display)?;
+        let mut store = DataStore::open(&data_dir).map_err(display)?;
         let mut prefs = store.load_desktop_preferences().map_err(display)?;
         // Keep legacy room/UID choices, but never restore anonymous reception.
         // This preference expresses the required mode, not a logged-in session.
         prefs.authenticated = true;
+        prefs.output = audio::OutputSelection::Default;
+        prefs.scale = 1.0;
         // A damaged overlay record must not stop the app; it reverts to off.
-        let overlay_settings = store.load_overlay_settings().unwrap_or_default();
+        let overlay_settings = store
+            .load_overlay_settings()
+            .unwrap_or_default()
+            .with_lake_design();
         let overlay_hub = OverlayHub::new();
         overlay_hub.set_config(overlay_config(&overlay_settings));
         // Like the overlay, a damaged OBS record reverts to off instead of blocking startup.
@@ -274,6 +286,12 @@ impl Application {
         let obs_has_password = store.has_obs_password().unwrap_or(false);
         let bili_session = store.load_bili_session().ok().flatten();
         let bili_user_id = bili_session.as_ref().map(BiliSession::user_id);
+        // Lake exposes the owner's room controls after account login. Migrate
+        // the retired experimental switch without starting or stopping a stream.
+        if bili_user_id.is_some() && !prefs.broadcast_console {
+            prefs.broadcast_console = true;
+            store.save_desktop_preferences(&prefs).map_err(display)?;
+        }
         let bili_profile = bili_session
             .as_ref()
             .and_then(BiliSession::profile)
@@ -317,6 +335,7 @@ impl Application {
             doubao_connection: None,
             live: None,
             last_live: LiveSnapshot::default(),
+            live_history: danmakuvoice_engine::live_history::LiveHistory::default(),
             carried_events: Vec::new(),
             connecting: false,
             live_receive_only: false,
@@ -659,8 +678,8 @@ impl Application {
 
     fn save_overlay_title(&self, payload: &Value) -> Result<(), String> {
         let title = required_str(payload, "title")?.trim();
-        if !(1..=12).contains(&title.chars().count()) {
-            return Err("叠加层主标题须为 1–12 个字".into());
+        if !(1..=OVERLAY_TITLE_LIMIT).contains(&title.chars().count()) {
+            return Err(format!("叠加层主标题须为 1–{OVERLAY_TITLE_LIMIT} 个字"));
         }
         let mut state = self.lock()?;
         if !state.overlay_settings.enabled {
@@ -897,6 +916,7 @@ impl Application {
             state.status.clone()
         };
         let dynamic = json!({
+            "live_history": state.live_history.stats(),
             "config_revision": state.config_revision,
             "config_unchanged": config_unchanged,
             "onboarding_done":state.prefs.onboarding_done,
@@ -904,6 +924,10 @@ impl Application {
             "account":{"user_id":state.bili_user_id,"name":state.bili_profile.as_ref().map(|p| &p.name),"avatar_url":state.bili_profile.as_ref().and_then(|p| p.avatar_url.as_deref())}, "qr":state.qr,
             "live":{"running":live.running,"connecting":state.connecting,"room_id":live.room_id.or(room),"state":if state.connecting {"connecting"} else {live_state},"message":live_message,"reconnect_code":reconnect_code(&live.room_state),"received":live.received,"events":events,"errors":live.errors,"no_voice":live.no_voice,"audience":state.live.as_ref().map(|live| live.audience_snapshot()).unwrap_or_default()},
             "queue":queue_json(&queue), "preferences":state.prefs,
+            "playback": state.audio.as_ref().map(|audio| {
+                let progress = audio.writer.progress();
+                json!({"job_id": progress.job_id, "played_ms": progress.played_ms, "queued_ms": progress.queued_ms})
+            }),
             "received_emotes_error":live.emote_lookup_error,
             "status":{"error":state.status_error || device_lost,"message":status_message},
             "data_dir":state.store.data_dir(),
@@ -941,8 +965,9 @@ impl Application {
         if shutdown.is_cancelled() {
             return Err("程序正在退出".into());
         }
-        let observation_only = matches!(action, "obs.refresh" | "obs.overlay.sync")
-            || action == "local_services.check" && bool_field(&payload, "automatic", false);
+        let observation_only =
+            matches!(action, "obs.refresh" | "obs.overlay.sync" | "live.history")
+                || action == "local_services.check" && bool_field(&payload, "automatic", false);
         if matches!(action, "queue.stop" | "live.disconnect") {
             let mut state = self.lock()?;
             state.explicit_stop_epoch = state.explicit_stop_epoch.wrapping_add(1);
@@ -1013,6 +1038,35 @@ impl Application {
             return Err("正在应用设置，请稍候".into());
         }
         match action {
+            "live.history" => {
+                let state = self.lock()?;
+                let session = required_str(&payload, "session_id")?;
+                let before = payload
+                    .get("before")
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .filter(|value| *value > 0)
+                            .ok_or("历史游标无效")
+                    })
+                    .transpose()?;
+                let limit = payload
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(100)
+                    .clamp(1, 100) as usize;
+                let viewer = payload.get("viewer").and_then(Value::as_str);
+                if viewer.is_some_and(|value| value.len() > 300) {
+                    return Err("观众标识过长".into());
+                }
+                return serde_json::to_value(
+                    state
+                        .live_history
+                        .page(session, before, limit, viewer)
+                        .map_err(str::to_owned)?,
+                )
+                .map_err(display);
+            }
             action if action.starts_with("bili.chat.") => {
                 return self.chat_send_command(action, &payload).await;
             }
@@ -1159,6 +1213,7 @@ impl Application {
                 state.moderation.invalidate();
                 state.chat_send.invalidate();
                 state.bili_user_id = None;
+                state.live_history = danmakuvoice_engine::live_history::LiveHistory::default();
                 state.bili_profile = None;
                 state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
                 state.save_preferences()?;
@@ -1174,7 +1229,39 @@ impl Application {
             }
             "connections.probe" => return self.probe(required_str(&payload, "id")?).await,
             "audition" => self.audition(&payload, false).await?,
+            "assets.audition" => {
+                self.audition(&json!({"asset_id":required_str(&payload, "id")?}), false)
+                    .await?;
+            }
+            "audition.catalog" => {
+                let mut request = payload.clone();
+                request["catalog"] = json!(true);
+                self.audition(&request, false).await?;
+            }
             "audio.test" => self.audition(&payload, true).await?,
+            "configuration.import" => {
+                confirmed(&payload)?;
+                let path = absolute_path(required_str(&payload, "path")?)?;
+                if std::fs::metadata(&path).map_err(display)?.len() > 16 * 1024 * 1024 {
+                    return Err("配置备份超过 16 MiB 限制".into());
+                }
+                let export: ConfigurationExport =
+                    serde_json::from_slice(&std::fs::read(path).map_err(display)?)
+                        .map_err(display)?;
+                let _transition = self.begin_reconfiguration()?;
+                self.stop(true).await?;
+                let mut state = self.lock()?;
+                let backup_path = state.store.backup_before_legacy_import().map_err(display)?;
+                state.store.import_configuration(&export).map_err(display)?;
+                state.moderation.invalidate();
+                state.chat_send.invalidate();
+                state.carried_events.clear();
+                state.last_live = LiveSnapshot::default();
+                state.live_history = danmakuvoice_engine::live_history::LiveHistory::default();
+                return Ok(
+                    json!({"backup_path":backup_path,"connections":export.connections.len(),"presets":export.presets.len(),"bindings":export.bindings.len()}),
+                );
+            }
             "preferences.save" => self.preferences(&payload).await?,
             "overlay.save" => self.save_overlay(&payload).await?,
             "overlay.title.save" => self.save_overlay_title(&payload)?,
@@ -1232,19 +1319,29 @@ impl Application {
                 if payload.get("authenticated").and_then(Value::as_bool) == Some(false) {
                     return Err(ANONYMOUS_DISABLED.into());
                 }
-                if state.connecting || state.live.as_ref().is_some_and(|l| l.snapshot().running) {
+                let changes_room = payload.get("room_id").is_some();
+                if changes_room
+                    && (state.connecting
+                        || state.live.as_ref().is_some_and(|l| l.snapshot().running))
+                {
                     return Err("请先断开直播间再更改房间".into());
                 }
                 let mut settings = state.store.load_live_settings().map_err(display)?;
+                let previous_room = settings.room_id;
                 if payload.get("room_id").is_some() {
                     settings.room_id = Some(positive_id(&payload["room_id"])?);
                 }
                 if let Some(merge) = payload.get("gift_merge") {
                     settings.gift_merge = parse(merge)?;
                 }
-                state.moderation.invalidate();
-                state.chat_send.invalidate();
+                if changes_room {
+                    state.moderation.invalidate();
+                    state.chat_send.invalidate();
+                }
                 state.store.save_live_settings(&settings).map_err(display)?;
+                if previous_room != settings.room_id {
+                    state.live_history = danmakuvoice_engine::live_history::LiveHistory::default();
+                }
                 state.save_preferences()?;
             }
             "connections.save" => {
@@ -1403,6 +1500,22 @@ impl Application {
                 state
                     .store
                     .delete_preset(required_str(&payload, "id")?)
+                    .map_err(display)?;
+            }
+            "presets.remove" => {
+                confirmed(&payload)?;
+                let id = required_str(&payload, "id")?;
+                state
+                    .store
+                    .with_savepoint(|store| {
+                        let mut rules = store.load_rules()?;
+                        if rules.default_preset_id.as_deref() == Some(id) {
+                            rules.default_preset_id = None;
+                            rules.default_preset_explicitly_cleared = true;
+                            store.save_rules(&rules)?;
+                        }
+                        store.delete_preset(id)
+                    })
                     .map_err(display)?;
             }
             "presets.default" => {
@@ -1846,6 +1959,7 @@ impl Controller {
             "error": self.overlay_error,
             "clients": self.overlay_hub.clients(),
             "obs_clients": self.overlay_hub.obs_health().0,
+            "preview": self.overlay_hub.replay_snapshot(),
         })
     }
 
@@ -2178,6 +2292,9 @@ impl Application {
                 state.moderation.invalidate();
                 state.chat_send.invalidate();
                 state.bili_user_id = Some(session.user_id());
+                state.prefs.broadcast_console = true;
+                state.save_preferences()?;
+                state.live_history = danmakuvoice_engine::live_history::LiveHistory::default();
                 state.bili_profile = None;
                 state.bili_profile_epoch = state.bili_profile_epoch.wrapping_add(1);
                 state.qr.image_data_url = None;
@@ -2476,13 +2593,15 @@ impl Application {
                 // The engine loads Doubao identity only for an event that uses it.
                 let controller =
                     LiveController::new(state.store.data_dir(), scheduler.clone(), None)
-                        .map_err(display)?;
+                        .map_err(display)?
+                        .with_history(state.live_history.clone());
                 (Arc::new(controller), Some(scheduler))
             } else {
                 (
                     Arc::new(
                         LiveController::new_receive_only(state.store.data_dir())
-                            .map_err(display)?,
+                            .map_err(display)?
+                            .with_history(state.live_history.clone()),
                     ),
                     None,
                 )
@@ -2576,7 +2695,11 @@ impl Application {
         state.prefs.authenticated = true;
         state.overlay_server = None;
         state.overlay_error = None;
-        state.overlay_settings = state.store.load_overlay_settings().unwrap_or_default();
+        state.overlay_settings = state
+            .store
+            .load_overlay_settings()
+            .unwrap_or_default()
+            .with_lake_design();
         // Cleared settings carry no token. Issue a new one now so the previous
         // OBS address stops working and the address shown in the UI is valid.
         state.ensure_overlay_token()?;
@@ -2599,6 +2722,7 @@ impl Application {
         state.audio = None;
         state.resume_live_after_default_device_change = false;
         state.last_live = LiveSnapshot::default();
+        state.live_history = danmakuvoice_engine::live_history::LiveHistory::default();
         state.carried_events.clear();
         state.live_receive_only = false;
         state.migration = None;
@@ -2734,7 +2858,7 @@ impl Application {
     }
 
     async fn audition(&self, payload: &Value, output_test: bool) -> Result<(), String> {
-        if !output_test {
+        if !output_test && payload.get("asset_id").is_none() {
             self.require_network()?;
         }
         let gate = self.lock()?.activity_gate.clone();
@@ -2748,32 +2872,57 @@ impl Application {
             if output_test && state.prefs.playback_volume() <= 0.0 {
                 return Err("请先取消静音并调高主音量，再测试声音".into());
             }
-            let (preview, prepared) = if output_test {
-                PreparedPlayback::output_test()
-            } else {
-                let preview =
-                    if let Some(preset_id) = payload.get("preset_id").and_then(Value::as_str) {
-                        state
-                            .store
-                            .voice_audition_preview(preset_id, required_str(payload, "text")?)
-                            .map_err(display)?
-                    } else {
-                        state.preview(payload)?
+            let (preview, prepared) =
+                if let Some(id) = payload.get("asset_id").and_then(Value::as_str) {
+                    let asset = state
+                        .store
+                        .asset(id)
+                        .map_err(display)?
+                        .ok_or_else(|| "音效素材不存在".to_owned())?;
+                    let preview = RulePreview {
+                        event: LiveEvent::danmaku(0, None, "", &asset.name),
+                        filtered_reason: None,
+                        final_text: asset.name.clone(),
+                        parts: vec![PlanPart::Sound {
+                            trigger: asset.name,
+                            asset_id: id.to_owned(),
+                        }],
+                        voice: None,
+                        default_voice: None,
+                        voice_from_binding: false,
+                        pending_legacy_binding: false,
                     };
-                let device = if preview
-                    .voice
-                    .as_ref()
-                    .is_some_and(|v| v.provider == Provider::Doubao)
-                {
-                    Some(state.store.load_or_create_dobao_device().map_err(display)?)
-                } else {
-                    None
-                };
-                let prepared =
-                    PreparedPlayback::from_store(&state.store, &preview, device.as_ref())
+                    let prepared = PreparedPlayback::from_store(&state.store, &preview, None)
                         .map_err(display)?;
-                (preview, prepared)
-            };
+                    (preview, prepared)
+                } else if output_test {
+                    PreparedPlayback::output_test()
+                } else {
+                    let preview =
+                        if let Some(preset_id) = payload.get("preset_id").and_then(Value::as_str) {
+                            state
+                                .store
+                                .voice_audition_preview(preset_id, required_str(payload, "text")?)
+                                .map_err(display)?
+                        } else if payload["catalog"].as_bool() == Some(true) {
+                            catalog_audition_preview(&state.store, payload)?
+                        } else {
+                            state.preview(payload)?
+                        };
+                    let device = if preview
+                        .voice
+                        .as_ref()
+                        .is_some_and(|v| v.provider == Provider::Doubao)
+                    {
+                        Some(state.store.load_or_create_dobao_device().map_err(display)?)
+                    } else {
+                        None
+                    };
+                    let prepared =
+                        PreparedPlayback::from_store(&state.store, &preview, device.as_ref())
+                            .map_err(display)?;
+                    (preview, prepared)
+                };
             let scheduler = state.ensure_audio()?;
             state.audition_cancel = CancellationToken::new();
             state.audition_starting = true;
@@ -3477,6 +3626,39 @@ impl Application {
     }
 }
 
+fn catalog_audition_preview(store: &DataStore, payload: &Value) -> Result<RulePreview, String> {
+    let connection_id = required_str(payload, "connection_id")?;
+    let connection = store
+        .connections()
+        .map_err(display)?
+        .into_iter()
+        .find(|item| item.id == connection_id)
+        .ok_or("请先连接这个声音服务")?;
+    let provider = connection.settings.provider();
+    let raw_voice = required_str(payload, "voice_id")?;
+    let voice_id = match provider {
+        Provider::Doubao => dobao::normalize_voice_id(raw_voice).map_err(display)?,
+        Provider::FishAudio => fish::normalize_voice_id(raw_voice).map_err(display)?,
+        _ => raw_voice.to_owned(),
+    };
+    let sovits = if provider == Provider::GptSovits {
+        Some(parse(&payload["sovits"])?)
+    } else {
+        None
+    };
+    let preset = VoicePreset {
+        id: format!("catalog-{}", Uuid::new_v4()),
+        name: voice_id.clone(),
+        connection_id: connection_id.to_owned(),
+        provider,
+        voice_id,
+        speed: 1.0,
+        volume: 1.0,
+        sovits,
+    };
+    RulePreview::voice_audition(preset, required_str(payload, "text")?).map_err(display)
+}
+
 fn doubao_connection_for_login(store: &DataStore, id: &str) -> Result<ServiceConnection, String> {
     let existing = store
         .connections()
@@ -3819,6 +4001,8 @@ fn command_changes_configuration(action: &str) -> bool {
                 | "queue.clear"
                 | "queue.jump"
                 | "audition"
+                | "audition.catalog"
+                | "assets.audition"
                 | "audio.test"
                 | "rules.preview"
                 | "models.scan"
@@ -3856,6 +4040,8 @@ fn overlay_config(settings: &OverlaySettings) -> Value {
     json!({
         "style": settings.style,
         "corner": settings.corner,
+        "offset_x": settings.offset_x,
+        "offset_y": settings.offset_y,
         "scale": settings.scale,
         "vignette": settings.vignette,
         "title": settings.title,

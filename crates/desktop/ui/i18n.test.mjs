@@ -23,6 +23,7 @@ test('English catalog has no empty or untranslated entries', () => {
   for (const [source, translated] of Object.entries(english)) {
     assert.ok(translated.length, source);
     assert.doesNotMatch(translated, /\p{Script=Han}/u, source);
+    assert.doesNotMatch(translated, /：/u, `${source}: English punctuation must use an ASCII colon`);
     assert.equal(t(source), translated, source);
   }
 });

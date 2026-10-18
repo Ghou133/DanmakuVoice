@@ -86,6 +86,11 @@
 #live-shell.lake-mode button {text-align:inherit}
 ::view-transition-old(root),::view-transition-new(root) {animation:none;mix-blend-mode:normal}
 ::view-transition-new(root) {animation:lake-theme-reveal .95s cubic-bezier(.4,0,.2,1)}
+::view-transition-old(lake-orb),::view-transition-new(lake-orb) {mix-blend-mode:normal}
+::view-transition-old(lake-orb) {animation:lake-orb-set .5s cubic-bezier(.5,0,.75,0) both}
+::view-transition-new(lake-orb) {animation:lake-orb-rise .8s cubic-bezier(.2,.75,.3,1) .42s both}
+@keyframes lake-orb-set {60%{opacity:.55}to{opacity:0;transform:translateY(72px) scale(.92)}}
+@keyframes lake-orb-rise {from{opacity:0;transform:translateY(72px) scale(.92)}}
 @keyframes lake-theme-reveal {from{clip-path:circle(0px at var(--reveal-x,90%) var(--reveal-y,20px))}to{clip-path:circle(160vmax at var(--reveal-x,90%) var(--reveal-y,20px))}}
 #live-shell.lake-mode .live-aura,#live-shell.lake-mode .live-grain {display:none}
 
@@ -136,7 +141,7 @@
 .lake-reflection::before {content:"";position:absolute;inset:-100% 0 0;background:repeating-linear-gradient(180deg,var(--lake-path) 0 2px,transparent 2px 9px);background-size:100% 50%;animation:lake-shimmer 3s linear infinite}
 @keyframes lake-shimmer {from{transform:translateY(0)}to{transform:translateY(18px)}}
 .lake-ripple {position:absolute;box-sizing:content-box;width:60px;height:12px;margin:-6px 0 0 -30px;border-radius:50%;border:1px solid var(--lake-path);opacity:0;animation:lake-ripple 9s ease-out infinite;pointer-events:none}
-.lake-ripple.ripple-one {left:calc(300 * var(--lake-x));top:calc(620 * var(--lake-y) - var(--titlebar-h))}
+.lake-ripple.ripple-one {left:calc(470 * var(--lake-x));top:calc(560 * var(--lake-y) - var(--titlebar-h))}
 .lake-ripple.ripple-two {left:calc(860 * var(--lake-x));top:calc(560 * var(--lake-y) - var(--titlebar-h));animation-delay:-4s}
 .lake-ripple.ripple-three {left:calc(560 * var(--lake-x));top:calc(690 * var(--lake-y) - var(--titlebar-h));animation-delay:-6.5s}
 @keyframes lake-ripple {0%{opacity:.7;transform:scale(.4)}70%,100%{opacity:0;transform:scale(4)}}
@@ -329,12 +334,6 @@
 #live-shell.lake-mode .chat-compose .chat-compose-note:not([hidden]) {position:absolute;bottom:calc(100% + 8px);left:0;right:0;display:block;font-size:11.5px;line-height:1.45;color:var(--lake-water-ink3)}
 #live-shell.lake-mode .voice-panel {left:auto;right:0;bottom:calc(100% + 16px);max-width:min(480px,calc(100vw - 32px));backdrop-filter:blur(24px)}
 #live-shell.lake-mode .queue-panel {right:0;bottom:calc(100% + 16px);backdrop-filter:blur(24px)}
-#lake-sound-panel {position:absolute;z-index:8;left:calc(600 * var(--lake-x));top:calc(296 * var(--lake-y) - var(--titlebar-h));width:300px;max-width:calc(100% - 32px);padding:16px 16px 14px;border:1px solid var(--lake-pop-border);border-radius:20px;background:var(--lake-pop);color:var(--lake-ink);backdrop-filter:blur(24px);box-shadow:var(--lv-shadow);pointer-events:auto;animation:lake-panel-in .3s cubic-bezier(.3,1.3,.5,1) both}
-#lake-sound-panel .dock-volume {padding:6px 0;gap:12px}
-#lake-sound-panel .dock-volume input {flex:1;min-width:0;width:auto}
-#lake-sound-panel .dock-volume output {color:var(--lake-ink2);font-size:18px}
-#lake-sound-panel .dock-mute {color:var(--lake-ink2)}
-#lake-sound-panel .dock-mute.on {color:var(--lake-pink)}
 @keyframes lake-panel-in {from{opacity:0;transform:translateY(8px) scale(.98)}}
 :root[data-step=main] #toast {position:fixed;left:50%;bottom:110px;z-index:9;display:flex;align-items:center;gap:14px;height:40px;max-width:none;padding:0 18px;border:0;border-radius:20px;background:var(--lake-ink);color:var(--lake-on);font-family:"Segoe UI Variable","Segoe UI","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;font-size:13px;line-height:1.45;white-space:nowrap;overflow-wrap:normal;box-shadow:none;transform:translateX(-50%)}
 :root[data-step=main] #toast:not([hidden]) {animation:lake-toast-in .3s cubic-bezier(.3,1.3,.5,1) both}
@@ -464,7 +463,6 @@
   #lake-history .lake-message:nth-child(3) .lake-message-text,#lake-history .lake-message:nth-child(4) .lake-message-text {font-size:14px!important}
   #live-shell.lake-mode .lake-foot {right:var(--lake-left);width:42%;bottom:24px}
   #live-shell.lake-mode .lake-voice-name {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  #lake-sound-panel {left:auto;right:4%;width:min(300px,calc(100% - 64px))}
   #live-shell.lake-mode .onair {max-width:48%;gap:10px}
   #live-shell.lake-mode .onair-kicker {font-size:11px;gap:7px;letter-spacing:.14em}
   #live-shell.lake-mode #onair-panel[data-mode=info] {max-height:70%;overflow-y:auto;overflow-x:hidden}

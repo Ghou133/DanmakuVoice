@@ -108,6 +108,8 @@ pub enum StorageError {
         "OBS 联动设置无效：地址只能是主机名或 IPv4，端口 1–65535，密码不超过 256 字且不含控制字符 [DV-S38]"
     )]
     InvalidObsSettings,
+    #[error("备份版本或内容无效，请选择本应用导出的配置备份 [DV-S48]")]
+    InvalidConfigurationBackup,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -153,6 +155,10 @@ pub struct BroadcastSessionSummary {
     pub observed_started_at: u64,
     pub ended_observed_at: u64,
     pub messages: u64,
+    /// Exact distinct speakers for a fully observed runtime session. Older or
+    /// interrupted sessions have no reconstructable identities, so remain unknown.
+    #[serde(default)]
+    pub unique_viewers: Option<u64>,
     /// Elapsed time to an observed ending. Unknown after an unobserved offline
     /// ending, or when Bilibili did not supply the current stream's start time.
     pub seconds: Option<u64>,
@@ -176,6 +182,9 @@ impl BroadcastSessionRecord {
         }
         if let Some(last) = &self.last_session
             && (last.observed_started_at == 0
+                || last
+                    .unique_viewers
+                    .is_some_and(|count| count > last.messages)
                 || last.ended_observed_at < last.observed_started_at
                 || last
                     .started_at
@@ -299,7 +308,7 @@ pub enum OverlayNames {
 
 pub const OVERLAY_DEFAULT_PORT: u16 = 47823;
 pub const OVERLAY_DEFAULT_TITLE: &str = "今晚的弹幕";
-const OVERLAY_TITLE_LIMIT: usize = 24;
+pub const OVERLAY_TITLE_LIMIT: usize = 24;
 const OVERLAY_TAGLINE_LIMIT: usize = 64;
 
 /// Experimental OBS browser-source overlay. The token only gates the local
@@ -310,6 +319,10 @@ pub struct OverlaySettings {
     pub enabled: bool,
     pub style: OverlayStyle,
     pub corner: OverlayCorner,
+    /// Browser-source pixels, positive toward the right and bottom. Kept
+    /// independent of artwork scale and the selected corner.
+    pub offset_x: i32,
+    pub offset_y: i32,
     pub scale: f32,
     pub vignette: f32,
     pub title: String,
@@ -332,6 +345,8 @@ impl Default for OverlaySettings {
             enabled: false,
             style: OverlayStyle::Spine,
             corner: OverlayCorner::TopLeft,
+            offset_x: 0,
+            offset_y: 0,
             scale: 1.0,
             vignette: 0.6,
             title: OVERLAY_DEFAULT_TITLE.into(),
@@ -350,11 +365,22 @@ impl Default for OverlaySettings {
 }
 
 impl OverlaySettings {
+    /// Preserve placement and content while retiring the older style controls.
+    /// The legacy fields remain deserializable for existing local settings.
+    pub fn with_lake_design(mut self) -> Self {
+        self.style = OverlayStyle::Spine;
+        self.vignette = 0.6;
+        self.linger_seconds = 14;
+        self
+    }
+
     pub fn validate(&self) -> Result<(), StorageError> {
         let text_ok = |text: &str, limit: usize| {
             text.chars().count() <= limit && !text.chars().any(char::is_control)
         };
-        let valid = self.scale.is_finite()
+        let valid = (-8192..=8192).contains(&self.offset_x)
+            && (-8192..=8192).contains(&self.offset_y)
+            && self.scale.is_finite()
             && (0.5..=2.0).contains(&self.scale)
             && self.vignette.is_finite()
             && (0.0..=1.0).contains(&self.vignette)
@@ -386,6 +412,7 @@ impl OverlaySettings {
             token: self.token.clone(),
             ..edited.clone()
         }
+        .with_lake_design()
     }
 }
 
@@ -1832,6 +1859,84 @@ impl DataStore {
         })
     }
 
+    /// Restore the credential-free application export in one transaction.
+    /// Existing unrelated voices remain available. Same-identity bindings are
+    /// updated, rather than duplicated. Missing managed audio fails the whole
+    /// restore, so a backup never silently loses its keyword sound rules.
+    pub fn import_configuration(
+        &mut self,
+        export: &ConfigurationExport,
+    ) -> Result<(), StorageError> {
+        if !(1..=4).contains(&export.format_version)
+            || export.connections.len() > 256
+            || export.presets.len() > 4096
+            || export.bindings.len() > 4096
+        {
+            return Err(StorageError::InvalidConfigurationBackup);
+        }
+        export.rules.validate()?;
+        let mut connection_ids = std::collections::HashSet::new();
+        for connection in &export.connections {
+            connection.settings.validate_export_safe()?;
+            if connection.id.is_empty() || !connection_ids.insert(&connection.id) {
+                return Err(StorageError::InvalidConfigurationBackup);
+            }
+        }
+        let mut preset_ids = std::collections::HashSet::new();
+        for preset in &export.presets {
+            if preset.id.is_empty()
+                || !preset_ids.insert(&preset.id)
+                || !connection_ids.contains(&preset.connection_id)
+                || preset.voice_id.trim().is_empty()
+                || !preset.speed.is_finite()
+                || !(0.5..=2.0).contains(&preset.speed)
+                || !preset.volume.is_finite()
+                || !(0.0..=2.0).contains(&preset.volume)
+            {
+                return Err(StorageError::InvalidConfigurationBackup);
+            }
+        }
+        if export
+            .rules
+            .default_preset_id
+            .as_ref()
+            .is_some_and(|id| !preset_ids.contains(id))
+            || export
+                .rules
+                .preferred_presets
+                .values()
+                .any(|id| !preset_ids.contains(id))
+            || export
+                .bindings
+                .iter()
+                .any(|binding| !preset_ids.contains(&binding.preset_id))
+        {
+            return Err(StorageError::InvalidConfigurationBackup);
+        }
+        self.in_savepoint("restore_configuration", |store| {
+            for connection in &export.connections {
+                // has_credential is display metadata; no credential write is performed.
+                store.save_connection(connection)?;
+            }
+            for preset in &export.presets { store.save_preset(preset)?; }
+            for (id, settings) in &export.fish_audio_settings { store.save_fish_audio_settings(id, settings)?; }
+            for (id, settings) in &export.dots_settings { store.save_dots_playback_settings(id, settings)?; }
+            for binding in &export.bindings {
+                let id: Option<String> = store.conn.query_row(
+                    "SELECT id FROM bindings WHERE platform=?1 AND ((?2 IS NOT NULL AND user_id=?2) OR (?2 IS NULL AND ?3 IS NOT NULL AND user_id IS NULL AND user_name=?3) OR (?2 IS NULL AND ?3 IS NULL AND legacy_user_name IS ?4 AND preset_id=?5)) ORDER BY id LIMIT 1",
+                    params![binding.platform, binding.user_id.map(|id| id.to_string()), binding.user_name, binding.legacy_user_name, binding.preset_id],
+                    |row| row.get(0),
+                ).optional()?;
+                store.save_binding(&id.unwrap_or_else(|| Uuid::new_v4().to_string()), binding)?;
+            }
+            store.save_live_settings(&export.live_settings)?;
+            let mut rules = export.rules.clone();
+            rules.events.filter_bilibili_emoticons = true;
+            store.save_rules(&rules)?;
+            Ok(())
+        })
+    }
+
     /// Save a dots voice preset and its original-file reference together.
     /// Both rows roll back if either existing validation rejects the input.
     pub fn save_dots_voice(
@@ -2350,6 +2455,80 @@ mod tests {
     use crate::rules::{Replacement, SoundRule};
     use crate::voice_library::{ReferenceProfile, ReferenceRole};
 
+    #[test]
+    fn configuration_restore_is_atomic_and_does_not_import_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let connection = ServiceConnection {
+            id: "backup-dots".into(),
+            name: "Local".into(),
+            settings: ConnectionSettings::Dots {
+                endpoint: "http://127.0.0.1:9881".into(),
+                timeout_secs: 30,
+            },
+            has_credential: true,
+        };
+        store.save_connection(&connection).unwrap();
+        let preset = VoicePreset {
+            id: "backup-voice".into(),
+            name: "Original".into(),
+            connection_id: connection.id.clone(),
+            provider: Provider::Dots,
+            voice_id: "role".into(),
+            speed: 1.0,
+            volume: 1.0,
+            sovits: None,
+        };
+        store.save_preset(&preset).unwrap();
+        let mut rules = RuleSet {
+            default_preset_id: Some(preset.id.clone()),
+            ..RuleSet::default()
+        };
+        rules.emote_words.push(Replacement {
+            from: "[doge]".into(),
+            to: "狗头".into(),
+        });
+        store.save_rules(&rules).unwrap();
+        let binding = VoiceBinding {
+            platform: "bilibili".into(),
+            user_id: None,
+            user_name: Some("Alice".into()),
+            legacy_user_name: None,
+            preset_id: preset.id.clone(),
+            enabled: true,
+        };
+        store.save_binding("binding-original", &binding).unwrap();
+        let backup = store.export_configuration().unwrap();
+        let mut changed = preset.clone();
+        changed.name = "Changed".into();
+        store.save_preset(&changed).unwrap();
+        store.import_configuration(&backup).unwrap();
+        store.import_configuration(&backup).unwrap();
+        assert_eq!(store.presets().unwrap()[0].name, "Original");
+        assert_eq!(store.bindings().unwrap().len(), 1);
+        assert_eq!(store.load_rules().unwrap(), rules);
+        assert!(
+            store
+                .connection_credential(&connection.id)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut broken = backup;
+        broken.presets[0].name = "Must roll back".into();
+        broken.rules.sounds.push(SoundRule {
+            trigger: "晚安".into(),
+            asset_id: "missing-audio".into(),
+        });
+        assert!(matches!(
+            store.import_configuration(&broken),
+            Err(StorageError::AssetMissing(_))
+        ));
+        assert_eq!(store.presets().unwrap()[0].name, "Original");
+        assert_eq!(store.load_rules().unwrap(), rules);
+        assert!(store.conn.is_autocommit());
+    }
+
     fn broadcast_session_record() -> BroadcastSessionRecord {
         let run_id = Uuid::new_v4().to_string();
         BroadcastSessionRecord {
@@ -2370,6 +2549,7 @@ mod tests {
                 observed_started_at: 12,
                 ended_observed_at: 70,
                 messages: 19,
+                unique_viewers: Some(7),
                 seconds: Some(60),
             }),
         }
@@ -3935,6 +4115,8 @@ mod tests {
             enabled: true,
             style: OverlayStyle::Card,
             corner: OverlayCorner::BottomRight,
+            offset_x: -47,
+            offset_y: 29,
             scale: 1.25,
             vignette: 0.8,
             title: "上分夜".into(),
@@ -3951,6 +4133,14 @@ mod tests {
         let exported = serde_json::to_string(&reopened.export_configuration().unwrap()).unwrap();
         assert!(!exported.contains("0123456789abcdef"));
         for broken in [
+            OverlaySettings {
+                offset_x: -8193,
+                ..settings.clone()
+            },
+            OverlaySettings {
+                offset_y: 8193,
+                ..settings.clone()
+            },
             OverlaySettings {
                 scale: f32::NAN,
                 ..settings.clone()
@@ -4003,9 +4193,27 @@ mod tests {
         assert_eq!(merged.title, "夜聊");
         assert_eq!(merged.port, settings.port);
         assert_eq!(merged.token, settings.token);
+        assert_eq!(merged.style, OverlayStyle::Spine);
+        assert_eq!(merged.vignette, 0.6);
+        assert_eq!(merged.linger_seconds, 14);
+        let migrated = settings.clone().with_lake_design();
+        assert_eq!(migrated.corner, settings.corner);
+        assert_eq!((migrated.offset_x, migrated.offset_y), (-47, 29));
+        assert_eq!(migrated.scale, settings.scale);
+        assert_eq!(migrated.token, settings.token);
         let old: OverlaySettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert_eq!(old.style, OverlayStyle::Spine);
         assert_eq!(old.title, OVERLAY_DEFAULT_TITLE);
+        assert_eq!((old.offset_x, old.offset_y), (0, 0));
+        for offset in [-8192, 8192] {
+            OverlaySettings {
+                offset_x: offset,
+                offset_y: offset,
+                ..settings.clone()
+            }
+            .validate()
+            .unwrap();
+        }
     }
 
     #[test]

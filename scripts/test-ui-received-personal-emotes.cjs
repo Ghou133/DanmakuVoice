@@ -12,7 +12,7 @@ const output = path.resolve(process.env.DV_TEST_OUTPUT || path.join(__dirname, '
 const marker = '[费可装扮表情包_爱你]';
 const actualUrl = 'https://i0.hdslb.com/bfs/garb/699dc00ce1374521842dc1bf13d5946fc5d5607e.png';
 const missingUrl = 'https://i0.hdslb.com/bfs/garb/fictional-received-personal-missing.png';
-const assets = ['app.js', 'helpers.mjs', 'index.html', 'styles.css', 'lake.css', 'lake-drawers.css', 'fonts/DanmakuVoiceSerifSC-Medium.woff2', 'fonts/DanmakuVoiceSerifSC-Bold.woff2', 'fonts/DanmakuVoiceSerifSC-Black.woff2', 'fonts/InstrumentSerif-Regular.woff2', 'fonts/InstrumentSerif-Italic.woff2'];
+const assets = ['app.js', 'helpers.mjs', 'index.html', 'styles.css', 'lake.css', 'lake-drawers.css', 'lake-scene.mjs', 'lake-redesign-main.css', 'lake-redesign-settings.css', 'lake-redesign-voices.css', 'lake-redesign-obs.css', 'fonts/DanmakuVoiceSerifSC-Medium.woff2', 'fonts/DanmakuVoiceSerifSC-Bold.woff2', 'fonts/DanmakuVoiceSerifSC-Black.woff2', 'fonts/InstrumentSerif-Regular.woff2', 'fonts/InstrumentSerif-Italic.woff2'];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const checks = [], trace = [], calls = [], requests = [], errors = [];
 const check = name => { checks.push(name); console.log(`ok ${name}`); };
@@ -125,9 +125,9 @@ async function activity(value) {
     await page.locator('[data-action="history.open"]').click();
     await imageSurface(page.locator('#chat-feed'), 'full history', 2, undefined, 1);
     await page.screenshot({ path: path.join(output, 'history-enriched-personal.png') }); await close();
-    const firstImageHistory = page.locator('#lake-history .lake-message-text').filter({ has: page.locator('img.message-emote') });
-    await imageSurface(firstImageHistory, 'sunk lake history', 1, '');
-    check('sunk lake history and the full history drawer both consume the same normalized emotes');
+    const firstImageHistory = page.locator('#lake-peek .lake-peek-entry > span').filter({ has: page.locator('img.message-emote') });
+    await imageSurface(firstImageHistory, 'water hover recent message', 1, '');
+    check('water hover recent messages and submerged full history consume the same normalized emotes');
 
     await page.locator('#chat-message').fill('这份草稿保留'); await page.locator('#chat-message').evaluate(input => input.setSelectionRange(2, 5));
     await page.locator('#lake-current .lake-message-name').click();
@@ -137,10 +137,10 @@ async function activity(value) {
     await close(); await draftUnchanged('viewer card');
 
     // Late enrichment must retain the existing article and static presentation.
-    await page.locator('#lake-history .lake-message').filter({ hasText: marker }).evaluate(node => { window.__lateArticle = node; });
+    await page.locator('#lake-peek .lake-peek-entry').filter({ hasText: marker }).evaluate(node => { window.__lateArticle = node; });
     state.live.events[0].emotes = [emote()]; state.live.events[0].is_bilibili_emoticon = true; await push();
-    assert.equal(await page.evaluate(() => document.querySelector('#lake-history').contains(window.__lateArticle)), true);
-    await imageSurface(page.locator('#lake-history .lake-message-text').last(), 'late enriched sunk row', 1, '');
+    assert.equal(await page.evaluate(() => document.querySelector('#lake-peek').contains(window.__lateArticle)), true);
+    await imageSurface(page.locator('#lake-peek .lake-peek-entry').last().locator(':scope > span').last(), 'late enriched water hover row', 1, '');
     await page.locator('#lake-current .lake-message').evaluate(node => { window.__lateCurrent = node; });
     const bareCurrent = event(4); state.live.events.push(bareCurrent); await push();
     await page.locator('#lake-current .lake-message').evaluate(node => { window.__lateCurrent = node; window.__lateBody = node.querySelector('.lake-message-text'); window.__lateIdentity = node.querySelector('.lake-message-name'); window.__lateIdentity.focus(); });
@@ -161,13 +161,19 @@ async function activity(value) {
     await page.locator('#viewer-alias').fill(''); await close(); await draftUnchanged('enrichment updates');
     check('incoming enriched messages refresh viewer history without replacing its alias field or composer draft and selection');
 
-    await page.evaluate(() => window.__richSettings('rules'));
-    const filter = page.locator('#settings [name="filter_bilibili_emoticons"]');
-    assert.equal(await filter.isChecked(), true); await filter.uncheck(); await page.waitForTimeout(250); await close();
-    assert.equal(state.rules.events.filter_bilibili_emoticons, false); await imageSurface(page.locator('#lake-current .lake-message-text'), 'filter off still renders images', 1, '更新');
-    await page.evaluate(() => window.__richSettings('rules')); await filter.check(); await page.waitForTimeout(250); await close();
-    assert.equal(state.rules.events.filter_bilibili_emoticons, true); await imageSurface(page.locator('#lake-current .lake-message-text'), 'filter on still renders images', 1, '更新'); await draftUnchanged('filter toggle');
-    check('the saved speech-filter checkbox toggles its real rule without hiding images or altering message drafts');
+    await page.evaluate(() => window.__richSettings('readings'));
+    await page.locator('#settings [data-action="lake.reading.add"]').first().click();
+    await page.locator('#settings .lake-reading-kinds label',{hasText:'表情'}).click();
+    await page.locator('#settings [name="from"]').fill(marker);await page.locator('#settings [name="to"]').fill('爱你');
+    await page.locator('#settings [data-action="lake.reading.save"]').click();await page.locator('.lake-reading-list').waitFor();await close();
+    assert.deepEqual(state.rules.emote_words,[{from:marker,to:'爱你'}]);
+    await imageSurface(page.locator('#lake-current .lake-message-text'), 'explicit reading still renders original image', 1, '更新');
+    await page.evaluate(() => window.__richSettings('readings'));
+    await page.locator('#settings .lake-reading-row').filter({hasText:marker}).locator('[data-action="lake.reading.delete"]').click();await close();
+    assert.deepEqual(state.rules.emote_words,[]);assert.equal(state.rules.events.filter_bilibili_emoticons,true);
+    assert.equal(state.live.events.at(-1).message,`更新${marker}`);
+    await imageSurface(page.locator('#lake-current .lake-message-text'), 'removed reading still renders original image', 1, '更新');await draftUnchanged('explicit reading changes');
+    check('explicit speech readings can be saved and removed without hiding emote images, changing source text or altering message drafts');
 
     state.preferences.appearance = 'light'; state.config_revision++; await push();
     await page.screenshot({ path: path.join(output, 'received-personal-day.png') });
@@ -217,12 +223,16 @@ async function activity(value) {
     overlayPage = await context.newPage(); overlayPage.on('pageerror', error => errors.push(error.message)); await overlayPage.goto(origin + '/overlay-test');
     await overlayPage.evaluate(() => { window.__richConfig({ theme: 'lake-night', show_header: true, linger_seconds: 60, merge: false }); window.__richReady(); });
     const overlayItem = (seq, message, emotes, sticker = false) => ({ seq, at: Date.now(), kind: 'danmaku', viewer: '虚构观众', uid: 501, message, emotes, sticker, job_id: null });
+    // The spine is a timeline: older lines stay above and the newest line is the last row.
+    const overlayRows = () => overlayPage.locator('#list .item:not(.out)');
+    const newestOverlayBody = () => overlayRows().last().locator('.lit');
     await overlayPage.evaluate(item => window.__richReceive(item), overlayItem(1, `直播${marker}普通[待办]`, [emote()]));
     await overlayPage.locator('.item .lit img.emote').waitFor();
-    await imageSurface(overlayPage.locator('.item .lit').first(), 'overlay mixed received body', 1, '直播普通[待办]');
+    await imageSurface(newestOverlayBody(), 'overlay mixed received body', 1, '直播普通[待办]');
     await overlayPage.evaluate(item => window.__richReceive(item), overlayItem(2, marker, [emote(true)], true));
     await overlayPage.locator('.item .lit img.sticker').waitFor();
-    await imageSurface(overlayPage.locator('.item .lit').first(), 'overlay standalone sticker', 1, '');
+    await imageSurface(newestOverlayBody(), 'overlay standalone sticker', 1, '');
+    assert.deepEqual(await overlayRows().locator('.lit').allTextContents(), ['直播普通[待办]', ''], 'the standalone sticker became its own newest line and left the earlier mixed line intact');
     await overlayPage.waitForTimeout(1500);
     await overlayPage.screenshot({ path: path.join(output, 'overlay-personal-pure-mixed.png'), omitBackground: true });
     check('the actual OBS overlay page consumes the same backend emotes for mixed text and standalone images');
@@ -238,8 +248,8 @@ async function activity(value) {
     const mainLongest = await page.locator('#lake-current .lake-message-text').evaluate(root => ({ text: root.textContent, labels: [...root.querySelectorAll('img')].map(img => img.getAttribute('aria-label')), sources: [...root.querySelectorAll('img')].map(img => img.src) }));
     assert.deepEqual(mainLongest, { text: '', labels: [longerMarker], sources: [actualUrl] });
     await overlayPage.evaluate(item => window.__richReceive(item), overlayItem(4, longerMarker, overlapping));
-    await overlayPage.waitForFunction(label => document.querySelector('.item:first-child img[aria-label]')?.getAttribute('aria-label') === label, longerMarker);
-    const overlayLongest = await overlayPage.locator('.item .lit').first().evaluate(root => ({ text: root.textContent, labels: [...root.querySelectorAll('img')].map(img => img.getAttribute('aria-label')), sources: [...root.querySelectorAll('img')].map(img => img.src) }));
+    await overlayPage.waitForFunction(label => [...document.querySelectorAll('#list .item:not(.out)')].pop()?.querySelector('img[aria-label]')?.getAttribute('aria-label') === label, longerMarker);
+    const overlayLongest = await newestOverlayBody().evaluate(root => ({ text: root.textContent, labels: [...root.querySelectorAll('img')].map(img => img.getAttribute('aria-label')), sources: [...root.querySelectorAll('img')].map(img => img.src) }));
     assert.deepEqual(overlayLongest, mainLongest);
     check('main and overlay both choose the longest exact trusted marker without leaving suffix text or borrowing the shorter image');
 

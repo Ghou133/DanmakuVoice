@@ -68,7 +68,7 @@ const state = {config_revision:1,onboarding_done:true,network_disabled:true,pref
     await page.evaluate(()=>clearInterval(window.__sameTimer));
     await phase('danmaku-burst',20000,()=>page.evaluate(()=>{let n=100;window.__burstTimer=setInterval(()=>{const t=performance.now();const s=window.__perfState;const e={...s.live.events.at(-1),platform_event_id:`perf-${n}`,observed_at_ms:1791288000000+n,message:`这是一条用于同负载性能比较的弹幕 ${n}，保留原有水面与逐字动画。`};s.live.events.push(e);s.live.events.shift();s.live.received=++n;window.__perfPush(structuredClone(s));window.__pushCosts.push(performance.now()-t);},100);}));
     await page.evaluate(()=>clearInterval(window.__burstTimer));
-    await phase('history-scroll',10000,async()=>{await page.locator('[data-action="history.open"]').click();await page.evaluate(()=>{window.__scrollTimer=setInterval(()=>{const s=document.querySelector('#chat-scroll');s.scrollTop=(s.scrollTop+200)%(s.scrollHeight-s.clientHeight||1);},50);});});
+    await phase('history-scroll',10000,async()=>{await page.locator('[data-action="history.open"]').click();await page.locator('#lake-deep:not([hidden])').waitFor();await page.evaluate(()=>{window.__scrollTimer=setInterval(()=>{const s=document.querySelector('#chat-scroll');s.scrollTop=(s.scrollTop+200)%(s.scrollHeight-s.clientHeight||1);},50);});});
     await page.evaluate(()=>clearInterval(window.__scrollTimer)); await page.keyboard.press('Escape');
     await phase('settings-switch',10000,async()=>{
       result.settingsLatenciesMs=[];

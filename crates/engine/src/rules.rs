@@ -1,8 +1,9 @@
 //! Deterministic rule preview. This module never calls a TTS provider.
 
 use crate::model::{EventKind, LiveEvent, VoiceBinding, VoicePreset};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 use thiserror::Error;
 
 const MAX_TEMPLATE_BYTES: usize = 8 * 1024;
@@ -27,7 +28,8 @@ pub struct SoundRule {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventRules {
     pub danmaku_on: bool,
-    /// Skip the speech plan for Bilibili's standalone emote packets only.
+    /// Retained for compatibility with old exports. Platform emote names are
+    /// always suppressed unless an explicit emote_words reading is configured.
     #[serde(default = "default_filter_bilibili_emoticons")]
     pub filter_bilibili_emoticons: bool,
     pub gift_on: bool,
@@ -82,6 +84,10 @@ pub struct RuleSet {
     pub templates: EventTemplates,
     pub user_words: Vec<Replacement>,
     pub message_words: Vec<Replacement>,
+    /// Explicit readings for verified platform emotes; unconfigured emotes
+    /// remain visible, but their marker names never become speech.
+    #[serde(default)]
+    pub emote_words: Vec<Replacement>,
     pub sounds: Vec<SoundRule>,
     pub default_preset_id: Option<String>,
     /// The most recently chosen voice for each TTS. Switching services can
@@ -121,7 +127,7 @@ impl RulePreview {
     /// does not cause a separate TTS request.
     pub fn needs_tts(&self) -> bool {
         self.parts.iter().any(|part| match part {
-            PlanPart::Text(text) => text.chars().any(char::is_alphanumeric),
+            PlanPart::Text(text) => has_speakable_text(text),
             PlanPart::Sound { .. } => false,
         })
     }
@@ -133,6 +139,20 @@ impl RulePreview {
                 .iter()
                 .any(|part| matches!(part, PlanPart::Sound { .. }))
     }
+}
+
+/// Keep the existing letter/number speech gate, excluding Unicode emoji.
+/// Some emoji contain letters or digits (for example, enclosed letters and
+/// keycaps); a plain `is_alphanumeric` check treats those as spoken text.
+/// Digits outside a complete keycap sequence remain ordinary speech.
+pub(crate) fn has_speakable_text(text: &str) -> bool {
+    static EMOJI: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"[0-9#*]\u{FE0F}?\u{20E3}|[\p{Emoji}--[0-9#*]]")
+            .expect("valid Unicode emoji pattern")
+    });
+    EMOJI
+        .split(text)
+        .any(|part| part.chars().any(char::is_alphanumeric))
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -373,12 +393,8 @@ fn render_template(
                 }
                 let text = field_text(&field, event, &user_name)?;
                 if field == "message" {
-                    append_message(
-                        &mut parts,
-                        &event.message,
-                        &rules.message_words,
-                        &rules.sounds,
-                    )?;
+                    let message = rules.spoken_message(event)?;
+                    append_message(&mut parts, &message, &rules.message_words, &rules.sounds)?;
                 } else {
                     append_text(&mut parts, &text)?;
                 }
@@ -405,6 +421,7 @@ impl RuleSet {
     fn validate_lengths(&self) -> Result<(), RuleError> {
         if self.user_words.len() > 1024
             || self.message_words.len() > 1024
+            || self.emote_words.len() > 1024
             || self.sounds.len() > 1024
         {
             return Err(RuleError::TooLarge("词典或音效规则"));
@@ -424,6 +441,7 @@ impl RuleSet {
             .user_words
             .iter()
             .chain(&self.message_words)
+            .chain(&self.emote_words)
             .any(|rule| {
                 rule.from.len() > MAX_KEYWORD_BYTES || rule.to.len() > MAX_REPLACEMENT_BYTES
             })
@@ -464,6 +482,7 @@ impl RuleSet {
             .user_words
             .iter()
             .chain(&self.message_words)
+            .chain(&self.emote_words)
             .any(|rule| rule.from.is_empty())
         {
             return Err(RuleError::EmptyKeyword);
@@ -485,7 +504,12 @@ impl RuleSet {
         match event.kind {
             EventKind::Danmaku if !self.events.danmaku_on => Some("弹幕播报已关闭"),
             EventKind::Danmaku
-                if self.events.filter_bilibili_emoticons && event.is_bilibili_emoticon =>
+                if event.is_bilibili_emoticon
+                    && !self.emote_words.iter().any(|alias| {
+                        !alias.to.trim().is_empty()
+                            && (alias.from == event.message
+                                || event.emotes.iter().any(|emote| emote.text == alias.from))
+                    }) =>
             {
                 Some("B站官方表情已过滤")
             }
@@ -507,6 +531,32 @@ impl RuleSet {
         }
     }
 
+    fn spoken_message(&self, event: &LiveEvent) -> Result<String, RuleError> {
+        if event.is_bilibili_emoticon && event.emotes.is_empty() {
+            return Ok(self
+                .emote_words
+                .iter()
+                .find(|alias| alias.from == event.message)
+                .map(|alias| alias.to.clone())
+                .unwrap_or_default());
+        }
+        let replacements = event
+            .emotes
+            .iter()
+            .filter(|emote| !emote.text.is_empty() && (!emote.large || event.is_bilibili_emoticon))
+            .map(|emote| Replacement {
+                from: emote.text.clone(),
+                to: self
+                    .emote_words
+                    .iter()
+                    .find(|alias| alias.from == emote.text)
+                    .map(|alias| alias.to.clone())
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        replace_words_bounded(&event.message, &replacements, MAX_PLAN_BYTES)
+    }
+
     pub fn preview(
         &self,
         event: &LiveEvent,
@@ -521,7 +571,26 @@ impl RuleSet {
             return Err(RuleError::TooLarge("消息或用户信息"));
         }
         self.validate_lengths()?;
-        let reason = self.filter_reason(event);
+        let mut reason = self.filter_reason(event);
+        if reason.is_none() && event.kind == EventKind::Danmaku {
+            // Test the message before adding the username and template words.
+            // Explicit dictionary readings and sound triggers still count as
+            // content; display continues to receive the original event.
+            let mut message_parts = Vec::new();
+            let message = self.spoken_message(event)?;
+            append_message(
+                &mut message_parts,
+                &message,
+                &self.message_words,
+                &self.sounds,
+            )?;
+            if !message_parts.iter().any(|part| match part {
+                PlanPart::Text(text) => has_speakable_text(text),
+                PlanPart::Sound { .. } => true,
+            }) {
+                reason = Some("消息没有可播报内容");
+            }
+        }
         if let Some(reason) = reason {
             return Ok(RulePreview {
                 event: event.clone(),
@@ -846,6 +915,184 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn emoji_only_and_blank_danmaku_are_filtered_before_template_and_username() {
+        let mut rules = RuleSet::default();
+        for enabled in [true, false] {
+            rules.events.filter_bilibili_emoticons = enabled;
+            for text in [
+                "😀",
+                "😀 😂",
+                "👍🏽",
+                "👨‍👩‍👧‍👦",
+                "🏳️‍🌈",
+                "🇨🇳",
+                "❤️",
+                "1️⃣",
+                "1\u{20e3}",
+                "#️⃣ *️⃣",
+                "🅰️ 🅱️ 🆎 🈁 ㊗️ ℹ️",
+                "",
+                " \t\n",
+                "……！？",
+                "\u{200b}\u{fe0f}",
+            ] {
+                let event = LiveEvent::danmaku(1, Some(7), "观众Alice", text);
+                let preview = rules.preview(&event, &[], &[]).unwrap();
+                assert_eq!(
+                    preview.filtered_reason.as_deref(),
+                    Some("消息没有可播报内容"),
+                    "{text:?}, official filter {enabled}"
+                );
+                assert_eq!(preview.event, event, "display payload must stay intact");
+                assert!(preview.final_text.is_empty());
+                assert!(preview.parts.is_empty());
+                assert!(!preview.has_playable_audio());
+            }
+        }
+    }
+
+    #[test]
+    fn platform_emotes_require_explicit_readings_and_keep_original_display() {
+        let mut rules = RuleSet::default();
+        let mut event = LiveEvent::danmaku(1, Some(7), "观众", "[doge]");
+        event.is_bilibili_emoticon = true;
+        event.emotes.push(crate::model::LiveEmote {
+            text: "[doge]".into(),
+            url: "https://example.invalid/doge.png".into(),
+            large: true,
+        });
+        // An old disabled filter does not bypass the fixed emote policy.
+        rules.events.filter_bilibili_emoticons = false;
+        assert!(
+            rules
+                .preview(&event, &[], &[])
+                .unwrap()
+                .filtered_reason
+                .is_some()
+        );
+        rules.emote_words.push(Replacement {
+            from: "[doge]".into(),
+            to: "狗头".into(),
+        });
+        let preview = rules.preview(&event, &[], &[]).unwrap();
+        assert!(preview.filtered_reason.is_none());
+        assert!(preview.final_text.contains("狗头"));
+        assert!(!preview.final_text.contains("doge"));
+        assert_eq!(preview.event, event);
+        event.is_bilibili_emoticon = false;
+        event.message = "晚上好[doge]".into();
+        event.emotes[0].large = false;
+        rules.emote_words.clear();
+        let preview = rules.preview(&event, &[], &[]).unwrap();
+        assert!(preview.final_text.contains("晚上好"));
+        assert!(!preview.final_text.contains("doge"));
+    }
+
+    #[test]
+    fn words_numbers_and_text_with_emoji_keep_their_original_speech() {
+        let rules = RuleSet {
+            templates: EventTemplates {
+                danmaku: "{message}".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for text in [
+            "你好😀",
+            "😀 hello",
+            "123",
+            "1",
+            "1️",
+            "1️⃣ 2",
+            "🅰️ A",
+            "[普通文字]",
+            "こんにちは",
+            "안녕",
+        ] {
+            let preview = rules
+                .preview(&LiveEvent::danmaku(1, None, "观众", text), &[], &[])
+                .unwrap();
+            assert!(preview.filtered_reason.is_none(), "{text:?}");
+            assert_eq!(preview.final_text, text);
+            assert!(preview.needs_tts(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn emoji_dictionary_readings_and_sound_triggers_remain_explicit_content() {
+        let mut rules = RuleSet {
+            templates: EventTemplates {
+                danmaku: "{message}".into(),
+                ..Default::default()
+            },
+            message_words: vec![Replacement {
+                from: "😀".into(),
+                to: "笑脸".into(),
+            }],
+            ..Default::default()
+        };
+        let event = LiveEvent::danmaku(1, None, "观众", "😀");
+        let preview = rules.preview(&event, &[], &[]).unwrap();
+        assert!(preview.filtered_reason.is_none());
+        assert_eq!(preview.final_text, "笑脸");
+        assert!(preview.needs_tts());
+
+        rules.sounds.push(SoundRule {
+            trigger: "😀".into(),
+            asset_id: "laugh".into(),
+        });
+        let event = LiveEvent::danmaku(1, None, "观众", "😀 1️⃣ 🅰️");
+        let preview = rules.preview(&event, &[], &[]).unwrap();
+        assert!(preview.filtered_reason.is_none());
+        assert!(preview.has_playable_audio());
+        assert!(!preview.needs_tts());
+        assert_eq!(
+            preview.parts,
+            vec![
+                PlanPart::Sound {
+                    trigger: "😀".into(),
+                    asset_id: "laugh".into()
+                },
+                PlanPart::Text(" 1️⃣ 🅰️".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dictionary_removal_or_emoji_replacement_cannot_leave_username_only_speech() {
+        for to in ["", "😀", "1️⃣"] {
+            let rules = RuleSet {
+                message_words: vec![Replacement {
+                    from: "内容".into(),
+                    to: to.into(),
+                }],
+                ..Default::default()
+            };
+            let preview = rules
+                .preview(&LiveEvent::danmaku(1, None, "观众", "内容"), &[], &[])
+                .unwrap();
+            assert_eq!(
+                preview.filtered_reason.as_deref(),
+                Some("消息没有可播报内容")
+            );
+        }
+    }
+
+    #[test]
+    fn blank_message_gate_does_not_suppress_gift_guard_or_super_chat_announcements() {
+        for kind in [EventKind::Gift, EventKind::Guard, EventKind::SuperChat] {
+            let mut event = LiveEvent::danmaku(1, None, "观众", "😀");
+            event.kind = kind;
+            event.price_yuan = 100.0;
+            event.gift_name = "礼物".into();
+            event.guard_name = "舰长".into();
+            let preview = RuleSet::default().preview(&event, &[], &[]).unwrap();
+            assert!(preview.filtered_reason.is_none());
+            assert!(preview.has_playable_audio());
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ brotli = "9"
 flate2 = "1.1"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
+regex = "1.13"
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6.1"

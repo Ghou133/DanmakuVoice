@@ -57,6 +57,7 @@ function fixture(code, token = 'fictional-overlay-token') {
     setInterval: (fn, delay) => timer(fn, delay, true), clearInterval: id => timers.delete(id),
     addEventListener: (name, fn) => events.set(name, fn), fit: () => {}, clock: () => {},
     refreshTagline: () => trace.push('tagline'), lingerMs: () => 30000,
+    restTimer: null, wake: () => trace.push('wake'),
     applyConfig: value => { state.config = value; trace.push('config'); },
     receive: value => { state.lastSeq = value.seq; trace.push('item'); },
     restoreItem: value => { state.lastSeq = value.seq; trace.push('item'); },

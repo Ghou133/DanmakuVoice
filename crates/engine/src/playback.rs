@@ -18,7 +18,7 @@ use crate::{
     audio::AudioWriter,
     ffmpeg::{self, DecodeError},
     model::{Provider, SovitsModelSelection as PresetModelSelection, VoicePreset},
-    rules::{PlanPart, RulePreview},
+    rules::{PlanPart, RulePreview, has_speakable_text},
     scheduler::{JobExecutor, JobOutcome, SpeechJob},
     storage::{ConnectionSettings, DataStore, StorageError},
     tts::{
@@ -639,8 +639,7 @@ impl PlaybackExecutor {
                     speech_started,
                 });
             }
-            let is_speech =
-                matches!(part, PreparedPart::Text(text) if text.chars().any(char::is_alphanumeric));
+            let is_speech = matches!(part, PreparedPart::Text(text) if has_speakable_text(text));
             let speech_progress = AtomicBool::new(false);
             let result = self
                 .play_part(plan, part, job_id, cancel, &speech_progress)
@@ -692,7 +691,7 @@ impl PlaybackExecutor {
                     other => AttemptError::Playback(safe_decode_error(other)),
                 })?;
             }
-            PreparedPart::Text(text) if !text.chars().any(char::is_alphanumeric) => {}
+            PreparedPart::Text(text) if !has_speakable_text(text) => {}
             PreparedPart::Text(text) => {
                 let stream = plan
                     .provider

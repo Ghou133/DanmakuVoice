@@ -2993,10 +2993,18 @@ mod tests {
                 for enabled in [false, true, false] {
                     rules.events.filter_bilibili_emoticons = enabled;
                     let preview = rules.preview(&event, &[], &[]).unwrap();
-                    assert_eq!(preview.filtered_reason.is_some(), enabled && marked);
+                    // Legacy filter switches no longer make official marker
+                    // names readable. A display-only whole-image URL remains
+                    // insufficient to classify an otherwise ordinary packet.
+                    let filtered = marked || text == "😀";
+                    assert_eq!(
+                        preview.filtered_reason.is_some(),
+                        filtered,
+                        "{kind}: {text}"
+                    );
                     assert_eq!(preview.event.message, text);
                     assert_eq!(preview.event.emotes, event.emotes);
-                    if enabled && marked {
+                    if filtered {
                         assert!(preview.parts.is_empty());
                         assert!(preview.final_text.is_empty());
                     }

@@ -26,6 +26,7 @@ pub(super) struct BroadcastSessionTracker {
     key: Option<(u64, u64)>,
     record: BroadcastSessionRecord,
     seen_live: bool,
+    ending_unique_viewers: Option<u64>,
     /// A locally synthesized start recorded by this observation run. Only the
     /// next authoritative observation may correct it in place.
     provisional_start: Option<u64>,
@@ -56,6 +57,7 @@ impl Default for BroadcastSessionTracker {
             key: None,
             record: BroadcastSessionRecord::default(),
             seen_live: false,
+            ending_unique_viewers: None,
             provisional_start: None,
         }
     }
@@ -183,6 +185,9 @@ impl BroadcastSessionTracker {
                 observed_started_at: active.observed_started_at,
                 ended_observed_at: end,
                 messages: active.messages,
+                unique_viewers: self
+                    .ending_unique_viewers
+                    .map(|count| count.min(active.messages)),
                 seconds: self
                     .seen_live
                     .then_some(active.started_at)
@@ -308,6 +313,25 @@ impl Controller {
             .as_ref()
             .map(|live| live.snapshot())
             .unwrap_or_else(|| self.last_live.clone());
+        let ending_speakers = self
+            .broadcast_session
+            .record
+            .active
+            .as_ref()
+            .filter(|active| {
+                room.live_status != 1
+                    && self.broadcast_session.seen_live
+                    && active.observation_run_id == self.broadcast_session.observation_run_id
+                    && live.canonical_room_id() == Some(room.room_id)
+                    && self.live_history.stats().room_id == live.room_id
+                    && live.room_id.is_some()
+            })
+            .map(|active| {
+                self.live_history.unique_viewers_since(
+                    active.started_at.unwrap_or(active.observed_started_at) * 1000,
+                )
+            });
+        self.broadcast_session.ending_unique_viewers = ending_speakers;
         self.broadcast_session.observe_room_with_start_authority(
             &mut self.store,
             uid,
@@ -343,6 +367,10 @@ impl Controller {
                         .zip(actual_start)
                         .is_some_and(|(before, after)| before != after))
         });
+        if live && (changed || previous.is_none()) {
+            self.live_history
+                .begin_broadcast(actual_start.unwrap_or(now) * 1000);
+        }
         let started_at = if live {
             actual_start.or_else(|| {
                 previous

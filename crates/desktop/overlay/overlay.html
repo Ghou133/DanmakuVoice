@@ -29,6 +29,8 @@
   --spring:cubic-bezier(.22,1.25,.36,1);
 }
 @property --a{syntax:"<angle>";inherits:false;initial-value:0deg}
+@property --avs{syntax:"<length>";inherits:true;initial-value:20px}
+@property --reveal{syntax:"<number>";inherits:true;initial-value:1}
 html,body{margin:0;background:transparent;overflow:hidden;width:100%;height:100%}
 body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;font-synthesis:none}
 .ov{position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity .6s ease}
@@ -41,8 +43,9 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .ov[data-corner^=b] .block{bottom:calc(48*var(--p))}
 .ov[data-corner$=l] .block{left:calc(72*var(--p))}
 .ov[data-corner$=r] .block{right:calc(72*var(--p));align-items:flex-end;text-align:right}
-.vig{position:absolute;z-index:-3;left:calc(-260*var(--p));top:calc(-200*var(--p));right:calc(-260*var(--p));bottom:calc(-200*var(--p));border-radius:50%;
-  background:radial-gradient(closest-side,rgba(8,7,13,calc(.95*var(--vig))),rgba(8,7,13,calc(.5*var(--vig))) 55%,transparent);transition:opacity .8s ease}
+.vig{position:absolute;z-index:-3;left:calc(-240*var(--p));top:calc(-180*var(--p));right:calc(60*var(--p));bottom:calc(-180*var(--p));border-radius:50%;
+  background:radial-gradient(closest-side,rgba(8,7,13,calc(.86*var(--vig))),rgba(8,7,13,calc(.44*var(--vig))) 50%,rgba(8,7,13,calc(.12*var(--vig))) 78%,transparent);transition:opacity .8s ease}
+.ov[data-corner$=r] .vig{left:calc(60*var(--p));right:calc(-240*var(--p))}
 
 /* ---------- masthead (always on) ---------- */
 .mast{position:relative;display:flex;flex-direction:column;gap:calc(13*var(--p))}
@@ -119,33 +122,166 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .prog{display:none}
 .comet{position:absolute;border-radius:50%;background:radial-gradient(closest-side,rgba(255,255,255,.95),rgba(168,191,243,.5) 45%,transparent);pointer-events:none}
 
-/* ======================== U3 · SPINE ======================== */
-.ov[data-style=spine] .block{padding-left:calc(30*var(--p))}
-.ov[data-style=spine][data-corner$=r] .block{padding-left:0;padding-right:calc(30*var(--p))}
-.spine{display:none;position:absolute;top:calc(10*var(--p));bottom:calc(-24*var(--p));left:0;width:calc(2*var(--p));
-  background:linear-gradient(180deg,rgba(242,167,195,.9),rgba(200,182,240,.55) 45%,rgba(168,191,243,.2) 85%,transparent)}
+/* ======================== U3 · SPINE ========================
+   A hair-thin thread of light. It carries at most three entries; with no
+   new chat it keeps them, lets a slow light run down the thread and dims
+   into a resting state instead of emptying the corner. */
+.ov[data-style=spine] .block{padding-left:calc(32*var(--p))}
+.ov[data-style=spine][data-corner$=r] .block{padding-left:0;padding-right:calc(32*var(--p))}
+.spine{--head:0px;display:none;position:absolute;top:calc(10*var(--p));height:calc(140*var(--p));left:0;width:calc(1.5*var(--p));
+  background:linear-gradient(180deg,rgba(214,200,246,.42),rgba(168,191,243,.26) calc(100% - 44*var(--p)),transparent);transition:opacity 2.4s ease,height .62s cubic-bezier(.22,.8,.24,1)}
+/* The lead-in from the LIVE dot to the first avatar is always lit; each line
+   then lights its own stretch below (see .prog). The tip glows past the newest. */
+.spine .fill{position:absolute;left:0;top:0;width:100%;height:var(--head);background:linear-gradient(180deg,var(--pink),#f6d6e6);
+  box-shadow:0 0 calc(6*var(--p)) rgba(242,167,195,.65);transition:height .62s cubic-bezier(.22,.8,.24,1)}
+/* The socket: a hollow stop at the end of the thread where the next line will
+   attach. It lights and counts when lines are waiting their turn. */
+.spine .head{position:absolute;left:50%;top:var(--tip,0px);width:calc(11*var(--p));height:calc(11*var(--p));margin:calc(-5.5*var(--p)) 0 0 calc(-5.5*var(--p));border-radius:50%;box-sizing:border-box;
+  border:calc(1.5*var(--p)) solid rgba(214,200,246,.45);background:rgba(13,12,19,.4);
+  transition:top .62s cubic-bezier(.22,.8,.24,1),border-color .4s ease,background .4s ease,box-shadow .4s ease,opacity .4s ease}
+.ov.waiting .spine .head{border-color:var(--pink);background:rgba(242,167,195,.3);box-shadow:0 0 calc(12*var(--p)) rgba(242,167,195,.5);animation:head-glow 1.8s ease-in-out infinite}
+@keyframes head-glow{50%{box-shadow:0 0 calc(20*var(--p)) calc(3*var(--p)) rgba(242,167,195,.6)}}
+.spine .more{position:absolute;left:calc(100% + 9*var(--p));top:50%;transform:translateY(-50%);font-family:var(--numeral);font-style:italic;font-weight:400;font-size:calc(16*var(--p));line-height:1;color:var(--pink);white-space:nowrap;
+  text-shadow:0 1px calc(8*var(--p)) rgba(0,0,0,.85);opacity:0;transition:opacity .3s ease}
+.ov.waiting .spine .more{opacity:1}
+.ov[data-corner$=r] .spine .more{left:auto;right:calc(100% + 9*var(--p))}
+.ov.disconnected .spine .head{opacity:0}
 .ov[data-style=spine] .spine{display:block}
 .ov[data-style=spine][data-corner$=r] .spine{left:auto;right:0}
-.ov[data-style=spine] .kicker .dot{position:absolute;left:calc(-30*var(--p) - 3.5*var(--p) + 1*var(--p))}
-.ov[data-style=spine][data-corner$=r] .kicker .dot{left:auto;right:calc(-30*var(--p) - 3.5*var(--p) + 1*var(--p))}
-.ov[data-style=spine] .item{padding-left:calc(22*var(--p))}
-.ov[data-style=spine][data-corner$=r] .item{padding-left:0;padding-right:calc(22*var(--p))}
-.ov[data-style=spine] .item .av{position:absolute;left:calc(-30*var(--p) + 1*var(--p) - var(--avs)/2);top:calc(3*var(--p));margin:0;--avs:calc(22*var(--p));width:var(--avs);height:var(--avs);
-  box-shadow:0 0 0 calc(3*var(--p)) rgba(13,12,19,.9)}
-.ov[data-style=spine][data-corner$=r] .item .av{left:auto;right:calc(-30*var(--p) + 1*var(--p) - var(--avs)/2)}
-.ov[data-style=spine] .item.recent .av{--avs:calc(28*var(--p))}
-.ov[data-style=spine] .item.spot .av{--avs:calc(40*var(--p));box-shadow:none}
-.ov[data-style=spine] .item.spot .prog{display:block;position:absolute;left:calc(-30*var(--p));top:calc(50*var(--p));width:calc(2*var(--p));height:max(calc(100% - 50*var(--p)),calc(24*var(--p)))}
-.ov[data-style=spine][data-corner$=r] .item.spot .prog{left:auto;right:calc(-30*var(--p))}
-.ov[data-style=spine] .prog .fill{position:absolute;left:0;top:0;width:100%;height:calc(var(--prog,0)*100%);background:linear-gradient(180deg,var(--pink),#fff)}
-.ov[data-style=spine] .prog .comet{left:calc(-9*var(--p));top:calc(var(--prog,0)*100% - 12*var(--p));width:calc(20*var(--p));height:calc(26*var(--p));opacity:var(--live,0)}
-.ov[data-style=spine] .item.spot.timer .prog .fill{background:rgba(255,255,255,.5);height:calc((1 - var(--prog,0))*100%)}
+.flow{position:absolute;top:0;bottom:0;left:calc(-4*var(--p));width:calc(9.5*var(--p));overflow:hidden;
+  -webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 30*var(--p)),transparent);mask-image:linear-gradient(180deg,#000 calc(100% - 30*var(--p)),transparent)}
+/* The idle light only runs while the overlay rests: with chat on screen every
+   light on the thread stands for something (the next line, a line's time). */
+.flow::before{content:"";position:absolute;left:0;right:0;top:0;height:100%;opacity:0;
+  background:radial-gradient(calc(4.75*var(--p)) 7% at 50% 7%,rgba(255,255,255,.95),rgba(242,167,195,.45) 55%,transparent)}
+@keyframes flow{0%{opacity:0;transform:translateY(-14%)}8%{opacity:1}55%{opacity:.75}66%,100%{opacity:0;transform:translateY(100%)}}
+.ov.resting .flow::before{animation:flow 15s cubic-bezier(.45,.05,.3,1) 3s infinite}
+.ov.resting .spine{opacity:.72}
+.ov.disconnected .flow{display:none}
+.ov[data-style=spine] .kicker .dot{position:absolute;left:calc(-32*var(--p) - 3.5*var(--p) + .75*var(--p))}
+.ov[data-style=spine][data-corner$=r] .kicker .dot{left:auto;right:calc(-32*var(--p) - 3.5*var(--p) + .75*var(--p))}
+/* The rule under the title is the thread's first branch: it leaves the thread
+   in a curve, carries the lead-in's colour and glow and dims with the thread
+   at rest. It has no light of its own: as the idle light passes the fork, a
+   part of it runs out along the branch (--fork-at, set by traceThread). */
+.ov[data-style=spine] .rule{overflow:visible;width:calc(128*var(--p));margin-left:calc(-18*var(--p));filter:drop-shadow(0 0 calc(3*var(--p)) rgba(242,167,195,.55));transition:opacity 2.4s ease}
+.ov[data-style=spine][data-corner$=r] .rule{margin-left:0;margin-right:calc(-18*var(--p))}
+.ov[data-style=spine] .rule::before{content:"";position:absolute;right:100%;bottom:0;width:calc(14*var(--p));height:calc(14*var(--p));box-sizing:border-box;
+  border:0 solid var(--pink);border-left-width:calc(1.5*var(--p));border-bottom-width:calc(1.5*var(--p));border-bottom-left-radius:calc(14*var(--p))}
+.ov[data-style=spine][data-corner$=r] .rule::before{right:auto;left:100%;border-left-width:0;border-right-width:calc(1.5*var(--p));border-bottom-left-radius:0;border-bottom-right-radius:calc(14*var(--p))}
+.ov[data-style=spine] .rule::after{top:50%;left:calc(-15*var(--p));width:calc(30*var(--p));height:calc(9.5*var(--p));margin-top:calc(-4.75*var(--p));border-radius:50%;opacity:0;animation:none;
+  background:radial-gradient(closest-side,rgba(255,255,255,.95),rgba(242,167,195,.45) 55%,transparent)}
+.ov[data-style=spine][data-corner$=r] .rule::after{left:auto;right:calc(-15*var(--p))}
+.ov.resting[data-style=spine] .rule{opacity:.72}
+.ov.resting[data-style=spine] .rule::before{animation:fork-glint 15s ease-out calc(var(--fork-at,6s) - .15s) infinite}
+@keyframes fork-glint{0%,6%,100%{border-color:var(--pink)}2%{border-color:#fff4f8}}
+.ov.resting[data-style=spine] .rule::after{animation:fork-light 15s linear var(--fork-at,6s) infinite}
+.ov.resting[data-style=spine][data-corner$=r] .rule::after{animation-name:fork-light-r}
+@keyframes fork-light{0%{opacity:0;transform:none;animation-timing-function:cubic-bezier(.3,.55,.45,1)}2%{opacity:1}13%,100%{opacity:0;transform:translateX(calc(124*var(--p)))}}
+@keyframes fork-light-r{0%{opacity:0;transform:none;animation-timing-function:cubic-bezier(.3,.55,.45,1)}2%{opacity:1}13%,100%{opacity:0;transform:translateX(calc(-124*var(--p)))}}
+.ov[data-style=spine] .list{gap:calc(16*var(--p));transition:opacity 2.4s ease}
+.ov.resting[data-style=spine] .list{opacity:.9}
+.ov[data-style=spine] .item{--avs:calc(20*var(--p));padding-left:calc(20*var(--p));align-self:flex-start;transition:--avs .52s var(--ease),opacity .6s ease,filter .45s ease}
+.ov[data-style=spine][data-corner$=r] .item{padding-left:0;padding-right:calc(20*var(--p));align-self:flex-end}
+.ov[data-style=spine] .item .av{position:absolute;left:calc(-32*var(--p) + .75*var(--p) - var(--avs)/2);top:calc(3*var(--p));margin:0;width:var(--avs);height:var(--avs);
+  box-shadow:0 0 0 calc(1.5*var(--p)) rgba(255,255,255,.26),0 0 calc(14*var(--p)) rgba(242,167,195,.28),0 calc(2*var(--p)) calc(6*var(--p)) rgba(0,0,0,.45)}
+.ov[data-style=spine][data-corner$=r] .item .av{left:auto;right:calc(-32*var(--p) + .75*var(--p) - var(--avs)/2)}
+.ov[data-style=spine] .item.near{--avs:calc(24*var(--p))}
+.ov[data-style=spine] .item.tip{--avs:calc(36*var(--p))}
+.ov[data-style=spine] .item.tip .av{box-shadow:0 0 calc(18*var(--p)) rgba(242,167,195,.35),0 calc(3*var(--p)) calc(10*var(--p)) rgba(0,0,0,.45)}
+/* Arrival: the socket at the end of the thread ignites and blooms into the
+   new avatar; a branch of light leaves the avatar and the line is written out
+   behind its head; the light then carries on down the thread to the next
+   stop, where the socket reappears. --reveal drives the branch and the text
+   together and rests at 1, so without motion the line is simply there. */
+.ov[data-style=spine] .item.enter{animation:none}
+.ov[data-style=spine] .item.arrive{animation:reveal .8s cubic-bezier(.4,.1,.25,1) .24s both}
+@keyframes reveal{from{--reveal:0}to{--reveal:1}}
+.ov[data-style=spine] .item.arrive .av{animation:bloom .62s var(--spring) both}
+@keyframes bloom{from{transform:scale(.3);filter:brightness(2.4) saturate(.3)}45%{filter:brightness(1.5) saturate(.7)}}
+.ov[data-style=spine] .item.arrive .av::after{content:"";position:absolute;inset:0;border-radius:50%;box-sizing:border-box;border:calc(1.5*var(--p)) solid rgba(255,238,246,.9);
+  box-shadow:0 0 calc(10*var(--p)) rgba(242,167,195,.7);animation:ripple .9s cubic-bezier(.2,.7,.3,1) .1s both}
+@keyframes ripple{from{transform:scale(.5);opacity:1}to{transform:scale(2.2);opacity:0}}
+/* The text box grows by the halo while it is revealed, so the soft edge that
+   follows the branch's head never clips the shadow. */
+.ov[data-style=spine] .item.arrive .body{margin:calc(-12*var(--p));padding:calc(12*var(--p));
+  --edge:calc(var(--avs)/2 - 39.25*var(--p) + var(--reveal)*(100% + 71.25*var(--p) - var(--avs)/2));
+  -webkit-mask-image:linear-gradient(90deg,#000 calc(var(--edge) - 32*var(--p)),transparent var(--edge));mask-image:linear-gradient(90deg,#000 calc(var(--edge) - 32*var(--p)),transparent var(--edge))}
+.ov[data-style=spine][data-corner$=r] .item.arrive .body{-webkit-mask-image:linear-gradient(270deg,#000 calc(var(--edge) - 32*var(--p)),transparent var(--edge));mask-image:linear-gradient(270deg,#000 calc(var(--edge) - 32*var(--p)),transparent var(--edge))}
+.beam{display:none}
+.ov[data-style=spine] .item.arrive .beam{display:block;position:absolute;left:calc(var(--avs)/2 - 31.25*var(--p));top:calc(3*var(--p) + var(--avs)/2 - .75*var(--p));height:calc(1.5*var(--p));
+  width:calc(var(--reveal)*(100% + 75.25*var(--p) - var(--avs)/2));pointer-events:none;
+  background:linear-gradient(90deg,rgba(242,167,195,0),rgba(242,167,195,.6) 45%,#fff4f8);box-shadow:0 0 calc(6*var(--p)) rgba(242,167,195,.55);animation:beam 1.1s linear .24s both}
+.ov[data-style=spine] .item.arrive .beam::after{content:"";position:absolute;right:calc(-12*var(--p));top:50%;width:calc(24*var(--p));height:calc(64*var(--p));margin-top:calc(-32*var(--p));border-radius:50%;
+  background:radial-gradient(closest-side,rgba(255,255,255,.9),rgba(242,167,195,.4) 45%,transparent)}
+.ov[data-style=spine][data-corner$=r] .item.arrive .beam{left:auto;right:calc(var(--avs)/2 - 31.25*var(--p));background:linear-gradient(270deg,rgba(242,167,195,0),rgba(242,167,195,.6) 45%,#fff4f8)}
+.ov[data-style=spine][data-corner$=r] .item.arrive .beam::after{right:auto;left:calc(-12*var(--p))}
+@keyframes beam{0%{opacity:0}5%,72%{opacity:1}100%{opacity:0}}
+/* The socket hands its place to the new avatar and reappears further down. */
+.ov.arriving .spine .head{opacity:0;transition:top .62s cubic-bezier(.22,.8,.24,1)}
+.ov[data-style=spine] .meta{font-size:calc(12*var(--p));letter-spacing:.16em}
+.age{font-family:var(--numeral);font-style:italic;font-size:calc(13.5*var(--p));line-height:1;letter-spacing:.04em;color:var(--dim);opacity:.75;margin-left:.7em}
+.age:empty,.ov[data-style=card] .age{display:none}
+.ov[data-style=spine] .text{font-family:var(--serif);font-weight:500;font-size:calc(18*var(--p));letter-spacing:.03em;line-height:1.55}
+/* The lit text is clipped from its background, so a text-shadow would paint
+   over the glyphs and grey them out. The same halo goes behind them instead;
+   a sticker keeps its own shadow. */
+.ov[data-style=spine] .text{text-shadow:none;filter:drop-shadow(0 1px calc(8*var(--p)) rgba(0,0,0,.85))}
+.ov[data-style=spine] .text.solo{filter:none}
+.ov[data-style=spine] .item.near .text{font-size:calc(20*var(--p))}
+.ov[data-style=spine] .item.tip .text{font-size:calc(28*var(--p));text-wrap:balance}
+.ov[data-style=spine] .item.tip .meta{font-size:calc(13*var(--p))}
+.ov[data-style=spine] .item.fading{opacity:0!important;translate:0 calc(-8*var(--p));transition:opacity .15s ease,translate .15s ease}
+.ov[data-style=spine] .item.out{translate:0 calc(-16*var(--p));transition:opacity .45s ease,filter .45s ease,translate .45s cubic-bezier(.4,0,.6,1)}
+.ov[data-style=spine] .item.reading .aura{opacity:1;animation:aura 6s ease-in-out infinite;left:calc(-56*var(--p));right:calc(-36*var(--p));top:calc(-34*var(--p));bottom:calc(-34*var(--p))}
+/* Each line's stretch of thread runs from below its avatar to the next stop.
+   The line on stage (the newest, still taking its turn) has the bright, wider
+   bar with a glowing head: it fills with the voice, or over a short display
+   time for lines that are not read. Finished stretches stay softly lit; a
+   line waiting for its voice keeps an empty bar with a breathing head. */
+.ov[data-style=spine] .item .prog{display:block;position:absolute;left:calc(-32*var(--p));top:calc(var(--avs) + 6*var(--p));width:calc(1.5*var(--p));height:calc(100% + 7*var(--p) - var(--avs))}
+.ov[data-style=spine][data-corner$=r] .item .prog{left:auto;right:calc(-32*var(--p))}
+/* The newest line's bar runs on to the socket, where the next avatar will land. */
+.ov[data-style=spine] .item.tip .prog{height:calc(100% + 25*var(--p) - var(--avs))}
+.ov[data-style=spine] .prog .fill{position:absolute;left:0;top:0;width:100%;height:100%;opacity:.5;background:linear-gradient(180deg,var(--pink),#f6d6e6 70%,#fff);
+  box-shadow:0 0 calc(5*var(--p)) rgba(242,167,195,.5);transition:height .5s cubic-bezier(.22,.8,.24,1),opacity .6s ease,transform .6s ease}
+.ov[data-style=spine] .item.current .prog .fill,.ov[data-style=spine] .item.reading .prog .fill{opacity:1;transform:scaleX(1.8);box-shadow:0 0 calc(7*var(--p)) rgba(242,167,195,.75),0 0 calc(16*var(--p)) rgba(200,182,240,.35)}
+.ov[data-style=spine] .item.dwelling .prog .fill{animation:seg-fill var(--dwell,1600ms) linear .6s both}
+@keyframes seg-fill{from{height:0}to{height:100%}}
+.ov[data-style=spine] .item.queued .prog .fill{height:0}
+.ov[data-style=spine] .item.reading .prog .fill{height:calc(var(--prog,0)*100%);transition-duration:.12s,.6s,.6s}
+.ov[data-style=spine] .prog .comet{left:calc(-9.25*var(--p));top:calc(var(--prog,0)*100% - 12*var(--p));width:calc(20*var(--p));height:calc(26*var(--p));opacity:var(--live,0);transition:opacity .3s ease}
+.ov[data-style=spine] .item.dwelling .prog .comet{opacity:1;animation:seg-head var(--dwell,1600ms) linear .6s both}
+@keyframes seg-head{from{top:calc(-12*var(--p))}to{top:calc(100% - 12*var(--p))}}
+.ov[data-style=spine] .item.current.queued .prog .comet{opacity:1;top:calc(-12*var(--p));animation:waiting-head 1.6s ease-in-out infinite}
+@keyframes waiting-head{50%{opacity:.35;transform:scale(.8)}}
+.ov[data-style=spine] .item .av,.ov[data-style=spine] .item .body{transition:box-shadow .52s ease,opacity .45s ease,filter .45s ease}
+.ov[data-style=spine] .item.queued .av{opacity:.5;filter:saturate(.25) brightness(.85)}
+.ov[data-style=spine] .item.queued .body{opacity:.62}
 .ov[data-style=spine] .item.spot .av .ring{inset:calc(-4*var(--p))}
-.ov[data-style=spine] .sweep{position:absolute;left:calc(-4*var(--p));width:calc(10*var(--p));height:calc(80*var(--p));top:0;border-radius:50%;opacity:0;
+/* The flow: before each new line a head of light runs on down the thread from
+   where the light stopped to the socket, lighting the thread behind it, and
+   the line is born where it lands. The trail grows with the same easing as
+   the head moves, so its top stays where the flow began. */
+.ov[data-style=spine] .sweep{--ease-pour:cubic-bezier(.5,.05,.75,.45);position:absolute;left:calc(-11.25*var(--p));top:0;width:calc(24*var(--p));height:calc(30*var(--p));border-radius:50%;opacity:0;pointer-events:none;
+  background:radial-gradient(closest-side,#fff,#fff 18%,rgba(255,228,240,.85) 34%,rgba(242,167,195,.4) 62%,transparent)}
+.ov[data-style=spine] .sweep::before{content:"";position:absolute;z-index:-1;left:calc(50% - 1.25*var(--p));bottom:50%;width:calc(2.5*var(--p));height:var(--len,0px);border-radius:calc(1.25*var(--p));
+  transform-origin:50% 100%;transform:scaleY(0);background:linear-gradient(180deg,rgba(242,167,195,0),rgba(242,167,195,.6) 35%,#fff4f8);box-shadow:0 0 calc(6*var(--p)) rgba(242,167,195,.55)}
+.ov[data-style=spine] .sweep::after{content:"";position:absolute;inset:calc(-6*var(--p));border-radius:50%;opacity:0;
   background:radial-gradient(closest-side,rgba(255,255,255,.9),rgba(242,167,195,.4) 50%,transparent)}
-.ov[data-style=spine][data-corner$=r] .sweep{left:auto;right:calc(-4*var(--p))}
-.ov[data-style=spine] .sweep.run{animation:drop .9s cubic-bezier(.4,0,.2,1) both}
-@keyframes drop{0%{opacity:0;transform:translateY(0)}20%{opacity:1}100%{opacity:0;transform:translateY(var(--to,200px))}}
+.ov[data-style=spine][data-corner$=r] .sweep{left:auto;right:calc(-11.25*var(--p))}
+.ov[data-style=spine] .sweep.pour{opacity:1;animation:pour var(--pour,300ms) var(--ease-pour) both}
+.ov[data-style=spine] .sweep.pour::before{animation:pour-trail var(--pour,300ms) var(--ease-pour) both}
+@keyframes pour{from{transform:translateY(var(--from,0px))}to{transform:translateY(var(--to,0px))}}
+@keyframes pour-trail{to{transform:scaleY(1)}}
+.ov[data-style=spine] .sweep.land{transform:translateY(var(--to,0px));animation:pour-land .42s ease-out both}
+.ov[data-style=spine] .sweep.land::before{transform:scaleY(1)}
+.ov[data-style=spine] .sweep.land::after{animation:pour-flash .5s ease-out both}
+@keyframes pour-land{from{opacity:1}to{opacity:0}}
+@keyframes pour-flash{from{opacity:1;transform:scale(.6)}to{opacity:0;transform:scale(2.4)}}
+/* A line's own head goes out at once when its turn ends: the flow takes over
+   from the same spot instead of a fading copy jumping back up its stretch. */
+.ov[data-style=spine] .item:not(.current) .prog .comet{transition:none}
 
 /* ======================== U2 · ONE CARD ======================== */
 .cardbg{display:none;position:absolute;z-index:-1;left:calc(-30*var(--p));right:calc(-30*var(--p));top:calc(-26*var(--p));bottom:calc(-30*var(--p));border-radius:calc(28*var(--p));opacity:0;transform:scale(.985);
@@ -236,7 +372,7 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
   <div class="block" id="block">
     <div class="vig"></div>
     <div class="cardbg" id="cardbg"></div>
-    <div class="spine"><span class="sweep" id="sweep"></span></div>
+    <div class="spine"><span class="fill"></span><span class="flow"></span><span class="head"><b class="more" id="more"></b></span><span class="sweep" id="sweep"></span></div>
     <header class="mast">
       <div class="kicker"><span class="dot"></span><span class="live">LIVE</span><span class="sep">·</span><span class="day" id="day"></span><span class="time" id="time"></span></div>
       <div class="title" id="title"></div>
@@ -252,8 +388,21 @@ const $ = id => document.getElementById(id);
 const ov = $("ov"), list = $("list"), scZone = $("sc");
 const SAFE_IMG = /^https:\/\/i[0-9]\.hdslb\.com\//;
 const MAX_ROWS = 4;
+// The spine shows three lines: newest large, the one before medium, then small.
+const SPINE_ENTRIES = 3;
+// Strict turns: the newest line on the spine must finish before the next one
+// appears. A read line finishes when its voice ends; a display-only line after
+// a short display time. A line whose voice never starts gives up its turn.
+const SPINE_GAP_MS = 350;
+const SPINE_JOB_WAIT_MS = 10000;
+function spineDwellMs(item) { return Math.min(3600, Math.max(1800, 1000 + 120 * [...String(item.message || item.gift || "")].length)); }
+// Waiting lines keep their order; only a very long display-only backlog is cut.
+const SPINE_BACKLOG = 12;
+const QUEUE_STALE_MS = 30000;
+// With no new chat or reading for this long, the spine dims into rest.
+const REST_MS = 45000;
 const state = {
-  config: { style: "spine", corner: "top_left", scale: 1, vignette: .6, title: "今晚的弹幕", tagline: "", merge: true, linger_seconds: 14 },
+  config: { style: "spine", corner: "top_left", offset_x: 0, offset_y: 0, scale: 1, vignette: .6, title: "今晚的弹幕", tagline: "", merge: true, linger_seconds: 14 },
   status: { connection: "stopped", tts: true, words: 0 },
   reading: null,           // {job_id, played_ms, queued_ms, chars, at}
   items: new Map(),        // seq -> record
@@ -263,6 +412,8 @@ const state = {
   instance: "",
   session: null,
   inbox: [],               // paced arrivals in busy rooms
+  current: null,           // spine: the newest line, still taking its turn
+  light: null,             // spine: where the last turn's light stopped
 };
 const corners = { top_left: "tl", top_right: "tr", bottom_left: "bl", bottom_right: "br" };
 const motion = !matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -278,8 +429,23 @@ function fit() {
 function applyConfig(config) {
   state.config = { ...state.config, ...config };
   const c = state.config;
-  ov.dataset.style = c.style === "card" ? "card" : "spine";
+  const style = c.style === "card" ? "card" : "spine";
+  const restyled = ov.dataset.style !== style;
+  ov.dataset.style = style;
+  // The spine lists lines oldest first, the card newest first (spotlight on top).
+  if (restyled) {
+    if (style === "spine" && state.spot != null) { const spot = state.items.get(state.spot); if (spot) demote(spot); state.spot = null; }
+    for (const el of list.children) el.classList.remove("tip", "near", "recent");
+    const rows = [...state.items.values()].filter(r => !r.leaving && r.el.parentNode === list)
+      .sort((a, b) => style === "spine" ? a.seq - b.seq : b.seq - a.seq);
+    for (const r of rows) list.append(r.el);
+    markRecent();
+  }
   ov.dataset.corner = corners[c.corner] || "tl";
+  // Offsets use browser-source pixels, independent of artwork scale or corner.
+  // Move the whole overlay so Super Chat and the main block stay together.
+  const offset = value => Number.isFinite(Number(value)) ? Math.max(-8192, Math.min(8192, Math.trunc(Number(value)))) : 0;
+  ov.style.transform = `translate(${offset(c.offset_x)}px, ${offset(c.offset_y)}px)`;
   document.documentElement.style.setProperty("--vig", String(Math.min(1, Math.max(0, Number(c.vignette) || 0))));
   $("title").textContent = c.title || "今晚的弹幕";
   fit();
@@ -294,6 +460,36 @@ function clock() {
   const d = new Date();
   $("day").textContent = d.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase();
   $("time").textContent = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  ages();
+  // A queued line that was never read (skipped or failed) stops looking queued.
+  for (const rec of state.items.values()) if (rec.state === "pending" && now() - rec.born > QUEUE_STALE_MS) rec.el.classList.remove("queued");
+}
+function ageText(at) {
+  const seconds = (Date.now() - at) / 1000;
+  if (!Number.isFinite(seconds)) return "";
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours} h ago` : "";
+}
+function ages() {
+  for (const rec of state.items.values()) {
+    const node = rec.el.querySelector(".age");
+    if (!node) continue;
+    const text = ageText(Number(rec.item.at));
+    if (node.textContent !== text) node.textContent = text;
+  }
+}
+// Long quiet stretches keep the retained rows, only quieter.
+let restTimer = 0;
+function wake() {
+  ov.classList.remove("resting");
+  clearTimeout(restTimer);
+  restTimer = setTimeout(function rest() {
+    if (readingRecord()) { restTimer = setTimeout(rest, REST_MS); return; }
+    ov.classList.add("resting");
+  }, REST_MS);
 }
 function connected() { return state.status.connection === "connected"; }
 function taglineContent() {
@@ -393,6 +589,7 @@ function buildItem(item) {
   if (item.kind === "gift") meta.append(h("span", "label", "GIFT"));
   if (item.kind === "guard") meta.append(h("span", "label", item.guard || "舰长"));
   if (item.name) meta.append(h("span", "name", item.name));
+  if (retainsRows() && Number.isFinite(Number(item.at))) meta.append(h("span", "age", ageText(Number(item.at))));
   const text = h("div", "text");
   const lit = h("span", "lit");
   if (item.kind === "gift") {
@@ -400,13 +597,13 @@ function buildItem(item) {
     lit.append(h("span", "num", `×${Number(item.quantity) || 1}`));
   } else if (item.kind === "guard") {
     lit.append("加入了舰队");
-  } else {
-    messageNodes(item, lit);
+  } else if (messageNodes(item, lit)) {
+    text.classList.add("solo");
   }
   text.append(lit, h("span", "count"));
   body.append(meta, text);
   const prog = h("div", "prog"); prog.append(h("i", "fill"), h("i", "comet"));
-  el.append(av, body, prog);
+  el.append(av, body, prog, h("span", "beam"));
   return el;
 }
 
@@ -421,23 +618,100 @@ function receive(item) {
   if (!item || (item.session != null && item.session !== state.session) || !item.seq || item.seq <= state.lastSeq) return;
   state.lastSeq = item.seq;
   if (item.kind === "super_chat") return addTicket(item);
+  if (retainsRows() && mergeWaiting(item)) return;
   state.inbox.push(item);
-  if (state.inbox.length > 6) {
+  if (state.inbox.length > (retainsRows() ? SPINE_BACKLOG : 6)) {
     const index = state.inbox.findIndex(entry => entry.job_id == null);
     if (index >= 0) state.inbox.splice(index, 1);
   }
+  updateSocket();
   pump();
+}
+// Spine: repeated display-only text joins the same line on screen or in line,
+// so spam neither waits for a turn nor fills the queue.
+function mergeWaiting(item) {
+  if (!state.config.merge || item.kind !== "danmaku" || item.job_id != null || !textKey(item)) return false;
+  for (const rec of state.items.values()) {
+    if (!rec.leaving && rec.item.kind === "danmaku" && rec.job == null && textKey(rec.item) === textKey(item)) {
+      bumpCount(rec, rec.count + 1);
+      return true;
+    }
+  }
+  const waiting = state.inbox.find(entry => entry.kind === "danmaku" && entry.job_id == null && textKey(entry) === textKey(item));
+  if (!waiting) return false;
+  waiting.repeat = (waiting.repeat || 1) + 1;
+  return true;
+}
+function bumpCount(rec, count) {
+  rec.count = count;
+  rec.el.querySelector(".count").textContent = `×${rec.count}`;
+  rec.el.classList.remove("bump"); void rec.el.offsetWidth; rec.el.classList.add("bump");
+  rec.expires = now() + lingerMs();
+}
+function updateSocket() {
+  const waiting = retainsRows() ? state.inbox.length : 0;
+  ov.classList.toggle("waiting", waiting > 0);
+  const text = waiting ? `+${waiting}` : "";
+  const more = $("more");
+  if (more.textContent !== text) more.textContent = text;
 }
 let pumpTimer = 0, lastInsert = 0;
 function pump() {
   if (pumpTimer || !state.inbox.length) return;
-  const wait = Math.max(0, lastInsert + 300 - now());
-  pumpTimer = setTimeout(() => {
-    pumpTimer = 0; lastInsert = now();
+  if (retainsRows() && state.current) return;
+  // With motion the spine's pause between turns is the light flowing down to
+  // the socket; the next line appears when it lands.
+  const flows = retainsRows() && motion;
+  const wait = flows ? 0 : Math.max(0, lastInsert + (retainsRows() ? SPINE_GAP_MS : 300) - now());
+  const land = () => {
+    pumpTimer = 0;
+    if (flows) landFlow();
+    if (!state.inbox.length || (retainsRows() && state.current)) return keepRows();
+    lastInsert = now();
     addItem(state.inbox.shift());
+    keepRows();
+    updateSocket();
     pump();
+  };
+  pumpTimer = setTimeout(() => {
+    if (!flows || !retainsRows()) return land();
+    const ms = flowDown();
+    // A full thread lets its oldest line go while the light runs, so the rows
+    // slide up into free space when it lands.
+    const alive = [...state.items.values()].filter(r => !r.leaving).sort((a, b) => b.seq - a.seq);
+    if (alive.length >= SPINE_ENTRIES) spineVictim(alive)?.el.classList.add("fading");
+    pumpTimer = setTimeout(land, ms);
   }, wait);
 }
+// The flow starts where the light is: the head of the line whose turn just
+// ended, otherwise just below the newest avatar, or the LIVE dot on an empty
+// thread. It takes longer the further it has to run.
+function flowDown() {
+  const sweep = $("sweep"), spine = sweep.parentNode, socket = $("more").parentNode;
+  const p = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--p")) || 1;
+  const top = spine.getBoundingClientRect().top;
+  const s = socket.getBoundingClientRect(), to = s.top + s.height / 2 - top;
+  const rows = [...list.children].filter(el => !el.classList.contains("out"));
+  const last = rows[rows.length - 1];
+  let from = 0;
+  if (last && state.light && state.light.el === last && now() - state.light.at < 400) from = state.light.y - top;
+  else if (last) from = last.querySelector(".av").getBoundingClientRect().bottom - top;
+  from = Math.min(from, to);
+  const ms = Math.round(Math.min(320, Math.max(150, 90 + (to - from) / p * 1.6)));
+  sweep.style.setProperty("--from", `${from - 15 * p}px`);
+  sweep.style.setProperty("--to", `${to - 15 * p}px`);
+  sweep.style.setProperty("--pour", `${ms}ms`);
+  sweep.style.setProperty("--len", `${to - from}px`);
+  sweep.classList.remove("pour", "land"); void sweep.offsetWidth; sweep.classList.add("pour");
+  wake();
+  return ms;
+}
+function landFlow() {
+  const sweep = $("sweep");
+  if (!sweep.classList.contains("pour")) return;
+  sweep.classList.remove("pour"); void sweep.offsetWidth; sweep.classList.add("land");
+}
+function stopFlow() { $("sweep").classList.remove("pour", "land"); }
 
 function addItem(item, restoring = false) {
   if (!item) return;
@@ -462,9 +736,32 @@ function addItem(item, restoring = false) {
     born: now(), expires: now() + lingerMs(), state: restoring ? "done" : item.job_id != null ? "pending" : "none",
     demoUntil: item.demo_read_ms ? now() + 700 + item.demo_read_ms : 0, demoStart: item.demo_read_ms ? now() + 700 : 0,
   };
-  if (rec.state === "pending") rec.expires = now() + 90000;
+  if (rec.state === "pending") { rec.expires = now() + 90000; rec.el.classList.add("queued"); }
+  if (item.repeat > 1) bumpCount(rec, item.repeat);
   state.items.set(rec.seq, rec);
   if (!restoring) rec.el.classList.add("enter");
+  if (retainsRows()) {
+    // The spine is a timeline: the new line is attached where the thread
+    // ends. Its size comes only from its place; reading only lights it.
+    const socket = !restoring && motion ? $("more").parentNode.getBoundingClientRect() : null;
+    if (socket) arrive(rec);
+    flip(() => list.append(rec.el));
+    // The avatar is born in the socket; where the block grows upwards (bottom
+    // corners) it rises from there with the rows above it.
+    if (socket) {
+      const bead = rec.el.querySelector(".av").getBoundingClientRect();
+      const dy = socket.top + socket.height / 2 - (bead.top + bead.height / 2);
+      if (Math.abs(dy) > 1) rec.el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { id: "flip", duration: 620, easing: "cubic-bezier(.22,.8,.24,1)" });
+    }
+    if (!restoring) takeTurn(rec, item);
+    else if (state.reading && rec.job === state.reading.job_id) startReading(rec);
+    trim();
+    updateSocket();
+    wake();
+    refreshTagline();
+    ensureLoop();
+    return;
+  }
   flip(() => list.prepend(rec.el));
   // A new message takes the spotlight unless someone is being read.
   if (restoring) {
@@ -473,10 +770,58 @@ function addItem(item, restoring = false) {
   } else if (!readingRecord()) setSpot(rec, rec.state === "pending" ? "waiting" : "timer");
   trim();
   if (!restoring) pulse();
+  wake();
   refreshTagline();
   ensureLoop();
 }
 
+// Spine arrival (see the CSS): the line is already the newest, so it starts at
+// full size; the socket stays hidden until the light moves on down the thread.
+const ARRIVE_MS = 1600, SOCKET_HIDDEN_MS = 700;
+let socketTimer = 0;
+function arrive(rec) {
+  rec.el.classList.add("tip", "arrive");
+  setTimeout(() => rec.el.classList.remove("arrive"), ARRIVE_MS);
+  ov.classList.add("arriving");
+  clearTimeout(socketTimer);
+  socketTimer = setTimeout(() => ov.classList.remove("arriving"), SOCKET_HIDDEN_MS);
+}
+// The new line is on stage until its turn ends; nothing else appears meanwhile.
+function takeTurn(rec, item) {
+  state.current = rec;
+  rec.el.classList.add("current");
+  if (state.reading && rec.job === state.reading.job_id) startReading(rec);
+  else if (rec.state === "pending") {
+    rec.turnTimer = setTimeout(() => { rec.el.classList.remove("queued"); endTurn(rec); }, SPINE_JOB_WAIT_MS);
+  } else {
+    const dwell = spineDwellMs(item);
+    // The light runs on down the thread once the branch has written the line.
+    rec.el.style.setProperty("--dwell", `${dwell - 600}ms`);
+    rec.el.classList.add("dwelling");
+    rec.turnTimer = setTimeout(() => endTurn(rec), dwell);
+  }
+}
+function endTurn(rec, next = true) {
+  if (state.current !== rec) return;
+  clearTimeout(rec.turnTimer);
+  // Where the light stopped, for the flow to the next line to start from.
+  const head = rec.el.querySelector(".prog .comet").getBoundingClientRect();
+  state.light = { el: rec.el, y: head.top + head.height / 2, at: now() };
+  rec.el.style.setProperty("--live", "0");
+  rec.el.classList.remove("current", "dwelling");
+  state.current = null;
+  lastInsert = now();
+  if (next) pump();
+}
+// Spine reading: the line keeps its place and size; its ring turns, its text
+// lights with the voice and its stretch of thread fills.
+function startReading(rec) {
+  clearTimeout(rec.turnTimer);
+  rec.state = "reading";
+  rec.el.classList.remove("queued");
+  rec.el.classList.add("reading");
+  setLit(rec, 0);
+}
 function readingRecord() {
   const r = state.reading;
   if (r) for (const rec of state.items.values()) if (rec.job === r.job_id && !rec.leaving) return rec;
@@ -496,7 +841,7 @@ function setSpot(rec, mode) {
       rec.spotMode = mode;
       rec.spotAt = now();
       if (mode !== "reading") setLit(rec, mode === "waiting" ? 0 : 1);
-      if (list.firstChild !== rec.el) list.prepend(rec.el);
+      if (!retainsRows() && list.firstChild !== rec.el) list.prepend(rec.el);
     } else {
       state.spot = null;
     }
@@ -511,13 +856,15 @@ function demote(rec) {
   setLit(rec, 1);
   rec.spotMode = null;
   rec.expires = Math.max(rec.expires, now() + lingerMs() * .6);
-  // Rows keep chronological order below the spotlight.
-  const rows = [...state.items.values()].filter(r => r !== rec && !r.leaving && r.seq > rec.seq && r.el.parentNode === list);
+  // Card rows keep chronological order below the spotlight; the spine's
+  // timeline never reorders.
+  const rows = retainsRows() ? [] : [...state.items.values()].filter(r => r !== rec && !r.leaving && r.seq > rec.seq && r.el.parentNode === list);
   const anchor = rows.sort((a, b) => a.seq - b.seq).map(r => r.el)[0];
   if (anchor && anchor.nextSibling !== rec.el) anchor.after(rec.el);
   if (state.spot === rec.seq) state.spot = null;
 }
 function markRecent() {
+  if (retainsRows()) return arrange();
   let first = true;
   for (const el of list.children) {
     if (el.classList.contains("out")) continue;
@@ -525,6 +872,16 @@ function markRecent() {
     el.classList.toggle("recent", first);
     first = false;
   }
+}
+// Spine sizes and fades follow position only: newest, previous, oldest.
+function arrange() {
+  const rows = [...list.children].filter(el => !el.classList.contains("out"));
+  rows.forEach((el, i) => {
+    const rank = rows.length - 1 - i;
+    if (el.classList.contains("tip") !== (rank === 0)) el.classList.toggle("tip", rank === 0);
+    if (el.classList.contains("near") !== (rank === 1)) el.classList.toggle("near", rank === 1);
+    el.style.opacity = String([1, .88, .72][Math.min(rank, 2)]);
+  });
 }
 function setLit(rec, fraction) {
   rec.el.querySelector(".lit").style.setProperty("--lit", `${Math.round(Math.min(1, Math.max(0, fraction)) * 1000) / 10}%`);
@@ -541,6 +898,20 @@ function settle(rec) {
 
 function trim() {
   const alive = [...state.items.values()].filter(r => !r.leaving).sort((a, b) => b.seq - a.seq);
+  if (retainsRows()) {
+    // The oldest line leaves first. A line being read never leaves, and one
+    // still waiting to be read leaves only when nothing else can.
+    let entries = alive;
+    while (entries.length > SPINE_ENTRIES) {
+      const victim = spineVictim(entries);
+      if (!victim) break;
+      remove(victim);
+      entries = entries.filter(r => r !== victim);
+    }
+    keepRows();
+    depth();
+    return;
+  }
   let rows = alive.filter(r => r.seq !== state.spot);
   while (rows.length > MAX_ROWS) {
     const victim = rows.filter(r => r.state !== "pending").pop() || rows.pop();
@@ -549,7 +920,17 @@ function trim() {
   }
   depth();
 }
+// The oldest line leaves first. A line being read never leaves, and one still
+// waiting to be read leaves only when nothing else can. Entries: newest first.
+function spineVictim(entries) {
+  const reading = readingRecord();
+  const candidates = entries.filter(r => r !== reading);
+  return candidates.filter(r => r.state !== "pending").pop() || candidates.pop();
+}
+// A line that made way for a flow but is staying after all comes back.
+function keepRows() { for (const r of state.items.values()) if (!r.leaving) r.el.classList.remove("fading"); }
 function depth() {
+  if (retainsRows()) return arrange();
   const rows = [...list.children].filter(el => !el.classList.contains("out") && !el.classList.contains("spot"));
   const fade = [1, .72, .5, .36, .26];
   rows.forEach((el, i) => { el.style.opacity = String(fade[Math.min(i, fade.length - 1)]); });
@@ -559,8 +940,28 @@ function remove(rec) {
   if (rec.leaving) return;
   rec.leaving = true;
   if (state.spot === rec.seq) state.spot = null;
-  rec.el.classList.add("out");
+  if (state.current === rec) { clearTimeout(rec.turnTimer); state.current = null; }
   const height = rec.el.offsetHeight;
+  if (retainsRows() && motion && rec.el.parentNode === list) {
+    // The oldest line lifts off the top while the rest slide up together.
+    // It leaves from where it is seen: in bottom corners the rows were still
+    // sliding from the append, and the list's top moves once it leaves.
+    flip(() => {
+      const seen = rec.el.getBoundingClientRect().top;
+      for (const a of rec.el.getAnimations()) if (a.id === "flip") a.cancel();
+      // Unrounded width, so the text does not re-wrap as it leaves.
+      const { offsetLeft: left } = rec.el, width = rec.el.getBoundingClientRect().width;
+      Object.assign(rec.el.style, { position: "absolute", boxSizing: "border-box", top: "0px", left: `${left}px`, width: `${width}px` });
+      rec.el.style.top = `${seen - list.getBoundingClientRect().top}px`;
+      rec.el.classList.add("out");
+    });
+    setTimeout(() => {
+      rec.el.remove(); if (state.items.get(rec.seq) === rec) state.items.delete(rec.seq);
+      markRecent(); depth(); refreshTagline(); layoutChanged();
+    }, 450);
+    return height;
+  }
+  rec.el.classList.add("out");
   setTimeout(() => {
     flip(() => { rec.el.remove(); if (state.items.get(rec.seq) === rec) state.items.delete(rec.seq); });
     markRecent(); depth(); refreshTagline(); layoutChanged();
@@ -569,12 +970,16 @@ function remove(rec) {
 }
 function clearOverlay() {
   clearTimeout(pumpTimer); pumpTimer = 0; lastInsert = 0;
+  stopFlow();
   state.inbox.length = 0;
+  if (state.current) { clearTimeout(state.current.turnTimer); state.current = null; }
+  updateSocket();
   state.reading = null;
   for (const rec of [...state.items.values()]) remove(rec);
   state.items.clear();
   for (const rec of [...state.tickets.values()]) dropTicket(rec);
   state.spot = null;
+  wake();
   refreshTagline();
 }
 function restoreItem(item) {
@@ -591,25 +996,62 @@ function flip(mutate) {
   mutate();
   layoutChanged();
   if (!motion) return;
-  for (const [el, top] of before) {
-    if (!el.isConnected) continue;
-    const dy = top - el.getBoundingClientRect().top;
-    if (Math.abs(dy) > 1) el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 560, easing: "cubic-bezier(.2,.8,.2,1)" });
+  // Positions were measured mid-flight, so a newer move replaces the older
+  // one instead of stacking on it.
+  for (const el of list.children) {
+    if (!before.has(el) || el.classList.contains("out")) continue;
+    const running = el.getAnimations().filter(a => a.id === "flip");
+    for (const a of running) a.cancel();
+    const dy = before.get(el) - el.getBoundingClientRect().top;
+    if (Math.abs(dy) > 1) el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { id: "flip", duration: 620, easing: "cubic-bezier(.22,.8,.24,1)" });
   }
 }
 function layoutChanged() {
   const active = [...state.items.values()].some(r => !r.leaving);
   ov.classList.toggle("active", active);
+  traceThread();
 }
+// The thread runs from the LIVE dot to just past the newest line; its tail
+// keeps going a little further, so it always reads as heading down.
+function traceThread() {
+  const spine = $("sweep").parentNode;
+  if (!retainsRows()) { spine.style.removeProperty("height"); return; }
+  const p = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--p")) || 1;
+  const rows = [...list.children].filter(el => !el.classList.contains("out"));
+  const last = rows[rows.length - 1];
+  const end = list.offsetTop + (last ? last.offsetTop + last.offsetHeight : 0);
+  const length = Math.max(60 * p, end - spine.offsetTop + 68 * p);
+  const height = `${length}px`;
+  if (spine.style.height !== height) spine.style.height = height;
+  // Lit lead-in down to the first avatar; the glowing tip rests past the newest.
+  const first = rows[0], firstAv = first && first.querySelector(".av");
+  const lead = first ? list.offsetTop + first.offsetTop + (firstAv ? firstAv.offsetTop : 0) - 3 * p : end;
+  // Centre of the socket = centre of the next avatar when it arrives.
+  const tip = end + 37 * p;
+  const values = { "--head": `${Math.max(0, lead - spine.offsetTop)}px`, "--tip": `${Math.max(0, tip - spine.offsetTop)}px` };
+  for (const [name, value] of Object.entries(values)) if (spine.style.getPropertyValue(name) !== value) spine.style.setProperty(name, value);
+  // The branch under the title lights as the idle light reaches the fork.
+  const mast = spine.nextElementSibling, rule = mast.querySelector(".rule");
+  const fork = mast.offsetTop + rule.offsetTop + rule.offsetHeight / 2 - 6 * p - spine.offsetTop;
+  const forkAt = `${idleLightAt(fork, length)}ms`;
+  if (rule.style.getPropertyValue("--fork-at") !== forkAt) rule.style.setProperty("--fork-at", forkAt);
+  ov.classList.toggle("tracking", !!readingRecord());
+}
+// The idle light (.flow::before) starts 3 s into rest; on each 15 s cycle its
+// head runs from 7% above the thread to 7% past its end over the first 9.9 s,
+// eased by cubic-bezier(.45,.05,.3,1). This is when it is y px down the thread.
+function idleLightAt(y, length) {
+  const goal = Math.min(1, Math.max(0, (y / length + .07) / 1.14));
+  const bez = (a, b, s) => 3 * a * s * (1 - s) ** 2 + 3 * b * s * s * (1 - s) + s ** 3;
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (bez(.05, 1, mid) < goal) lo = mid; else hi = mid; }
+  return Math.round(3000 + 9900 * bez(.45, .3, lo));
+}
+if (window.ResizeObserver) new ResizeObserver(() => traceThread()).observe(list);
+// The card's border sweeps once per new message (the spine flows instead).
 function pulse() {
-  if (!motion) return;
-  if (ov.dataset.style === "card") {
-    const bg = $("cardbg"); bg.classList.remove("sweep"); void bg.offsetWidth; bg.classList.add("sweep");
-  } else {
-    const sweep = $("sweep"); const spine = sweep.parentNode;
-    sweep.style.setProperty("--to", `${Math.max(120, spine.offsetHeight - 40)}px`);
-    sweep.classList.remove("run"); void sweep.offsetWidth; sweep.classList.add("run");
-  }
+  if (!motion || ov.dataset.style !== "card") return;
+  const bg = $("cardbg"); bg.classList.remove("sweep"); void bg.offsetWidth; bg.classList.add("sweep");
 }
 
 // ---------------------------------------------------------------- Super Chat
@@ -654,43 +1096,77 @@ function dropTicket(rec) {
 
 // ---------------------------------------------------------------- reading sync
 // The app reports the real output position: audio already heard and decoded
-// audio still queued. The total length is unknown while synthesis streams,
-// so it is estimated from the text and corrected by the queued audio.
+// audio still queued in a ring of about two seconds. While synthesis streams
+// the total is unknown, so the text length gives the first estimate and the
+// queued audio is treated as a steady lead. Once the ring starts to drain,
+// synthesis has finished and the remaining time is exact. The shown position
+// eases toward the estimate and never moves backwards.
 function readingFraction() {
   const r = state.reading;
   if (!r) return null;
-  const elapsed = now() - r.at;
-  const heard = r.played_ms + Math.min(elapsed, r.queued_ms);
-  const remaining = Math.max(0, r.queued_ms - elapsed);
+  const t = now();
+  const played = Number(r.played_ms) || 0, queued = Number(r.queued_ms) || 0;
+  const elapsed = t - r.at;
+  const heard = played + Math.min(elapsed, queued);
+  const draining = r.peak >= 1200 && queued < r.peak - 250;
+  const ahead = draining ? Math.max(0, queued - elapsed) : queued;
   const estimate = Math.max(1200, 260 * (r.chars || 1));
-  const total = Math.max(estimate, heard + remaining);
-  return Math.min(.985, heard / total);
+  const total = draining ? heard + ahead : Math.max(estimate, heard + ahead);
+  const target = Math.min(draining ? 1 : .97, heard / Math.max(1, total));
+  const dt = r.tick ? Math.min(100, t - r.tick) : 16;
+  r.tick = t;
+  if (target > r.shown) r.shown += (target - r.shown) * Math.min(1, dt / 140);
+  return Math.min(.995, r.shown);
 }
 function setReading(reading) {
   if (reading?.session != null && reading.session !== state.session) return;
   const previous = state.reading;
-  state.reading = reading && reading.job_id != null ? { ...reading, at: now() } : null;
+  const same = previous && reading && previous.job_id === reading.job_id;
+  state.reading = reading && reading.job_id != null
+    ? { ...reading, at: now(), peak: Math.max(same ? previous.peak : 0, Number(reading.queued_ms) || 0), shown: same ? previous.shown : 0, tick: same ? previous.tick : 0 }
+    : null;
   if (previous && (!state.reading || previous.job_id !== state.reading.job_id)) finishJob(previous.job_id);
   if (state.reading) {
-    const rec = [...state.items.values()].find(r => r.job === state.reading.job_id && !r.leaving);
-    if (rec && (state.spot !== rec.seq || rec.spotMode !== "reading")) { rec.state = "reading"; setSpot(rec, "reading"); }
+    wake();
+    const job = state.reading.job_id;
+    let rec = [...state.items.values()].find(r => r.job === job && !r.leaving);
+    // The voice can reach a line that is still waiting for its turn. It goes
+    // on stage now; display-only lines queued before it are skipped, since
+    // the reading has already moved past them.
+    const queued = !rec && retainsRows() ? state.inbox.findIndex(entry => entry.job_id === job) : -1;
+    if (queued >= 0) {
+      const entry = state.inbox.splice(0, queued + 1).pop();
+      clearTimeout(pumpTimer); pumpTimer = 0; stopFlow();
+      if (state.current) endTurn(state.current, false);
+      addItem(entry);
+      updateSocket();
+      rec = [...state.items.values()].find(r => r.job === job && !r.leaving);
+    }
+    if (rec && retainsRows()) { if (rec.state !== "reading") startReading(rec); }
+    else if (rec && (state.spot !== rec.seq || rec.spotMode !== "reading")) { rec.state = "reading"; setSpot(rec, "reading"); }
     const ticket = [...state.tickets.values()].find(r => r.job === state.reading.job_id);
     if (ticket) ticket.el.classList.add("reading");
   }
   refreshTagline();
+  traceThread();
   ensureLoop();
 }
 function finishJob(job) {
   const rec = [...state.items.values()].find(r => r.job === job && !r.leaving);
   if (rec) {
     rec.state = "done";
+    rec.fraction = 1;
+    rec.el.classList.remove("queued");
     rec.el.style.setProperty("--prog", "1");
-    rec.el.style.setProperty("--live", "0");
+    // A spine line on stage keeps its head at the end until its turn ends.
+    rec.el.style.setProperty("--live", retainsRows() && state.current === rec ? "1" : "0");
     setLit(rec, 1);
     rec.el.classList.remove("reading");
     rec.expires = now() + lingerMs();
-    // Stay large for a breath, then fold back into the list.
-    setTimeout(() => { if (state.spot === rec.seq && !readingRecord()) settle(rec); }, 1600);
+    // Spine: let the bar reach its end, then the next line may come.
+    if (state.current === rec) rec.turnTimer = setTimeout(() => endTurn(rec), 450);
+    // Card: stay large for a breath, then fold back into the list.
+    if (!retainsRows()) setTimeout(() => { if (state.spot === rec.seq && !readingRecord()) settle(rec); }, 1600);
   }
   const ticket = [...state.tickets.values()].find(r => r.job === job);
   if (ticket) { ticket.el.classList.remove("reading"); setTicketLit(ticket, 1); ticket.readDone = now(); }
@@ -714,6 +1190,7 @@ function frame() {
       rec.el.style.setProperty("--prog", fraction.toFixed(4));
       rec.el.style.setProperty("--live", "1");
       setLit(rec, fraction);
+      rec.fraction = fraction;
       busy = true;
     } else if (rec.demoUntil) {
       if (t < rec.demoStart) { nextWake = Math.min(nextWake, rec.demoStart - t); }
@@ -858,7 +1335,9 @@ function connect() {
       else if (Date.now() - (item.at || 0) < lingerMs()) receive(item);
     }
     const active = readingRecord();
-    if (retainsRows() && active) setSpot(active, "reading");
+    if (retainsRows() && active && active.state !== "reading") startReading(active);
+    // An overlay with no chat yet also comes to rest after the quiet delay.
+    if (!restTimer) wake();
     ov.classList.add("ready");
   });
   listen("heartbeat", () => {});

@@ -176,6 +176,8 @@ pub struct ObsProbe {
     pub obs_version: String,
     pub websocket_version: String,
     pub streaming: bool,
+    pub canvas_width: Option<u64>,
+    pub canvas_height: Option<u64>,
 }
 
 /// The profile's configured video target, not the measured outgoing bitrate.
@@ -536,16 +538,27 @@ impl ObsConnection {
     }
 }
 
-/// Version and stream state for the settings "test" button. Changes nothing.
+/// Version, stream state and canvas size for the connection drawer. Changes nothing.
 pub async fn probe(settings: &ObsSettings, password: Option<&str>) -> Result<ObsProbe, ObsError> {
     let mut connection = ObsConnection::connect(settings, password).await?;
     let result = async {
         let (obs_version, websocket_version) = connection.version().await?;
         let streaming = connection.stream_active().await?;
+        let video = connection
+            .request("GetVideoSettings", "读取画布大小", None)
+            .await?;
+        let size = |key| {
+            video[key]
+                .as_u64()
+                .filter(|value| (1..=32768).contains(value))
+                .ok_or(ObsError::Protocol("画布大小"))
+        };
         Ok(ObsProbe {
             obs_version,
             websocket_version,
             streaming,
+            canvas_width: Some(size("baseWidth")?),
+            canvas_height: Some(size("baseHeight")?),
         })
     }
     .await;
@@ -858,6 +871,8 @@ pub async fn probe_and_recover_overlay_source(
                 obs_version,
                 websocket_version,
                 streaming,
+                canvas_width: overlay.as_ref().ok().map(|found| found.width),
+                canvas_height: overlay.as_ref().ok().map(|found| found.height),
             },
             overlay,
             refresh_attempted,
@@ -2281,7 +2296,9 @@ mod tests {
             ObsProbe {
                 obs_version: "31.0.0".into(),
                 websocket_version: "5.5.2".into(),
-                streaming: false
+                streaming: false,
+                canvas_width: Some(2560),
+                canvas_height: Some(1440),
             }
         );
         server.await.unwrap();

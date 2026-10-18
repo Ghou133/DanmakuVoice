@@ -395,6 +395,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "appearance": appearance,
             "language": initial_snapshot["preferences"]["language"].as_str().unwrap_or("zh-CN"),
             "session": uuid::Uuid::new_v4().to_string(),
+            "setup": options.show_setup,
         })
     );
     tauri::Builder::default()
@@ -455,6 +456,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .build()?;
             window.set_background_color(Some(background_color(window.theme()?)))?;
             window.set_zoom(zoom)?;
+            #[cfg(windows)]
+            apply_window_icons(&window);
             startup
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -478,6 +481,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         request_exit(&handle, &exit_bridge);
+                    }
+                    #[cfg(windows)]
+                    if let tauri::WindowEvent::ScaleFactorChanged { .. } = event {
+                        apply_window_icons(&window);
                     }
                     if let tauri::WindowEvent::ThemeChanged(theme) = event {
                         let _ = window.set_background_color(Some(background_color(*theme)));
@@ -704,12 +711,45 @@ fn background_color(theme: tauri::Theme) -> tauri::window::Color {
     }
 }
 
-fn ui_zoom(snapshot: &Value) -> f64 {
-    snapshot["preferences"]["scale"]
-        .as_f64()
-        .filter(|scale| scale.is_finite())
-        .map(|scale| scale.clamp(0.8, 1.4))
-        .unwrap_or(1.0)
+fn ui_zoom(_snapshot: &Value) -> f64 {
+    // WebView2 already follows Windows DPI. Historical in-app scaling no
+    // longer compounds it now that the setting has been removed.
+    1.0
+}
+
+// Tauri only gives the window a small icon resampled to 32 px. With no big icon the
+// taskbar enlarges that one and it blurs on high-DPI screens, so both come from the
+// executable's multi-size ICO resource (embedded by tauri-build) at this DPI's sizes.
+#[cfg(windows)]
+fn apply_window_icons(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED, LoadImageW, SM_CXICON,
+        SM_CXSMICON, SendMessageW, WM_SETICON,
+    };
+    const APP_ICON_RESOURCE_ID: usize = 32512;
+    let Ok(handle) = window.hwnd() else { return };
+    // SAFETY: the HWND belongs to this live window; shared icons are owned by the
+    // system cache, so none of them is destroyed here.
+    unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        let dpi = GetDpiForWindow(handle.0).max(96);
+        for (kind, metric) in [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)] {
+            let size = GetSystemMetricsForDpi(metric, dpi);
+            let icon = LoadImageW(
+                module,
+                APP_ICON_RESOURCE_ID as *const u16,
+                IMAGE_ICON,
+                size,
+                size,
+                LR_DEFAULTCOLOR | LR_SHARED,
+            );
+            if !icon.is_null() {
+                SendMessageW(handle.0, WM_SETICON, kind as usize, icon as isize);
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -778,9 +818,9 @@ mod ui_zoom_tests {
 
     #[test]
     fn saved_ui_scale_applies_to_the_whole_webview_with_safe_bounds() {
-        assert_eq!(ui_zoom(&json!({"preferences":{"scale":1.4}})), 1.4);
-        assert_eq!(ui_zoom(&json!({"preferences":{"scale":0.5}})), 0.8);
-        assert_eq!(ui_zoom(&json!({"preferences":{"scale":2.0}})), 1.4);
+        assert_eq!(ui_zoom(&json!({"preferences":{"scale":1.4}})), 1.0);
+        assert_eq!(ui_zoom(&json!({"preferences":{"scale":0.5}})), 1.0);
+        assert_eq!(ui_zoom(&json!({"preferences":{"scale":2.0}})), 1.0);
         assert_eq!(ui_zoom(&json!({"preferences":{}})), 1.0);
     }
 

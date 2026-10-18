@@ -105,6 +105,7 @@ let updateInfo = null;
 let updateBusy = false;
 let updateError = "";
 let step = null;
+let replaySetup = window.__DANMAKUVOICE_STARTUP_THEME__?.setup === true;
 let setupTts = true;
 let settingsTab = 'voices';
 let settingsDirty = false;
@@ -141,13 +142,14 @@ let viewerModerationAccount = '';
 let audienceQuery = '';
 let audienceMoreAt = 0;
 let audienceCloseTimer = null;
+let audienceFinishTimer = null;
 let audiencePinned = false;
 let audienceSignature = '';
 let audienceReturn = false;
 const audienceEntries = new Map();
 let aliasReturnContext = null;
 let volumeDraft = null;
-const voiceAuditionDraft = { provider: '', presetId: '', text: '你好，欢迎来到直播间。' };
+const voiceAuditionDraft = { provider: '', presetId: '', text: '你好，欢迎来到直播间。', customText: false };
 let voiceAuditionRevision = 0;
 let voiceAuditionDefaultSave = Promise.resolve();
 let modelScan = { pairs: [], issues: [] };
@@ -294,6 +296,7 @@ function updateChatCompose() {
   const noteHost = host.querySelector('.chat-compose-note');
   noteHost.textContent = diagnostic;
   noteHost.hidden = !diagnostic;
+  host.classList.toggle('has-note', !!diagnostic);
   const count = host.querySelector('.lake-compose-count');
   count.hidden = !input.value;
   // maxlength and the platform limit both count UTF-16 units; so does the counter.
@@ -434,25 +437,50 @@ function leaveGhost(node, ms = 280) {
   setTimeout(() => ghost.remove(), ms);
 }
 
-// The new theme spreads as a circle from the button that was pressed.
+// Lake surfaces are styled by id, so a ghost copy would lose its look. They play
+// their own .leaving animation and hide afterwards; reopening cancels the exit.
+const leaveTimers = new WeakMap();
+function leaveThenHide(node, ms, done) {
+  if (!node || node.hidden) { done?.(); return; }
+  if (leaveTimers.has(node)) return;
+  if (!motionAllowed()) { node.hidden = true; done?.(); return; }
+  node.classList.add('leaving');
+  leaveTimers.set(node, setTimeout(() => { leaveTimers.delete(node); node.classList.remove('leaving'); node.hidden = true; done?.(); }, ms));
+}
+function cancelLeave(node) {
+  if (!node || !leaveTimers.has(node)) return;
+  clearTimeout(leaveTimers.get(node)); leaveTimers.delete(node); node.classList.remove('leaving');
+}
+const isLeaving = node => !!node && leaveTimers.has(node);
+
+// The new theme spreads as a circle from the button that was pressed. Resolves
+// once the old frame is captured, so a save that re-applies the stored
+// appearance cannot switch the theme underneath the transition.
 function revealTheme(next, origin) {
   const root = document.documentElement;
-  if (typeof document.startViewTransition !== 'function' || !motionAllowed()) { root.dataset.theme = next; return; }
+  if (typeof document.startViewTransition !== 'function' || !motionAllowed()) { root.dataset.theme = next; return Promise.resolve(); }
   const rect = origin?.getBoundingClientRect?.();
   const x = rect ? rect.left + rect.width / 2 : window.innerWidth - 80;
   const y = rect ? rect.top + rect.height / 2 : 20;
   root.style.setProperty('--reveal-x', `${x}px`);
   root.style.setProperty('--reveal-y', `${y}px`);
   root.style.setProperty('--reveal-r', '160vmax');
+  // From the sun / moon, the old body sets while the new one rises. It is named
+  // only for this transition so it never paints over a dialog later.
+  const orb = origin?.id === 'lake-orb' ? origin : null;
+  if (orb) orb.style.viewTransitionName = 'lake-orb';
   let applied = false;
   try {
-    document.startViewTransition(() => {
+    const transition = document.startViewTransition(() => {
       applied = true;
       root.dataset.theme = next;
       return new Promise(resolve => setTimeout(resolve, 50));
     });
+    const release = () => { if (orb) orb.style.viewTransitionName = ''; };
+    transition.finished.then(release, release);
     setTimeout(() => { if (!applied) root.dataset.theme = next; }, 300);
-  } catch { root.dataset.theme = next; }
+    return Promise.race([transition.updateCallbackDone, new Promise(resolve => setTimeout(resolve, 300))]).catch(() => {});
+  } catch { root.dataset.theme = next; if (orb) orb.style.viewTransitionName = ''; return Promise.resolve(); }
 }
 
 function closeQueuePanel(focusPill = false) {
@@ -511,13 +539,14 @@ const invoke = (command, args) => {
 function showToast(message, isError = false, undo = null) {
   const target = document.querySelector('#toast');
   clearTimeout(toastTimer);
+  cancelLeave(target);
   target.classList.add('toast');
   target.textContent = String(message);
   toastUndo = typeof undo === 'function' ? undo : null;
   if (toastUndo) target.innerHTML = `<span>${esc(String(message))}</span><button type="button" data-action="toast.undo">${esc(t('撤销'))}</button>`;
   target.classList.toggle('error', isError);
   target.hidden = false;
-  toastTimer = setTimeout(() => { toastUndo = null; if (step !== 'main') leaveGhost(target, 260); target.hidden = true; }, isError ? 8000 : step === 'main' ? 3600 : 3000);
+  toastTimer = setTimeout(() => { toastUndo = null; if (step !== 'main') { leaveGhost(target, 260); target.hidden = true; } else leaveThenHide(target, 240); }, isError ? 8000 : step === 'main' ? 3600 : 3000);
 }
 
 function showError(error) {
@@ -550,6 +579,7 @@ function applyAppearance() {
 
 function applyLanguage() {
   const changed = setLanguage(snapshot?.preferences?.language);
+  if (changed && !voiceAuditionDraft.customText) voiceAuditionDraft.text = t('你好，欢迎来到直播间。');
   if (document.documentElement.lang !== getLanguage()) document.documentElement.lang = getLanguage();
   const title = t('超绝可爱弹幕姬');
   if (document.title !== title) document.title = title;
@@ -567,10 +597,10 @@ function acceptSnapshot(next) {
   snapshot = mergeSnapshot(snapshot, next);
   applyAppearance();
   const languageChanged = applyLanguage();
-  if (!step) { step = startingStep(snapshot);  setupTts = snapshot.setup?.tts_enabled ?? true; renderApp(); }
+  if (!step) { step = replaySetup ? 'welcome' : startingStep(snapshot); setupTts = snapshot.setup?.tts_enabled ?? true; renderApp(); }
   else if (languageChanged) renderApp();
   if (languageChanged && settingsDialog.open) renderSettings();
-  if (snapshot.onboarding_done && step !== 'main') { stopQrPolling(); step = 'main'; renderApp(); }
+  if (snapshot.onboarding_done && !replaySetup && step !== 'main') { stopQrPolling(); step = 'main'; renderApp(); }
   if (step === 'main') updateLive();
   if (settingsDialog.open) { updateVoiceSettings(); updateServiceIndicators(); updateOverlayStatus(); updateBroadcastSettings(); }
   updateQr();
@@ -596,8 +626,10 @@ async function command(action, payload = {}, options = {}) {
   } finally { pendingCommands--; snapshotSequence.settled(); if (boot.polling) scheduleSnapshotPolling(); }
 }
 
+let setupRescan = false;
 function setStep(next) {
-  step = next === 'uid' ? 'login' : next;
+  step = ['uid', 'connect'].includes(next) ? 'login' : next;
+  if (step !== 'login') setupRescan = false;
   clearError();
   renderApp();
   if (next === 'login') void startQr('bilibili');
@@ -613,14 +645,20 @@ function renderChatBody(item) {
 
 
 function qrMarkup(provider, inSettings = false) {
-  return ui`<div class="${inSettings ? 'settings-qr' : ''}" data-qr-provider="${provider}"><div class="qr-frame"><div class="qr-placeholder"><span class="spinner" aria-hidden="true"></span><span>正在生成二维码</span></div></div><div class="qr-status" role="status" aria-live="polite"><span class="status-dot pulse"></span><span data-qr-label>正在生成二维码</span></div><div class="actions qr-retry" hidden>${button(t('重新生成二维码'), 'qr.retry', { icon: 'refresh', class: 'quiet small' })}</div></div>`;
+  return ui`<div class="${inSettings ? 'settings-qr' : ''}" data-qr-provider="${provider}"><div class="qr-frame"><div class="qr-placeholder"><span class="spinner" aria-hidden="true"></span><span>正在生成二维码</span></div></div><div class="qr-status" role="status" aria-live="polite"><span class="status-dot pulse"></span><span data-qr-label>正在生成二维码</span></div></div>`;
 }
 
 function updateThemeControl() {
-  const control = document.querySelector('#titlebar-actions [data-action="theme.toggle"]');
-  if (!control) return;
   const dark = document.documentElement.dataset.theme === 'dark';
   const label = t(dark ? '切换到日间' : '切换到夜间');
+  const orb = document.querySelector('#lake-orb');
+  if (orb && orb.getAttribute('aria-label') !== label) {
+    orb.setAttribute('aria-label', label);
+    const tip = document.querySelector('.lake-orb-tip');
+    if (tip) tip.textContent = t(dark ? '日间 · afternoon' : '夜间 · evening');
+  }
+  const control = document.querySelector('#titlebar-actions [data-action="theme.toggle"]');
+  if (!control) return;
   if (control.title === label && control.dataset.iconTheme === String(dark)) return;
   control.dataset.iconTheme = String(dark);
   control.title = label;
@@ -634,31 +672,97 @@ function updateLakeClock() {
   if (!part || !clock || document.documentElement.dataset.inactive === 'true') return;
   const now = new Date();
   const weekday = now.toLocaleDateString('en-US', { weekday: 'long' });
-  const label = `${weekday} night`;
+  // Match the evening and afternoon captions in the two reference scenes.
+  const daypart = document.documentElement.dataset.theme === 'dark' ? 'evening' : 'afternoon';
+  const label = `${weekday} ${daypart}`;
   if (part.dataset.label !== label) {
     part.dataset.label = label;
-    part.innerHTML = `<span>${esc(weekday)}</span> <span>night</span>`;
+    part.innerHTML = `<span>${esc(weekday)}</span> <span>${daypart}</span>`;
   }
   const time = `${now.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }).toUpperCase()} · ${clockLabel(now.getTime())}`;
   if (clock.textContent !== time) clock.textContent = time;
 }
 
 function lakeLettersHtml(parts) {
-  const letters = parts.flatMap(part => part.type === 'emote'
-    ? [`<img class="message-emote${part.large ? ' large' : ''}" src="${esc(part.url)}" alt="" aria-label="${esc(part.text)}" loading="lazy" referrerpolicy="no-referrer">`]
-    : [...new Intl.Segmenter(getLanguage(), { granularity: 'grapheme' }).segment(part.text)].map(({ segment }) => esc(segment)));
-  const count = letters.length;
-  const per = Math.max(1, Math.ceil(count / (count <= 8 ? 1 : count <= 16 ? 2 : 3)));
+  const graphemes = new Intl.Segmenter(getLanguage(), { granularity: 'grapheme' });
+  const words = new Intl.Segmenter(getLanguage(), { granularity: 'word' });
+  const cjk = /[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}]/u;
+  // These common Chinese punctuation marks use one full unit in every context.
+  const fullWidth = /[\u2014\u2018\u2019\u201c\u201d\u2026\u3000-\u303f\ufe10-\ufe19\ufe30-\ufe6f\uff01-\uff60\uffe0-\uffe6\u20e3]|\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
+  // Integer hundredths keep visual-width thresholds exact; reveal/read positions
+  // remain one letter per original grapheme, independent of its estimated width.
+  const graphemeWidth = segment => cjk.test(segment) || fullWidth.test(segment) ? 100 : 55;
+  const groups = [];
+  for (const part of parts) {
+    if (part.type === 'emote') {
+      groups.push({ letters: [`<img class="message-emote${part.large ? ' large' : ''}" src="${esc(part.url)}" alt="" aria-label="${esc(part.text)}" loading="lazy" referrerpolicy="no-referrer">`], width: 100, word: false });
+      continue;
+    }
+    for (const token of words.segment(part.text)) {
+      const segments = [...graphemes.segment(token.segment)].map(({ segment }) => segment);
+      const letters = segments.map(segment => esc(segment));
+      const widths = segments.map(graphemeWidth);
+      const width = widths.reduce((total, value) => total + value, 0);
+      // Preserve every non-CJK word, including numbers and other scripts. CJK
+      // tokens still have a break opportunity at each original grapheme.
+      if (token.isWordLike && !cjk.test(token.segment)) groups.push({ letters, width, word: true });
+      // A space belongs to the preceding group at a manual line break, but keeps
+      // its own letter node, normal width, animation delay and reading position.
+      else if (/^\s+$/u.test(token.segment) && groups.length) { groups.at(-1).letters.push(...letters); groups.at(-1).width += width; }
+      else groups.push(...letters.map((letter, index) => ({ letters: [letter], width: widths[index], word: false })));
+    }
+  }
+  const width = groups.reduce((total, group) => total + group.width, 0);
+  const lineCount = width <= 800 ? 1 : width <= 1600 ? 2 : 3;
+  // Round to a whole visual unit exactly as the former CJK character count did.
+  const per = Math.max(100, Math.ceil(width / (lineCount * 100)) * 100);
   const lines = [];
-  for (let start = 0; start < count; start += per) lines.push(`<span class="lake-text-line">${letters.slice(start, start + per).map((letter, index) => `<span class="lake-letter ${lakeLetterFlip ? 'a' : 'b'}" style="--letter-delay:${(start + index) * 160}ms">${letter}</span>`).join('')}</span>`);
-  return { size: count <= 16 ? 'normal' : count <= 26 ? 'medium' : 'small', html: lines.join('') };
+  let next = 0;
+  let index = 0;
+  while (next < groups.length) {
+    const row = [];
+    let length = 0;
+    while (next < groups.length) {
+      const group = groups[next];
+      const added = length + group.width;
+      if (row.length && lines.length < lineCount - 1 && added > per && Math.abs(added - per) > Math.abs(length - per)) break;
+      row.push(group); next++; length = added;
+      if (lines.length < lineCount - 1 && length >= per) break;
+    }
+    lines.push(`<span class="lake-text-line">${row.map(group => {
+      const html = group.letters.map(letter => `<span class="lake-letter ${lakeLetterFlip ? 'a' : 'b'}" style="--letter-delay:${index++ * 160}ms">${letter}</span>`).join('');
+      return group.word ? `<span class="lake-word">${html}</span>` : html;
+    }).join('')}</span>`);
+  }
+  return { size: width <= 1600 ? 'normal' : width <= 2600 ? 'medium' : 'small', html: lines.join('') };
+}
+
+function lakeMessageTime(observedAt, now = Date.now()) {
+  const age = now - Number(observedAt);
+  return Number(observedAt) > 0 && age >= 0 && age < 60_000 ? 'just now' : clockLabel(observedAt);
 }
 
 function lakeMessageHtml(event, key) {
   const text = lakeLettersHtml(messageParts(event));
   const price = event.price_yuan ? `<span class="lake-message-price">¥${esc(event.price_yuan)}</span>` : '';
   const open = `data-action="viewer.open" data-id="${esc(key)}"`;
-  return `<div class="chat-hit"><span class="lake-message-meta"><button type="button" class="lake-avatar-button" ${open} aria-label="${esc(event.user_name || t('访客'))}">${viewerAvatar(event)}</button><button type="button" class="lake-message-name" ${open}>${esc(event.user_name || t('访客'))}</button>${price}<time datetime="${new Date(Number(event.observed_at_ms) || 0).toISOString()}">${esc(clockLabel(event.observed_at_ms))}<span class="lake-relative" aria-hidden="true"></span></time></span><span class="lake-message-text" data-size="${text.size}">${text.html}</span>${price ? `<em class="lake-history-price">¥${esc(event.price_yuan)}</em>` : ''}</div>`;
+  return `<div class="chat-hit"><span class="lake-message-meta"><button type="button" class="lake-avatar-button" ${open} aria-label="${esc(event.user_name || t('访客'))}">${viewerAvatar(event)}</button><button type="button" class="lake-message-name" ${open}>${esc(event.user_name || t('访客'))}</button>${price}<time datetime="${new Date(Number(event.observed_at_ms) || 0).toISOString()}"><span class="lake-relative">${esc(lakeMessageTime(event.observed_at_ms))}</span></time></span><span class="lake-message-text" data-size="${text.size}">${text.html}</span>${price ? `<em class="lake-history-price">¥${esc(event.price_yuan)}</em>` : ''}</div>`;
+}
+
+function updateLakePeek(host, rows) {
+  const retained = new Map([...host.children].map(node => [node.dataset.id, node]));
+  const keys = new Set(rows.map(([key]) => key));
+  for (const node of [...host.children]) if (!keys.has(node.dataset.id)) node.remove();
+  for (let index = 0; index < rows.length; index++) {
+    const [key, event] = rows[index];
+    let node = retained.get(key);
+    if (!node) {
+      node = document.createElement('button'); node.type = 'button'; node.className = 'lake-peek-entry'; node.dataset.action = 'viewer.open'; node.dataset.id = key;
+      node.innerHTML = `${viewerAvatar(event)}<span class="lake-peek-text"></span>`;
+    }
+    patchMarkup(node.querySelector('.lake-peek-text'), renderChatBody(event));
+    if (host.children[index] !== node) host.insertBefore(node, host.children[index] || null);
+  }
 }
 
 function lakeLedger() {
@@ -697,27 +801,119 @@ function restoreLakePresentation() {
   for (const node of lakeMessageNodes.values()) {
     if (lakeLedger().has(lakePresentationContext, lakePresentationIdentities.get(node))) node.classList.add('lake-restored');
   }
+  if (document.querySelector('#lake-current .lake-restored')) document.querySelector('#lake-text-reflection')?.classList.add('lake-restored');
   rememberLakePresentation();
+}
+
+let lakeDeep = false;
+let lakeDeepSeen = new Set();
+let lakeDeepSeenTotal = 0;
+let lakeHistoryArchive = null;
+let lakeVolumeHintTimer = null;
+let lakeWake = null;
+
+function currentLakeHistory() {
+  const stats = snapshot.live_history;
+  if (!stats?.session_id || !Number.isSafeInteger(stats.messages)) return null;
+  const context = `${snapshot.account?.user_id || ''}:${stats.session_id}`;
+  if (lakeHistoryArchive?.context !== context) {
+    lakeHistoryArchive = { context, session: stats.session_id, items: new Map(), before: null, hasMore: true, headTotal: -1, headRevision: -1, headBusy: false, olderBusy: false, error: '', stats, viewers: new Map() };
+    lakeDeepSeenTotal = stats.messages;
+  }
+  return lakeHistoryArchive;
+}
+
+function lakeObservedStats(events) {
+  const archive = currentLakeHistory();
+  const stats = archive && archive.stats.messages > snapshot.live_history.messages ? archive.stats : snapshot.live_history;
+  const since = Number(snapshot.broadcast?.room?.live_since || (stats?.started_at_ms ? stats.started_at_ms / 1000 : snapshot.live?.started_at) || 0);
+  const seconds = since > 0 ? Math.max(0, Math.floor(Date.now() / 1000 - since)) : null;
+  return { messages: stats?.messages ?? events.length, people: stats?.unique_viewers ?? new Set(events.filter(event => ['danmaku', 'super_chat'].includes(event.kind)).map(viewerIdentity).filter(Boolean)).size, seconds };
+}
+
+function lakeDuration(seconds) {
+  return seconds == null ? '' : `${Math.floor(seconds / 3600)} ${t('小时')} ${Math.floor(seconds % 3600 / 60)} ${t('分')}`;
+}
+
+async function requestLakeHistory(archive, payload = {}) {
+  const result = await invoke('dispatch', { action: 'live.history', payload: { session_id: archive.session, limit: 100, ...payload } });
+  const page = result.result;
+  if (!page || page.session_id !== archive.session || !Array.isArray(page.items)) throw new Error(t('历史弹幕读取失败，请重试'));
+  return page;
+}
+
+function redrawLakeHistory(archive) {
+  if (archive !== currentLakeHistory() || step !== 'main') return;
+  const events = normalizedEvents(snapshot);
+  renderLakeHistory(events, eventKeys(events));
+}
+
+async function loadLakeHistory(older = false) {
+  const archive = currentLakeHistory();
+  if (!archive || (older ? archive.olderBusy || archive.headBusy || !archive.hasMore : archive.headBusy)) return;
+  const flag = older ? 'olderBusy' : 'headBusy';
+  archive[flag] = true; archive.error = '';
+  const refreshMetadata = Number(snapshot.live_history.metadata_revision || 0) > archive.headRevision;
+  const previousNewest = archive.items.size ? refreshMetadata
+    ? [...archive.items.keys()].reduce((min, value) => Math.min(min, value), Infinity)
+    : [...archive.items.keys()].reduce((max, value) => Math.max(max, value), 0) : 0;
+  let before = older ? archive.before : undefined;
+  redrawLakeHistory(archive);
+  try {
+    // Catch up in stable pages if more than 100 lines arrived while submerged.
+    // Older-page cursors remain fixed while new lines arrive at the surface.
+    do {
+      const page = await requestLakeHistory(archive, before == null ? {} : { before });
+      if (archive !== currentLakeHistory() || Number(page.metadata_revision || 0) < archive.headRevision) return;
+      const oldest = archive.items.size ? [...archive.items.keys()].reduce((min, value) => Math.min(min, value), Infinity) : Infinity;
+      for (const item of page.items) archive.items.set(item.sequence, item.event);
+      archive.stats = page;
+      if (!older) { archive.headTotal = Math.max(archive.headTotal, page.messages); archive.headRevision = Number(page.metadata_revision || 0); }
+      if (page.before == null || page.before < oldest) { archive.before = page.before; archive.hasMore = page.has_more; }
+      before = page.before;
+      if (older || !previousNewest || !page.has_more || before <= previousNewest) break;
+    } while (before != null);
+  } catch (error) {
+    if (archive === currentLakeHistory()) { archive.error = errorMessage(error); archive.errorOlder = older; }
+  } finally { archive[flag] = false; redrawLakeHistory(archive); }
+}
+
+function lakeHistoryMessageLabel(count, expanded = false) {
+  if (getLanguage() === 'en' && count === 1) return 'message rests in the lake';
+  return t(expanded ? '句弹幕沉在湖里' : '句沉在湖里');
 }
 
 function renderLakeHistory(events, keys) {
   const feed = document.querySelector('#chat-feed');
   if (!feed) return;
-  feedEvents.clear();
-  keys.forEach((key, index) => feedEvents.set(key, events[index]));
-  if (!document.querySelector('#lake-history-dialog')?.open) return;
-  const signature = JSON.stringify([keys, events.map(event => messageParts(event)), viewerOpenIdentity, getLanguage()]);
+  const archive = currentLakeHistory();
+  feedEvents.clear(); keys.forEach((key, index) => feedEvents.set(key, events[index]));
+  const stats = lakeObservedStats(events);
+  const total = document.querySelector('#lake-history-total');
+  if (total) total.textContent = String(stats.messages);
+  patchMarkup(document.querySelector('#lake-history-label'), esc(lakeHistoryMessageLabel(stats.messages)));
+  const reading = snapshot.queue?.current;
+  const newCount = lakeDeep ? archive ? Math.max(0, stats.messages - lakeDeepSeenTotal) : keys.filter(key => !lakeDeepSeen.has(key)).length : 0;
+  const newButton = document.querySelector('#lake-deep-new');
+  patchMarkup(newButton, newCount ? `${newCount} ${esc(t('句新弹幕'))}` : '');
+  if (newButton) newButton.hidden = !newCount;
+  patchMarkup(document.querySelector('#lake-deep-reading'), reading && reading.origin !== 'audition' ? `${esc(t('正在读'))} · ${esc(reading.user_name || '')}${esc(t('：'))}${esc(jobDisplayText(reading, events))}` : '');
+  patchMarkup(document.querySelector('#lake-deep-stats'), `<strong>${stats.messages}</strong><span>${esc(lakeHistoryMessageLabel(stats.messages, true))}</span><p>${stats.seconds == null ? '' : `${esc(t('今晚'))} ${esc(lakeDuration(stats.seconds))}<br>`}${stats.people} ${esc(t('位朋友说过话'))}</p>`);
+  if (!lakeDeep) return;
+  if (archive && !archive.error && (snapshot.live_history.messages > archive.headTotal || Number(snapshot.live_history.metadata_revision || 0) > archive.headRevision) && !archive.headBusy) void loadLakeHistory();
+  const items = archive?.items.size ? [...archive.items].sort(([a], [b]) => a - b).map(([sequence, event]) => ({ key: `history:${archive.session}:${sequence}`, event })) : events.map((event, index) => ({ key: keys[index], event }));
+  for (const item of items) feedEvents.set(item.key, item.event);
+  patchMarkup(document.querySelector('#lake-history-more'), archive ? archive.error ? `<span role="status">${esc(archive.error)}</span><button type="button" data-action="lake.history.retry">${esc(t('重试'))}</button>` : archive.headBusy || archive.olderBusy ? `<span role="status">${esc(t('正在读取更深处的弹幕'))}</span>` : archive.hasMore ? `<button type="button" data-action="lake.history.more">${esc(t('再往深处看看'))}</button>` : '' : '');
+  const signature = JSON.stringify([items.map(item => [item.key, messageParts(item.event)]), viewerOpenIdentity, getLanguage()]);
   if (signature === feedSignature) return;
-  // New messages enter at the top of this newest-first list. Away from the top,
-  // keep the entry being read under the same point instead of letting it drift.
   const scroll = document.querySelector('#chat-scroll');
   const scrollTop = scroll?.getBoundingClientRect().top;
   const anchor = scroll?.scrollTop > 0 ? [...feed.children].find(entry => entry.getBoundingClientRect().bottom > scrollTop) : null;
   const anchorKey = anchor?.dataset.id;
   const anchorOffset = anchor ? anchor.getBoundingClientRect().top - scrollTop : 0;
-  patchMarkup(feed, events.map((event, index) => {
-    const price = event.price_yuan;
-    return `<button type="button" class="lake-history-entry${viewerIdentity(event) === viewerOpenIdentity ? ' selected' : ''}" data-action="viewer.open" data-id="${esc(keys[index])}"><span class="lake-history-time${price ? ' gold' : ''}">${esc(price ? `¥${price}` : clockLabel(event.observed_at_ms))}</span><span class="lake-history-body"><b>${renderChatBody(event)}</b><small>${viewerAvatar(event)}${esc(event.user_name || t('访客'))}</small></span></button>`;
+  patchMarkup(feed, items.map(({ event, key }) => {
+    const gold = ['gift', 'super_chat', 'guard'].includes(event.kind);
+    return `<button type="button" class="lake-history-entry${gold ? ' gold' : ''}${viewerIdentity(event) === viewerOpenIdentity ? ' selected' : ''}" data-action="viewer.open" data-id="${esc(key)}"><span class="lake-history-meta">${viewerAvatar(event)}<span>${esc(event.user_name || t('访客'))}</span><time>${esc(clockLabel(event.observed_at_ms))}</time></span><span class="lake-history-body">${renderChatBody(event)}${event.price_yuan ? `<em>¥${esc(event.price_yuan)}</em>` : ''}</span></button>`;
   }).reverse().join(''));
   feedSignature = signature;
   const moved = anchor && [...feed.children].find(entry => entry.dataset.id === anchorKey);
@@ -726,8 +922,8 @@ function renderLakeHistory(events, keys) {
 
 function renderLakeTranscript(events, keys) {
   const current = document.querySelector('#lake-current');
-  const history = document.querySelector('#lake-history');
-  if (!current || !history) return;
+  const peek = document.querySelector('#lake-peek');
+  if (!current || !peek) return;
   const enabled = broadcastEnabled();
   const room = snapshot.broadcast?.room;
   const live = enabled && broadcastLive(room);
@@ -737,114 +933,211 @@ function renderLakeTranscript(events, keys) {
     cancelAnimationFrame(lakePresentationFrame); lakePresentationFrame = 0;
     for (const node of lakeMessageNodes.values()) node.remove();
     lakeMessageNodes.clear(); lakeTranscriptSignature = ''; lakePresentationContext = presentationContext;
+    lakeDeepSeen = new Set(keys); lakeDeep = false;
   }
-  // A reused platform ID at a different reception time is a new observation.
-  const firstShown = Math.max(0, events.length - 5);
-  const presentationKeys = keys.slice(firstShown).map((key, index) => JSON.stringify([key, events[firstShown + index]?.observed_at_ms ?? null]));
-  const contentSignatures = events.slice(firstShown).map(event => JSON.stringify(messageParts(event)));
   const sessionContext = `${account}:${room?.room_id || ''}`;
   if (sessionContext !== lakeSessionAccount) { lakeSessionAccount = sessionContext; lakePreviousBroadcastLive = false; lakeEnded = false; }
   lakeSessionSummary = enabled && account && room ? broadcastSessionSummary(snapshot.broadcast) : null;
   if (live) lakeEnded = false;
-  else if (enabled && lakePreviousBroadcastLive) {
-    lakeEnded = !!lakeSessionSummary;
-  }
+  else if (enabled && lakePreviousBroadcastLive) lakeEnded = true;
   lakePreviousBroadcastLive = live;
   if (!enabled) lakeEnded = false;
   const prepared = enabled && !!room && !live;
   const face = enabled && !!snapshot.broadcast?.face_image && onAirPanelMode === 'face';
-  const scene = face ? 'face' : prepared ? lakeEnded ? 'ended' : 'offair' : !events.length ? 'empty' : (snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled) && snapshot.queue?.current ? 'live' : 'calm';
+  const speaking = !!(snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled) && snapshot.queue?.current;
+  const featured = !prepared ? spotlightKey(events, keys, speaking) || keys.at(-1) : '';
+  const index = keys.indexOf(featured);
+  const scene = face ? 'face' : prepared ? lakeEnded ? 'ended' : 'offair' : !events.length ? 'empty' : speaking ? 'live' : 'calm';
   const shell = document.querySelector('#live-shell');
-  shell.dataset.scene = scene;
-  const connection = liveConnectionView(snapshot.live || {});
-  const emptyConnection = !prepared && !events.length
-    ? [connection.online, connection.emptyTitle, connection.emptyDescription, !!snapshot.live?.running]
-    : null;
-  const signature = JSON.stringify([presentationKeys.slice(-5), contentSignatures.slice(-5), scene, room?.title, lakeSessionSummary, getLanguage(), viewerOpenIdentity, emptyConnection]);
+  shell.dataset.scene = scene; shell.classList.toggle('lake-deep', lakeDeep);
+  const deep = document.querySelector('#lake-deep');
+  if (deep) deep.hidden = !lakeDeep;
+  const identity = index >= 0 ? JSON.stringify([featured, events[index].observed_at_ms]) : '';
+  const signature = JSON.stringify([identity, index >= 0 ? messageParts(events[index]) : null, keys.slice(-4), events.slice(-4).map(messageParts), scene, room?.title, broadcastAreaPath(snapshot.broadcast || {}, room), lakeSessionSummary, getLanguage(), viewerOpenIdentity]);
   if (signature !== lakeTranscriptSignature) {
-    const shown = prepared ? [] : keys.slice(-5);
-    const previousFeatured = current.querySelector('[data-key]')?.dataset.key;
-    if (shown.at(-1) !== previousFeatured) lakeLetterFlip = !lakeLetterFlip;
-    history.querySelectorAll('.lake-session-line').forEach(node => node.remove());
-    for (const [key, node] of lakeMessageNodes) if (!shown.includes(key)) { node.remove(); lakeMessageNodes.delete(key); }
+    for (const [key, node] of lakeMessageNodes) if (key !== featured) { node.remove(); lakeMessageNodes.delete(key); }
     current.querySelector('.lake-state')?.remove();
-    const historyNodes = [];
-    for (const key of shown) {
-      const index = keys.indexOf(key);
-      let node = lakeMessageNodes.get(key);
-      if (node && lakePresentationIdentities.get(node) !== presentationKeys[index - firstShown]) { node.remove(); lakeMessageNodes.delete(key); node = null; }
-      let restored = node ? node.classList.contains('lake-restored') : lakeLedger().has(presentationContext, presentationKeys[index - firstShown]);
+    if (index >= 0) {
+      let node = lakeMessageNodes.get(featured);
+      if (node && lakePresentationIdentities.get(node) !== identity) { node.remove(); node = null; }
+      const restored = lakeLedger().has(presentationContext, identity);
+      const fresh = !node;
       if (!node) {
-        node = document.createElement('article'); node.dataset.key = key; node.innerHTML = lakeMessageHtml(events[index], key);
-        lakeMessageNodes.set(key, node); lakePresentationIdentities.set(node, presentationKeys[index - firstShown]);
-        lakeMessageContents.set(node, contentSignatures[index - firstShown]);
-      } else if (lakeMessageContents.get(node) !== contentSignatures[index - firstShown]) {
-        // Late trusted image metadata changes only the body of the same event.
-        // An already shown phrase gets its final form, never another entrance.
-        restored ||= lakeLedger().has(presentationContext, presentationKeys[index - firstShown]);
+        lakeLetterFlip = !lakeLetterFlip; node = document.createElement('article'); node.dataset.key = featured;
+        lakeMessageNodes.set(featured, node); lakePresentationIdentities.set(node, identity);
+      }
+      const content = JSON.stringify(messageParts(events[index]));
+      if (lakeMessageContents.get(node) !== content) {
         const body = node.querySelector('.lake-message-text');
-        const text = lakeLettersHtml(messageParts(events[index]));
-        body.dataset.size = text.size; body.innerHTML = text.html;
-        lakeMessageContents.set(node, contentSignatures[index - firstShown]);
+        if (body) {
+          const text = lakeLettersHtml(messageParts(events[index]));
+          body.dataset.size = text.size; body.innerHTML = text.html;
+          if (restored) node.classList.add('lake-restored');
+        } else node.innerHTML = lakeMessageHtml(events[index], featured);
+        lakeMessageContents.set(node, content);
       }
-      const featured = key === keys.at(-1);
-      const newlySunk = !featured && key === previousFeatured && node.parentElement === current;
-      const sink = newlySunk ? `lake-sink-${lakeLetterFlip ? 'a' : 'b'}` : !featured && node.parentElement === history ? [...node.classList].find(name => /^lake-sink-[ab]$/.test(name)) : '';
-      node.className = `lake-message ${featured ? 'lake-featured' : 'lake-line'}${restored ? ' lake-restored' : ''}${sink ? ` ${sink}` : ''}${viewerIdentity(events[index]) === viewerOpenIdentity ? ' selected' : ''}`;
-      node.style.setProperty('--lake-depth', String(featured ? 1 : Math.max(.4, 1 - (keys.length - 1 - index) * .14)));
-      const hit = node.querySelector('.chat-hit');
-      if (featured) { hit.removeAttribute('data-action'); hit.removeAttribute('data-id'); hit.removeAttribute('role'); hit.removeAttribute('tabindex'); }
-      else { hit.dataset.action = 'viewer.open'; hit.dataset.id = key; hit.setAttribute('role', 'button'); hit.tabIndex = 0; }
-      if (featured) { if (node.parentElement !== current) current.append(node); }
-      else historyNodes.push(node);
+      // A scene/status change must not end an already running letter animation.
+      // Only recovered nodes and late enrichment of seen text become static.
+      const staticPresentation = fresh ? restored : node.classList.contains('lake-restored');
+      node.className = `lake-message lake-featured${staticPresentation ? ' lake-restored' : ''}${viewerIdentity(events[index]) === viewerOpenIdentity ? ' selected' : ''}`;
+      if (node.parentElement !== current) current.append(node);
+    } else {
+      const text = prepared ? lakeEnded ? t('今晚辛苦啦') : room.title || '' : 'waiting for the first word…';
+      const title = lakeLettersHtml([{ type: 'text', text }]);
+      const kicker = prepared && !lakeEnded ? `<span class="lake-title-kicker">TONIGHT’S TITLE <em>— ${esc(broadcastAreaPath(snapshot.broadcast || {}, room))}</em></span>` : '';
+      current.innerHTML = `<div class="lake-state${prepared ? '' : ' lake-waiting'}">${kicker}<${prepared && !lakeEnded ? `button type="button" data-action="onair.info" title="${esc(t('改标题'))}"` : 'span'} class="lake-state-title lake-message-text" data-size="${title.size}">${prepared ? title.html : esc(text)}</${prepared && !lakeEnded ? 'button' : 'span'}></div>`;
     }
-    let nextHistory = history.querySelector('.lake-history-open');
-    for (const node of historyNodes) {
-      if (node.parentElement !== history || node.nextSibling !== nextHistory) history.insertBefore(node, nextHistory);
-      nextHistory = node;
+    const recent = keys.map((key, i) => [key, events[i]]).filter(([key]) => key !== featured).slice(-3).reverse();
+    updateLakePeek(peek, prepared ? [] : recent);
+    let summary = [];
+    if (prepared && lakeSessionSummary) {
+      const session = snapshot.broadcast.last_session;
+      const people = Number.isSafeInteger(session?.unique_viewers) ? `${session.unique_viewers} ${t('位朋友说过话')}` : '';
+      const date = new Date(lakeSessionSummary.endedAt * 1000);
+      summary = lakeEnded
+        ? [`${lakeSessionSummary.messages} ${t('句弹幕沉进了湖里')}`, people, 'see you next time.']
+        : [`${t('上一场')} · ${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getDate()).padStart(2, '0')}${lakeSessionSummary.seconds == null ? '' : ` · ${lakeDuration(lakeSessionSummary.seconds)}`}`, `${lakeSessionSummary.messages} ${t('句弹幕')}${people ? ` · ${people}` : ''}`];
     }
-    if (!shown.length) {
-      if (prepared) {
-        const title = lakeLettersHtml([{ type: 'text', text: lakeEnded ? t('今晚辛苦啦') : room.title || '' }]);
-        current.innerHTML = `<div class="lake-state">${lakeEnded ? '<span class="lake-message-meta"><span class="lake-message-name">that’s a wrap.</span><em></em></span>' : ''}<span class="lake-state-title lake-message-text" data-size="${title.size}">${title.html}</span></div>`;
-        const duration = lakeSessionSummary?.seconds != null ? `${Math.floor(lakeSessionSummary.seconds / 3600)} ${t('小时')} ${Math.floor(lakeSessionSummary.seconds % 3600 / 60)} ${t('分')}` : '';
-        const endedAt = lakeSessionSummary ? new Date(lakeSessionSummary.endedAt * 1000) : null;
-        const sessionDate = endedAt ? `${String(endedAt.getMonth() + 1).padStart(2, '0')}.${String(endedAt.getDate()).padStart(2, '0')}` : '';
-        const summary = !lakeSessionSummary ? [] : lakeEnded
-          ? [ ...(duration ? [`${t('今晚')} ${duration}`] : []), `${lakeSessionSummary.messages} ${t('句弹幕沉进了湖里')}`, 'see you next time.' ]
-          : [`${t('上一场')} · ${sessionDate}${duration ? ` · ${duration}` : ''}`, `${lakeSessionSummary.messages} ${t('句弹幕')}`];
-        history.insertAdjacentHTML('afterbegin', summary.map(line => `<div class="lake-message lake-line lake-session-line">${esc(line)}</div>`).join(''));
-      } else {
-        current.innerHTML = `<div class="lake-state lake-state-still">${connection.online ? 'the lake is still.' : esc(connection.emptyTitle)}<small>${esc(connection.online ? t('第一句弹幕会浮现在这里') : connection.emptyDescription)}</small>${!snapshot.live?.running ? button(t('连接直播间'), 'live.toggle', { class: 'quiet small' }) : ''}</div>`;
-      }
-    }
+    patchMarkup(document.querySelector('#lake-session'), summary.filter(Boolean).map(line => `<p>${esc(line)}</p>`).join(''));
+    const reflection = document.querySelector('#lake-text-reflection');
+    const source = current.querySelector('.lake-message-text');
+    if (reflection && source) { reflection.innerHTML = source.innerHTML; reflection.dataset.size = source.dataset.size || 'normal'; reflection.classList.toggle('lake-waiting', !prepared && index < 0); reflection.classList.toggle('lake-restored', !!source.closest('.lake-restored')); }
     lakeTranscriptSignature = signature;
   }
-  for (const [key, node] of lakeMessageNodes) {
-    const event = events[keys.indexOf(key)];
-    const relative = node.querySelector('.lake-relative');
-    const minutes = Math.max(0, Math.floor((Date.now() - Number(event?.observed_at_ms || Date.now())) / 60000));
-    const words = ['just now', 'a minute ago', 'two minutes ago', 'three minutes ago', 'four minutes ago', 'five minutes ago', 'six minutes ago', 'seven minutes ago', 'eight minutes ago', 'nine minutes ago', 'ten minutes ago'];
-    const reading = !!(snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled) && !!snapshot.queue?.current && key === keys.at(-1);
-    const label = ` · ${reading ? words[0] : words[minutes] || 'a while ago'}`;
+  const relative = current.querySelector('.lake-relative');
+  if (relative && index >= 0) {
+    const label = lakeMessageTime(events[index].observed_at_ms);
     if (relative.textContent !== label) relative.textContent = label;
   }
-  const count = document.querySelector('#lake-history-total');
-  if (count) count.textContent = String(events.length);
+  syncLakeReadingProgress();
   const more = document.querySelector('.lake-history-open');
-  more.hidden = prepared || events.length <= 1;
-  if (history.lastElementChild !== more) history.append(more);
+  if (more) more.hidden = prepared || !events.length;
   rememberLakePresentation();
 }
 
-function closeLakeHistory() {
-  document.querySelector('#lake-history-dialog')?.close();
-  document.querySelector('[data-action="history.open"]')?.focus({ preventScroll: true });
+function syncLakeReadingProgress() {
+  const playback = snapshot.playback || snapshot.queue?.playback;
+  const job = snapshot.queue?.current;
+  // Both copies use the same measured playback fraction. Without a matching
+  // audio clock, show the whole phrase rather than inventing word timing.
+  const matched = job && playback && String(playback.job_id) === String(job.id) && Number(playback.queued_ms) > 0;
+  const ratio = matched ? Math.min(1, Math.max(0, Number(playback.played_ms) / Number(playback.queued_ms))) : 1;
+  for (const parent of document.querySelectorAll('#lake-current .lake-message-text, #lake-text-reflection')) {
+    const letters = parent.querySelectorAll('.lake-letter');
+    letters.forEach((letter, index) => letter.classList.toggle('lake-unread', matched && index >= Math.ceil(letters.length * ratio)));
+  }
 }
 
-function closeLakeSound() {
-  if (document.querySelector('#tts-menu')?.classList.contains('from-orb')) closeVoicePanel();
-  for (const trigger of document.querySelectorAll('[data-action="volume.toggle"]')) trigger.setAttribute('aria-expanded', 'false');
+function setLakeDepth(deep) {
+  if (lakeDeep === deep) return;
+  lakeDeep = deep;
+  const apply = () => {
+    const events = normalizedEvents(snapshot); const keys = eventKeys(events);
+    if (deep) { closeVoicePanel(); closeQueuePanel(); lakeDeepSeen = new Set(keys); lakeDeepSeenTotal = lakeObservedStats(events).messages; }
+    document.querySelector('#live-shell')?.classList.toggle('lake-deep', deep);
+    const panel = document.querySelector('#lake-deep'); if (panel) panel.hidden = !deep;
+    feedSignature = ''; renderLakeHistory(events, keys);
+    if (deep) { document.querySelector('#chat-scroll').scrollTop = 0; document.querySelector('[data-action="lake.surface"]')?.focus({ preventScroll: true, focusVisible: false }); }
+    else {
+      const visible = node => node && node !== document.body && node !== document.documentElement && !node.disabled && !node.hidden && node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden';
+      const link = document.querySelector('.lake-history-open');
+      const target = visible(link) ? link : visible(document.activeElement) ? document.activeElement : document.querySelector('#tts-switch');
+      target?.focus({ preventScroll: true, focusVisible: false });
+    }
+  };
+  apply();
+  // Diving moves the horizon at once; the new layer settles in from the direction of travel.
+  const shell = document.querySelector('#live-shell');
+  if (!shell || !motionAllowed()) return;
+  shell.classList.remove('lake-dive-in', 'lake-surface-in'); void shell.offsetWidth;
+  shell.classList.add(deep ? 'lake-dive-in' : 'lake-surface-in');
+  clearTimeout(lakeDiveTimer);
+  lakeDiveTimer = setTimeout(() => shell.classList.remove('lake-dive-in', 'lake-surface-in'), 520);
+}
+let lakeDiveTimer = null;
+
+function closeLakeHistory() { setLakeDepth(false); }
+
+function lakeVolumeValue() {
+  const stored = Math.round(Number(snapshot.preferences?.master_volume ?? 1) * 100);
+  return volumeDraft ?? (snapshot.preferences?.muted ? 0 : stored);
+}
+
+function adjustLakeVolume(value) {
+  volumeDraft = Math.max(0, Math.min(100, value));
+  renderDockVoice(); updateVolumeControls(); volumeSave.schedule(volumeDraft);
+  const control = document.querySelector('.lake-voice-control'); control?.classList.add('adjusting');
+  clearTimeout(lakeVolumeHintTimer); lakeVolumeHintTimer = setTimeout(() => control?.classList.remove('adjusting'), 1200);
+}
+
+function installLakeMainEvents() {
+  const shell = document.querySelector('#live-shell');
+  if (!shell || shell.dataset.mainEvents) return;
+  shell.dataset.mainEvents = 'true';
+  document.querySelector('#chat-scroll')?.addEventListener('scroll', event => {
+    const scroll = event.currentTarget;
+    if (lakeDeep && scroll.scrollTop > 0 && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 240) void loadLakeHistory(true);
+  });
+  shell.addEventListener('wheel', event => {
+    if (event.target.closest('.lake-voice-control')) {
+      event.preventDefault();
+      adjustLakeVolume(lakeVolumeValue() + (event.deltaY < 0 ? 5 : -5));
+      return;
+    }
+    if (settingsDialog.open || viewerContext || event.target.closest('.voice-panel,.audience-dialog,.onair-panel,.chat-emoticon-picker,.lake-foot')) return;
+    if (!lakeDeep && event.deltaY > 12 && normalizedEvents(snapshot).length) { event.preventDefault(); setLakeDepth(true); }
+    else if (lakeDeep && event.deltaY < -12 && (document.querySelector('#chat-scroll')?.scrollTop || 0) <= 1) { event.preventDefault(); setLakeDepth(false); }
+  }, { passive: false });
+  shell.addEventListener('keydown', event => {
+    if (event.target.matches('.lake-volume-waterline') && ['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      const value = event.key === 'Home' ? 0 : event.key === 'End' ? 100 : lakeVolumeValue() + (['ArrowLeft', 'ArrowDown'].includes(event.key) ? -5 : 5);
+      adjustLakeVolume(value); return;
+    }
+    if (event.target.matches('input,textarea,select') || event.target.closest('[contenteditable]')) return;
+    if (event.key === 'PageDown' && !lakeDeep && normalizedEvents(snapshot).length) { event.preventDefault(); setLakeDepth(true); }
+    if ((event.key === 'Escape' || event.key === 'PageUp') && lakeDeep && !viewerContext) { event.preventDefault(); setLakeDepth(false); }
+  });
+}
+
+async function handleLakeMainAction(action, id, target) {
+  if (action === 'lake.prepare') { lakeEnded = false; lakeTranscriptSignature = ''; onAirSignature = ''; liveRenderSignature = ''; updateLive(); return true; }
+  if (action === 'history.open') { setLakeDepth(true); return true; }
+  if (action === 'lake.surface') { setLakeDepth(false); return true; }
+  if (action === 'lake.new') { lakeDeepSeen = new Set(eventKeys(normalizedEvents(snapshot))); lakeDeepSeenTotal = lakeObservedStats(normalizedEvents(snapshot)).messages; document.querySelector('#chat-scroll').scrollTop = 0; renderLakeHistory(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); return true; }
+  if (action === 'lake.history.more' || action === 'lake.history.retry') { await loadLakeHistory(action === 'lake.history.more' || !!currentLakeHistory()?.errorOlder); return true; }
+  if (action === 'lake.viewer.history.retry') { void loadViewerSaid(viewerContext, true); return true; }
+  if (action === 'lake.voices') { closeVoicePanel(); await openViewerSettings('voices'); return true; }
+  if (action === 'lake.voices.add') { closeVoicePanel(); await openViewerSettings('voices'); await selectLakeVoiceProvider(defaultVoiceTab()); return true; }
+  if (action === 'lake.voice.wake') {
+    const preset = snapshot.presets?.find(item => item.id === id);
+    if (!preset || lakeWake) return true;
+    const connection = snapshot.connections?.find(item => item.id === preset.connection_id);
+    if (!connection || !['dots', 'gpt_sovits'].includes(preset.provider)) return true;
+    const service = localServiceState(preset.provider, connection);
+    if (!service.directory) { closeVoicePanel(); await openViewerSettings('voices', { type: 'service', provider: preset.provider }); return true; }
+    lakeWake = { id, provider: preset.provider, connection: connection.id, room: String(snapshot.live?.room_id || ''), selecting: false };
+    renderVoicePanel();
+    try { await command('local_services.start', { provider: preset.provider, connection_id: connection.id }, { quiet: true }); await settleLakeWake(); }
+    catch (error) { lakeWake = null; renderVoicePanel(); throw error; }
+    return true;
+  }
+  if (action === 'lake.viewer.mute') { await moderateViewer('mute', Number(id)); return true; }
+  return false;
+}
+
+async function settleLakeWake() {
+  const pending = lakeWake;
+  if (!pending || pending.selecting) return;
+  const preset = snapshot.presets?.find(item => item.id === pending.id && item.connection_id === pending.connection);
+  if (!preset || String(snapshot.live?.room_id || '') !== pending.room) { lakeWake = null; return; }
+  const connection = snapshot.connections?.find(item => item.id === pending.connection);
+  const service = localServiceState(pending.provider, connection);
+  if (service.state === 'failed') { lakeWake = null; renderVoicePanel(); return; }
+  if (service.state !== 'ready') return;
+  pending.selecting = true;
+  try { await command('presets.default', { id: pending.id }, { quiet: true }); }
+  finally { if (lakeWake === pending) lakeWake = null; renderVoicePanel(); }
 }
 
 function updateLakePopScrim() {
@@ -859,27 +1152,28 @@ function renderApp() {
   app.setAttribute('aria-busy', 'false');
   document.documentElement.dataset.step = step || '';
   const titlebarActions = document.querySelector('#titlebar-actions');
-  if (titlebarActions) titlebarActions.innerHTML = step ? iconButton('moon', t('切换深浅色'), 'theme.toggle') + iconButton('settings', t('打开设置'), 'settings.open') : '';
+  // On the lake the sun / moon itself switches day and night.
+  if (titlebarActions) titlebarActions.innerHTML = step ? iconButton('settings', t('打开设置'), 'settings.open') : '';
   updateTitlebar();
   if (step === 'main') {
-    app.innerHTML = ui`<div class="app-shell live-shell lake-mode" id="live-shell">${lakeSceneMarkup()}${snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : ''}<main class="chat-main live-stage lake-content"><header class="masthead lake-header"><div class="lake-date"><span id="lake-daypart"></span><time id="lake-date-time"></time></div><div class="lake-room-row"><div class="masthead-kicker" id="masthead-kicker"><span id="connection-dot" class="status-dot"></span><span id="room-caption" class="sr-only"></span></div><h1 class="masthead-title"><button type="button" id="lake-title" data-action="onair.info"><span class="lake-room-name"><span id="masthead-name" class="masthead-name"></span><span id="masthead-suffix" class="masthead-suffix"></span></span><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"></path></svg></button></h1><button type="button" id="audience-count" class="audience-byline" data-action="audience.open" aria-haspopup="dialog" aria-controls="audience-dialog" aria-expanded="false" hidden></button></div></header><div id="live-error" class="live-error" role="status" hidden><span></span>${button(t('查看'), 'settings.room', { class: 'quiet small' })}</div><div class="lake-body" id="lake-transcript"><div id="lake-current" class="lake-current" role="log" aria-label="此刻这一句" aria-live="polite" aria-relevant="additions"></div><div id="lake-history" class="lake-history"><button type="button" class="lake-history-open" data-action="history.open" aria-haspopup="dialog" aria-controls="lake-history-dialog">earlier tonight →</button></div></div></main><div class="onair-wrap" data-broadcast-scope="main"><div id="onair" class="onair" role="group" aria-label="开播" hidden></div><div id="onair-panel" class="onair-panel" role="dialog" aria-label="开播" hidden></div></div><div class="lake-foot"><button type="button" id="tts-switch" class="dock-voice" data-action="tts.open" aria-haspopup="dialog" aria-expanded="false"></button><div id="chat-compose" class="chat-compose" hidden></div></div><div id="chat-emoticon-picker" class="chat-emoticon-picker" hidden></div><div id="tts-menu" class="voice-panel" role="dialog" aria-label="播报声音" hidden></div><span id="queue-sep" hidden></span><button type="button" id="queue-pill" class="sr-only" data-action="queue.toggle" aria-expanded="false" hidden></button><div id="queue-panel" class="queue-panel" role="list" aria-label="待读弹幕" hidden></div><div id="viewer-drawer" class="viewer-layer" hidden></div><dialog id="lake-history-dialog" class="lake-history-dialog" aria-labelledby="lake-history-title"><header class="lake-drawer-head"><i id="lake-history-title">Earlier tonight</i><div id="lake-history-summary"><span id="lake-history-total"></span> 句 · 从新到旧</div></header><div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="收到的弹幕"><div id="chat-empty" class="chat-empty"></div><div id="chat-feed" class="chat-feed" aria-label="实时弹幕"></div></div><button id="new-messages" class="new-messages" data-action="chat.bottom" hidden>${icon('down')}回到最新弹幕</button></dialog></div>`;
+    stopSetupSceneMotion();
+    app.innerHTML = ui`<div class="app-shell live-shell lake-mode" id="live-shell">${lakeSceneMarkup()}${snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : ''}<main class="chat-main live-stage lake-content"><header class="masthead lake-header"><div class="lake-date"><span id="lake-daypart"></span><time id="lake-date-time"></time></div><div class="lake-room-row"><div class="masthead-kicker" id="masthead-kicker"><span id="connection-dot" class="status-dot"></span><span id="room-caption" class="sr-only"></span></div><h1 class="masthead-title"><button type="button" id="lake-title" data-action="onair.info"><span class="lake-room-name"><span id="masthead-name" class="masthead-name"></span><span id="masthead-suffix" class="masthead-suffix"></span></span><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"></path></svg></button></h1><button type="button" id="audience-count" class="audience-byline" data-action="audience.open" aria-haspopup="dialog" aria-controls="audience-dialog" aria-expanded="false" hidden></button></div></header><div id="live-error" class="live-error" role="status" hidden><span></span>${button(t('查看'), 'settings.room', { class: 'quiet small' })}</div><div class="lake-body" id="lake-transcript"><div id="lake-current" class="lake-current" role="log" aria-label="此刻这一句" aria-live="polite" aria-relevant="additions"></div><div id="lake-text-reflection" class="lake-text-reflection" aria-hidden="true"></div><div id="lake-water-hover"><div id="lake-peek" aria-label="刚沉下去的弹幕"></div></div><div id="lake-session" class="lake-session"></div><button type="button" class="lake-history-open" data-action="history.open"><i id="lake-history-total">0</i> <span id="lake-history-label">句沉在湖里</span> ↓</button></div></main><div class="onair-wrap" data-broadcast-scope="main"><div id="onair" class="onair" role="group" aria-label="开播" hidden></div><div id="onair-panel" class="onair-panel" role="dialog" aria-label="开播" hidden></div></div><div class="lake-foot"><div class="lake-voice-control"><button type="button" id="tts-switch" class="dock-voice" data-action="tts.open" aria-haspopup="dialog" aria-expanded="false"></button><button type="button" class="lake-volume-waterline" data-action="audio.mute" role="slider" aria-label="播报音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" aria-valuetext="100%"><i></i></button><span class="lake-volume-hint"><i id="main-volume-value"></i><small>滚轮调节</small></span></div><div id="chat-compose" class="chat-compose" hidden></div></div><div id="chat-emoticon-picker" class="chat-emoticon-picker" hidden></div><div id="tts-menu" class="voice-panel" role="dialog" aria-label="播报声音" hidden></div><span id="queue-sep" hidden></span><button type="button" id="queue-pill" class="sr-only" data-action="queue.toggle" aria-expanded="false" hidden></button><div id="queue-panel" class="queue-panel" role="list" aria-label="待读弹幕" hidden></div><div id="viewer-drawer" class="viewer-layer" hidden></div><section id="lake-deep" class="lake-deep-content" aria-label="历史弹幕" hidden><header class="lake-deep-head"><button type="button" data-action="lake.surface">⌃ 回到水面</button><button type="button" id="lake-deep-new" data-action="lake.new" hidden></button><span id="lake-deep-reading"></span></header><aside id="lake-deep-stats"></aside><div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="收到的弹幕"><div id="chat-empty" class="chat-empty"></div><div id="chat-feed" class="chat-feed" aria-label="历史弹幕"></div><div id="lake-history-more" class="lake-history-more"></div></div><button id="new-messages" hidden></button></section></div>`;
     const queueShortcut = document.querySelector('#queue-pill');
     if (queueShortcut) queueShortcut.tabIndex = -1;
-    lakeTranscriptSignature = ''; lakeMessageNodes.clear(); closeLakeSound(); updateThemeControl(); updateLakeClock();
+    lakeDeep = false; lakeTranscriptSignature = ''; lakeMessageNodes.clear(); updateThemeControl(); updateLakeClock();
     clearInterval(lakeClockTimer); lakeClockTimer = setInterval(() => { if (!snapshot || !uiIsActive(nativeActive, windowFocused, document.hidden)) return; updateLakeClock(); if (!settingsDialog.open) renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); }, 1000);
-    const historyDialog = document.querySelector('#lake-history-dialog');
-    historyDialog.addEventListener('cancel', event => { event.preventDefault(); closeLakeHistory(); });
-    historyDialog.addEventListener('click', event => { if (event.target !== historyDialog) return; const r = historyDialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closeLakeHistory(); });
+    installLakeMainEvents();
     feedSignature = ''; feedLastKey = ''; onAirSignature = ''; onAirPanelMode = ''; feedEvents.clear(); viewerContext = null; viewerOpenIdentity = ''; liveMainSignature = ''; liveRenderSignature = ''; queueSignature = '';
     audienceSignature = ''; audienceReturn = false; audiencePinned = false; audienceMoreAt = 0; audienceEntries.clear(); clearTimeout(audienceCloseTimer);
-    document.querySelector('#live-shell').insertAdjacentHTML('beforeend', '<button type="button" id="lake-pop-scrim" data-action="lake.pop.close" aria-label="收起" hidden></button>');
+    document.querySelector('#live-shell').insertAdjacentHTML('beforeend', `<button type="button" id="lake-pop-scrim" data-action="lake.pop.close" aria-label="${esc(t('收起'))}" hidden></button>`);
     document.querySelector('#live-shell').insertAdjacentHTML('beforeend', '<dialog id="audience-dialog" class="audience-dialog" aria-labelledby="audience-title"></dialog>');
     document.querySelector('#audience-dialog').addEventListener('cancel', event => { event.preventDefault(); closeAudience(); });
     const watching = document.querySelector('#audience-count');
     const audienceDialog = document.querySelector('#audience-dialog');
     watching.addEventListener('mouseenter', () => {
       clearTimeout(audienceCloseTimer);
-      if (!watching.hidden && !audienceDialog.open && !settingsDialog.open && !viewerContext && !onAirPanelMode) openAudience(false);
+      const leaving = audienceDialog.classList.contains('closing');
+      if (!watching.hidden && (!audienceDialog.open || leaving) && !settingsDialog.open && !viewerContext && !onAirPanelMode) openAudience(false);
     });
     watching.addEventListener('mouseleave', () => {
       clearTimeout(audienceCloseTimer);
@@ -900,25 +1194,53 @@ function renderApp() {
     updateLive();
     return;
   }
-  // The clock only exists on the main screen; welcome and setup must not keep ticking.
   clearInterval(lakeClockTimer); lakeClockTimer = null;
-  const note = snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : '';
-  if (step === 'welcome') {
-    app.innerHTML = ui`<div class="app-shell onboard-shell">${note}<div class="onboard-aura one" aria-hidden="true"></div><div class="onboard-aura two" aria-hidden="true"></div><main class="welcome"><div class="welcome-mark" aria-hidden="true"><span></span><span></span><span></span><img src="./logo.png" width="148" height="148" alt="" draggable="false"></div><h1>超绝可爱弹幕姬</h1><p>接收 B 站直播弹幕，用你喜欢的声音读出来。</p><button type="button" class="onboard-cta" data-action="setup.start">开始设置${icon('arrow')}</button><p class="welcome-foot">${icon('shield')}登录凭据仅加密保存在这台电脑</p></main></div>`;
-    return;
-  }
   const phase = ['connect', 'login'].includes(step) ? 1 : ['tts', 'doubaoQr'].includes(step) ? 2 : 3;
-  const stepSubs = [
-    t('扫码登录'),
-    phase > 2 ? (setupTts ? t('豆包') : t('仅显示弹幕')) : t('可跳过'),
-    t('开始接收弹幕'),
-  ];
-  const rail = [t('连接直播间'), t('语音播报'), t('完成')].map((title, index) => {
-    const state = index + 1 === phase ? 'active' : index + 1 < phase ? 'done' : '';
-    return `<li class="${state}"><span class="onboard-index">${index + 1}</span><span class="onboard-label"><strong>${esc(title)}</strong><small>${esc(stepSubs[index])}</small></span></li>`;
-  }).join('');
-  app.innerHTML = ui`<div class="app-shell onboard-shell">${note}<div class="onboard-aura one" aria-hidden="true"></div><div class="onboard-aura two" aria-hidden="true"></div><div class="onboard-body"><aside class="onboard-rail"><span class="onboard-kicker">首次设置</span><ol>${rail}</ol></aside><main class="onboarding"><section class="setup-card ${step === 'login' || step === 'doubaoQr' ? 'qr-stage' : ''}" aria-label="初次设置">${renderStep()}</section></main></div></div>`;
+  const rail = [t('连接直播间'), t('语音播报'), t('完成')].map((title, index) => `<li class="${index + 1 === phase ? 'active' : index + 1 < phase ? 'done' : ''}"><i>${index + 1 < phase ? '✓' : index + 1}</i><span>${esc(title)}</span></li>`).join('');
+  const setupMarkup = ui`<div class="app-shell lake-mode lake-setup" id="setup-shell">${lakeSceneMarkup()}${snapshot.network_disabled ? t('<div class="test-mode-note" role="status">离线测试窗口 · 独立测试数据</div>') : ''}<section class="setup-brand"><i>welcome</i><h1>超绝可爱弹幕姬</h1><p>把直播间的弹幕，用你喜欢的声音读出来。</p>${step === 'welcome' ? `<div class="setup-welcome-actions">${button(t('开始'), 'setup.start', { class: 'primary' })}<span>${esc(t('大约一分钟'))}</span></div>` : ''}</section>${step !== 'welcome' ? `<main class="setup-lake-drawer"><ol class="setup-steps">${rail}</ol><section class="setup-card" aria-label="${esc(t('初次设置'))}">${renderStep()}</section>${['login', 'doubaoQr'].includes(step) ? '' : `<footer>${esc(t('登录和密钥只存在这台电脑上，不会跟着备份导出。'))}</footer>`}</main>` : ''}</div>`;
+  patchSetupShell(setupMarkup);
+  updateThemeControl();
   updateQr();
+}
+
+// Moving between first-run steps replaces the brand and the drawer only, so the
+// clouds, birds and waves keep drifting. The drawer slides in the first time it
+// appears; after that each step's card fades in where the last one was.
+let setupSceneMotionTimer = null;
+function stopSetupSceneMotion() {
+  clearTimeout(setupSceneMotionTimer); setupSceneMotionTimer = null;
+  document.querySelector('#setup-shell')?.classList.remove('setup-scene-moving');
+}
+
+function patchSetupShell(markup) {
+  const shell = app.querySelector(':scope > #setup-shell');
+  if (!shell?.querySelector(':scope > .lake-scenery')) { stopSetupSceneMotion(); app.innerHTML = markup; return; }
+  const template = document.createElement('template'); template.innerHTML = markup;
+  const next = template.content.firstElementChild;
+  const scene = node => node.matches('.lake-filters, .lake-scenery, #lake-orb, .lake-orb-tip');
+  const hadDrawer = !!shell.querySelector(':scope > .setup-lake-drawer');
+  const hasDrawer = !!next.querySelector(':scope > .setup-lake-drawer');
+  const moveScene = hadDrawer !== hasDrawer && motionAllowed();
+  if (moveScene) {
+    clearTimeout(setupSceneMotionTimer);
+    shell.classList.add('setup-scene-moving');
+    void shell.offsetWidth;
+  } else if (!motionAllowed()) stopSetupSceneMotion();
+  const before = [...shell.children].filter(node => !scene(node));
+  const after = [...next.children].filter(node => !scene(node));
+  before.forEach((node, index) => { if (after[index]?.outerHTML === node.outerHTML) after[index] = node; else node.remove(); });
+  // Kept nodes stay where they are (moving them would restart their animations).
+  let cursor = null;
+  for (const node of after) {
+    if (!node.isConnected) { const kept = after.find(item => item.isConnected); if (cursor) cursor.after(node); else if (kept) kept.before(node); else shell.append(node); }
+    cursor = node;
+  }
+  const drawer = shell.querySelector(':scope > .setup-lake-drawer');
+  if (drawer && motionAllowed()) (hadDrawer ? drawer.querySelector('.setup-card') : drawer)?.classList.add(hadDrawer ? 'step-enter' : 'entering');
+  if (moveScene) {
+    void shell.offsetWidth;
+    setupSceneMotionTimer = setTimeout(() => { shell.classList.remove('setup-scene-moving'); setupSceneMotionTimer = null; }, 700);
+  }
 }
 
 function updateFallbackStatus(queue) {
@@ -941,17 +1263,19 @@ function updateFallbackStatus(queue) {
 }
 
 function renderStep() {
-  const back = step === 'ready' && snapshot.onboarding_done ? '' : ui`<button type="button" class="back-button" data-action="setup.back">${icon('back')}返回</button>`;
-  if (step === 'connect') return ui`${back}<h1>连接直播间</h1><p class="setup-description">用哔哩哔哩 App 扫码，自动找到你的直播间。</p><button type="button" class="onboard-cta" data-action="setup.qr">扫码登录${icon('arrow')}</button>${errorSlot()}`;
-  if (step === 'login') return ui`${back}<div class="qr-layout"><div class="qr-copy"><h1>用哔哩哔哩扫码</h1><ol class="qr-steps"><li><span>1</span>打开哔哩哔哩 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol></div>${qrMarkup('bilibili')}</div>${errorSlot()}`;
-  if (step === 'tts') return ui`${back}<h1>要读出弹幕吗？</h1><p class="setup-description">其他语音服务可以稍后在设置中添加。</p><div class="choice-grid"><button type="button" class="choice-card" data-action="setup.doubao"><span class="choice-top"><span class="choice-glyph gradient">${icon('voice')}</span></span><strong>用豆包朗读</strong><span>扫码连接豆包，使用默认音色朗读新弹幕。</span></button><button type="button" class="choice-card" data-action="setup.silent"><span class="choice-top"><span class="choice-glyph quiet">${icon('chatSmall')}</span></span><strong>暂时只看弹幕</strong><span>不需要音频设备，随时可以在设置中开启。</span></button></div>${errorSlot()}`;
-  if (step === 'doubaoQr') return ui`${back}<div class="qr-layout"><div class="qr-copy"><h1>扫码连接豆包</h1><ol class="qr-steps"><li><span>1</span>打开豆包 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol><button type="button" class="text-link onboard-link" data-action="setup.silent">暂时只看弹幕</button></div>${qrMarkup('doubao')}</div>${errorSlot()}`;
+  const back = ui`<button type="button" class="back-button" data-action="setup.back">${icon('back')}返回</button>`;
+  if ((step === 'login' || step === 'connect') && snapshot.account?.user_id && snapshot.setup?.room_id && !setupRescan) return `${back}<i class="setup-eyebrow">sign in</i><h1>${esc(t('连接直播间'))}</h1><p class="setup-description">${esc(t('已经登录了，可以直接继续。'))}</p><dl class="setup-summary"><div><dt>${esc(t('直播间'))}</dt><dd>${esc(snapshot.account.name || t('我的直播间'))}<i>${esc(snapshot.setup.room_id)}</i></dd></div></dl><button type="button" class="button primary setup-enter" data-action="setup.continue">${esc(t('继续'))}${icon('arrow')}</button><button type="button" class="text-button setup-switch-account" data-action="setup.rescan">${esc(t('换一个账号'))}</button>${errorSlot()}`;
+  if (step === 'login' || step === 'connect') return ui`${back}<i class="setup-eyebrow">sign in</i><h1>连接直播间</h1><p class="setup-description">用哔哩哔哩 App 扫码，自动找到你的直播间。</p>${qrMarkup('bilibili')}<ol class="qr-steps"><li><span>1</span>打开哔哩哔哩 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol><p class="setup-qr-foot">二维码两分钟后会过期 · <button type="button" class="text-button" data-action="qr.retry">换一张</button></p>${errorSlot()}`;
+  if (step === 'tts') return ui`${back}<i class="setup-eyebrow">voices</i><h1>要读出弹幕吗？</h1><p class="setup-description">其他语音服务可以稍后在设置中添加。</p><div class="setup-voice-choices"><button type="button" data-action="setup.doubao"><span class="setup-choice-icon">${voiceWaveMarkup(false)}</span><strong>用豆包播报</strong><span>扫码连接豆包，使用默认音色播报新弹幕。</span></button><button type="button" data-action="setup.silent"><span class="setup-choice-icon silent">${voiceWaveMarkup(true)}</span><strong>暂时只看弹幕</strong><span>不需要音频设备，随时可以在设置中开启。</span></button></div>${errorSlot()}`;
+  if (step === 'doubaoQr') return ui`${back}<i class="setup-eyebrow">connect</i><h1>扫码连接豆包</h1>${qrMarkup('doubao')}<ol class="qr-steps"><li><span>1</span>打开豆包 App，扫描二维码</li><li><span>2</span>在手机上确认登录</li></ol><div class="setup-qr-foot"><button type="button" class="text-button" data-action="qr.retry">换一张</button><button type="button" class="text-button" data-action="setup.silent">暂时只看弹幕</button></div>${errorSlot()}`;
   const room = snapshot.setup?.room_id;
-  const voice = setupTts ? `${providerLabel(snapshot.presets?.find(p => p.id === snapshot.rules?.default_preset_id)?.provider || 'doubao')}` : t('仅显示弹幕');
-  return ui`${back}<h1>一切就绪</h1><dl class="setup-summary-card"><div><dt>直播间</dt><dd>${t('我的直播间')} · <span class="num">${esc(room || '')}</span></dd></div><div><dt>播报</dt><dd>${esc(voice)}</dd></div></dl><button type="button" class="onboard-cta" data-action="setup.finish">开始接收弹幕${icon('arrow')}</button>${errorSlot()}`;
+  const preferred = snapshot.presets?.find(p => p.id === snapshot.rules?.default_preset_id);
+  const voice = setupTts ? preferred ? presetLabel(preferred) : t('豆包') : t('暂时只看弹幕');
+  return ui`${back}<i class="setup-eyebrow">ready</i><h1>准备好了</h1><p class="setup-description">接下来，就让弹幕落在湖面上。</p><dl class="setup-summary"><div><dt>直播间</dt><dd>${esc(snapshot.account?.name || t('我的直播间'))}<i>${esc(room || '')}</i></dd></div><div><dt>声音</dt><dd>${esc(voice)}</dd></div></dl><button type="button" class="button primary setup-enter" data-action="setup.finish">进入直播间${icon('arrow')}</button><p class="setup-description">OBS 可以稍后在设置里连接。</p>${errorSlot()}`;
 }
 
 function updateQr() {
+  for (const retry of document.querySelectorAll('[data-action="qr.retry"]')) retry.disabled = !!snapshot?.network_disabled || qrBusy;
   for (const container of document.querySelectorAll('[data-qr-provider]')) {
     const matching = snapshot?.qr?.provider === container.dataset.qrProvider;
     const qr = matching ? snapshot.qr : { status: 'idle' };
@@ -962,7 +1286,6 @@ function updateQr() {
         container.querySelector('.qr-frame').innerHTML = t('<div class="qr-placeholder">离线测试窗口</div>');
         container.querySelector('[data-qr-label]').textContent = t('扫码请直接打开正式程序');
         container.querySelector('.status-dot').className = 'status-dot';
-        container.querySelector('.qr-retry').hidden = true;
       }
       continue;
     }
@@ -978,11 +1301,10 @@ function updateQr() {
       else if (qr.status === 'expired') frame.innerHTML = ui`<div class="qr-placeholder">${icon('refresh')}<span>二维码已过期<br>重新生成后再扫码</span></div>`;
       else if (qr.status === 'complete') frame.innerHTML = ui`<div class="qr-placeholder">${icon('check')}<span>已完成登录</span></div>`;
       else if (url) { const image = document.createElement('img'); image.src = url; image.alt = container.dataset.qrProvider === 'bilibili' ? t('哔哩哔哩登录二维码') : t('豆包登录二维码'); frame.replaceChildren(image); }
-      else frame.innerHTML = ui`<div class="qr-placeholder"><span class="spinner" aria-hidden="true"></span><span>正在生成二维码</span></div>`;
+      else frame.innerHTML = '<div class="qr-placeholder"><span class="spinner" aria-hidden="true"></span></div>';
     }
     container.querySelector('[data-qr-label]').textContent = needsRoom ? t('未找到本账号直播间，请先在 B站开通直播间后重新扫码') : qrFailure || qrLabel(qr);
     container.querySelector('.status-dot').className = `status-dot ${qrFailure ? '' : qr.status === 'waiting' || qr.status === 'idle' ? 'pulse' : 'online'}`;
-    container.querySelector('.qr-retry').hidden = needsRoom || qrBusy || (!qrFailure && !['expired', 'idle'].includes(qr.status));
   }
 }
 
@@ -997,7 +1319,7 @@ async function startQr(provider, connectionId) {
   qrProvider = provider;
   const generation = qrGeneration;
   try {
-    await command(`${provider === 'bilibili' ? 'bili' : 'doubao'}.qr.begin`, connectionId ? { connection_id: connectionId } : {});
+    await command(`${provider === 'bilibili' ? 'bili' : 'doubao'}.qr.begin`, connectionId ? { connection_id: connectionId } : {}, { silent: true });
     if (generation === qrGeneration && !disposed) scheduleQrPoll(provider, generation);
   } catch (error) {
     qrFailure = errorMessage(error, provider === 'bilibili' ? 'DV-X01' : 'DV-X02');
@@ -1025,7 +1347,7 @@ function scheduleQrPoll(provider, generation) {
             try { await command('presets.default', { id: preferredId }, { quiet: true, silent: true }); }
             catch (error) { preferenceError = error; }
           }
-          editor = null;
+          editor = provider === 'doubao' && editor.returnTo === 'voice-add' ? { type: 'voice-add', provider: 'doubao', connectionId: serviceConnection('doubao')?.id } : null;
           renderSettings();
           if (preferenceError) showError(ui`豆包已连接，但设为首选失败：${preferenceError}`);
           else showToast(provider === 'bilibili' ? t('哔哩哔哩已连接') : preferredId ? t('豆包已连接并设为首选') : t('豆包已连接'));
@@ -1114,10 +1436,9 @@ function viewerIdentity(event) {
 }
 
 function viewerBinding(event) {
-  const hasUid = validUid(event?.user_id);
-  return (snapshot.bindings || []).find(entry => hasUid
-    ? String(entry.binding.user_id) === String(event.user_id)
-    : !entry.binding.user_id && entry.binding.user_name === event?.user_name);
+  const bindings = snapshot.bindings || [];
+  const byUid = validUid(event?.user_id) && bindings.find(entry => entry.binding.user_id && String(entry.binding.user_id) === String(event.user_id));
+  return byUid || bindings.find(entry => !entry.binding.user_id && entry.binding.user_name && entry.binding.user_name === event?.user_name);
 }
 
 function viewerAlias(event) {
@@ -1427,45 +1748,65 @@ function renderDockVoice() {
   const switcher = document.querySelector('#tts-switch');
   if (!switcher) return;
   const preferred = snapshot.presets?.find(item => item.id === snapshot.rules?.default_preset_id);
-  const enabled = !!(snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled);
-  const muted = !enabled || !!snapshot.preferences?.muted || Number(snapshot.preferences?.master_volume ?? 1) === 0;
-  const state = muted ? 'muted' : snapshot.queue?.current ? 'reading' : 'quiet';
-  const title = !enabled ? t('朗读已关') : preferred ? presetLabel(preferred) : t('选择声音');
-  const service = preferred ? providerLabel(preferred.provider) : t('尚未设置音色');
-  const tip = document.querySelector('.lake-orb-tip');
-  if (tip) tip.textContent = enabled ? `${title} · ${snapshot.queue?.current ? 'reading' : 'listening'}` : 'voice off';
-  document.querySelector('.lake-orb')?.setAttribute('aria-label', `${t('声音')}：${title}`);
-  const signature = `${title}\u0000${service}\u0000${state}`;
-  if (switcher.dataset.label === signature) return;
-  switcher.dataset.label = signature;
-  switcher.innerHTML = `<span class="lake-voice-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span class="lake-voice-name">${esc(title)}</span><em class="lake-voice-state">${state}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14l5-5 5 5"></path></svg>`;
-  switcher.setAttribute('aria-label', `${t('播报声音')}：${title} · ${service}`);
+  const title = preferred ? presetLabel(preferred) : t('选择声音');
+  const service = preferred ? providerLabel(preferred.provider) : '';
+  const signature = `${title}\u0000${service}`;
+  if (switcher.dataset.label !== signature) {
+    switcher.dataset.label = signature;
+    switcher.innerHTML = `<span class="lake-voice-name">${esc(title)}</span><em class="lake-voice-service">${esc(service)}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14l5-5 5 5"></path></svg>`;
+    switcher.setAttribute('aria-label', `${t('播报声音')}${t('：')}${title} · ${service}`);
+  }
+  updateVolumeControls();
 }
 
 const lakeVolumeIcon = muted => muted ? icon('muted') : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h3l5 4V6L7 10H4z"></path><path d="M16 9.5a3.5 3.5 0 0 1 0 5"></path></svg>';
+
+function lakeVoiceReady(preset) {
+  const connection = snapshot.connections?.find(item => item.id === preset.connection_id);
+  return ['dots', 'gpt_sovits'].includes(preset.provider)
+    ? localServiceState(preset.provider, connection).state === 'ready' : !!connection?.has_credential;
+}
+
+function lakeVoiceWave(active = false, asleep = false) {
+  return `<span class="lake-voice-wave${active ? ' active' : ''}${asleep ? ' asleep' : ''}" aria-hidden="true"><svg viewBox="0 0 24 16"><path class="wave-flat" d="M2 8h20"></path><path class="wave-curve" d="M2 8c2-5 4-5 6 0s4 5 6 0 4-5 8 0"></path></svg><span class="lake-voice-bars"><i></i><i></i><i></i><i></i></span></span>`;
+}
+
+async function voicePanelAuditionText(preset) {
+  if (voiceAuditionDraft.customText && voiceAuditionDraft.text) return voiceAuditionDraft.text;
+  if (getLanguage() !== 'en' || preset.provider !== 'gpt_sovits') return t('你好，欢迎来到直播间。');
+  // A saved reference can override the preset's text language, just as in playback.rs.
+  let language = preset.sovits?.text_language || 'all_zh';
+  const role = referenceRole(preset.provider, preset);
+  if (role?.gpt_weights_path && role?.sovits_weights_path) {
+    const listed = await command('references.list', { connection_id: preset.connection_id }, { quiet: true, silent: true });
+    const profile = listed.result?.find(entry => entry.profile?.role?.kind === role.kind
+      && String(entry.profile.role.gpt_weights_path).toLowerCase() === String(role.gpt_weights_path).toLowerCase()
+      && String(entry.profile.role.sovits_weights_path).toLowerCase() === String(role.sovits_weights_path).toLowerCase())?.profile;
+    if (profile) language = profile.text_language;
+  }
+  return ['auto', 'en'].includes(language) ? t('你好，欢迎来到直播间。') : '你好，欢迎来到直播间。';
+}
 
 function renderVoicePanel() {
   const panel = document.querySelector('#tts-menu');
   if (!panel) return;
   const preferred = snapshot.presets?.find(item => item.id === snapshot.rules?.default_preset_id);
-  const presets = snapshot.presets || [];
   const enabled = !!(snapshot.setup?.tts_enabled ?? snapshot.preferences?.tts_enabled);
-  const reading = enabled && !!snapshot.queue?.current;
-  const stored = Math.round((snapshot.preferences?.master_volume ?? 1) * 100);
-  const muted = volumeDraft === null ? (!!snapshot.preferences?.muted || stored === 0) : volumeDraft === 0;
-  const volume = volumeDraft ?? (muted ? 0 : stored);
-  const rows = presets.map(preset => {
+  const rows = (snapshot.presets || []).map(preset => {
     const on = preset.id === preferred?.id;
-    return `<button type="button" class="lake-voice-row${on ? ' on' : ''}" data-action="voice.pick" data-id="${esc(preset.id)}" aria-pressed="${on}">${viewerAvatar({ user_name: presetLabel(preset), user_id: preset.id })}<span class="lake-voice-copy"><b>${esc(presetLabel(preset))}</b><small>${esc(providerLabel(preset.provider))}</small></span><svg class="lake-voice-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"></path></svg></button>`;
-  }).join('') || `<div class="lake-voice-empty"><p>${esc(t('请先添加一个声音预设'))}</p><button type="button" data-action="settings.open">${esc(t('去设置'))}</button></div>`;
-  patchMarkup(panel, `<div class="lake-voice-head"><span class="panel-kicker">${reading ? 'NOW READING' : 'THE VOICE'}</span><button type="button" id="speech-switch" class="lake-speech-switch${enabled ? ' on' : ''}" role="switch" data-action="speech.toggle" aria-label="${esc(t('朗读弹幕'))}" aria-checked="${enabled}"><span>${esc(t('朗读弹幕'))}</span><span class="lake-switch-track"></span></button></div>${rows}<div class="lake-voice-volume"><button type="button" class="dock-mute" data-action="audio.mute" aria-label="${esc(t(muted ? '取消静音' : '静音'))}" aria-pressed="${muted}">${lakeVolumeIcon(muted)}</button><input id="main-volume-range" class="lake-volume-range" type="range" min="0" max="100" step="1" value="${Math.min(100, volume)}" aria-label="${esc(t('音量'))}" style="--fill:${Math.min(100, volume)}%"><output id="main-volume-value" for="main-volume-range">${volume}</output></div>`);
+    const ready = lakeVoiceReady(preset);
+    const local = ['dots', 'gpt_sovits'].includes(preset.provider);
+    const waking = lakeWake?.id === preset.id;
+    const action = !ready && local ? 'lake.voice.wake' : 'voice.pick';
+    return `<div class="lake-voice-row${on ? ' on' : ''}${!ready ? ' sleeping' : ''}${waking ? ' waking' : ''}"><button type="button" class="lake-voice-select" data-action="${action}" data-id="${esc(preset.id)}" aria-pressed="${on}"${waking ? ' disabled' : ''}>${lakeVoiceWave(on && ready || waking, !ready && !waking)}<span class="lake-voice-copy"><b>${esc(presetLabel(preset))}</b></span><small class="lake-voice-provider">${esc(providerLabel(preset.provider))}</small>${!ready && local ? '<em class="lake-wake-label">tap to wake</em>' : ''}</button>${ready ? `<button type="button" class="lake-voice-preview" data-action="voice.audition" data-id="${esc(preset.id)}" aria-label="${esc(t('试听'))} ${esc(presetLabel(preset))}">▷</button>` : ''}</div>`;
+  }).join('') || `<div class="lake-voice-empty"><p>${esc(t('还没有声音'))}</p></div>`;
+  patchMarkup(panel, `<div class="lake-voice-head"><span class="panel-kicker">NOW READING</span><button type="button" id="speech-switch" class="lake-speech-switch${enabled ? ' on' : ''}" role="switch" data-action="speech.toggle" aria-label="${esc(t('播报'))}" aria-checked="${enabled}"><span>${esc(t('播报'))}</span><span class="lake-switch-track"></span></button></div><div class="lake-voice-list">${rows}</div><div class="lake-voice-foot"><button type="button" class="lake-voice-manage" data-action="lake.voices">${esc(t('管理声音'))} ›</button><button type="button" class="lake-voice-add" data-action="lake.voices.add">${icon('plus')}${esc(t('添加声音'))}</button></div>`);
 }
 
 function closeVoicePanel() {
   const panel = document.querySelector('#tts-menu');
-  if (panel) panel.hidden = true;
   document.querySelector('#tts-switch')?.setAttribute('aria-expanded', 'false');
-  updateLakePopScrim();
+  leaveThenHide(panel, 180, updateLakePopScrim);
 }
 
 function pendingLiveJobs() {
@@ -1488,7 +1829,7 @@ function renderQueuePanel(events) {
     const name = job.user_name || t('访客');
     const text = jobDisplayText(job, events);
     const body = queueJobEvent(job) ? renderChatBody(job.event) : esc(text);
-    return `<button type="button" class="queue-item" role="listitem" data-action="queue.jump" data-id="${esc(job.id)}" aria-label="${esc(`${t('立即朗读')}：${name}：${text}`)}" title="${esc(t('立即朗读'))}" style="--queue-opacity:${Math.max(0.55, 1 - index * 0.1).toFixed(2)}"><span class="queue-index">${index + 1}</span><span class="queue-text"><span class="queue-name">${esc(name)}</span><span class="queue-line">${body}</span></span><span class="queue-play" aria-hidden="true">${icon('play')}</span></button>`;
+    return `<button type="button" class="queue-item" role="listitem" data-action="queue.jump" data-id="${esc(job.id)}" aria-label="${esc(`${t('立即播报')}${t('：')}${name}${t('：')}${text}`)}" title="${esc(t('立即播报'))}" style="--queue-opacity:${Math.max(0.55, 1 - index * 0.1).toFixed(2)}"><span class="queue-index">${index + 1}</span><span class="queue-text"><span class="queue-name">${esc(name)}</span><span class="queue-line">${body}</span></span><span class="queue-play" aria-hidden="true">${icon('play')}</span></button>`;
   }).join('') + (pending.length > 8 ? `<p class="queue-more">+${pending.length - 8} ${esc(t('条'))}</p>` : '');
 }
 
@@ -1496,9 +1837,8 @@ function viewerChipsHtml(event) {
   const record = viewerBinding(event);
   const bound = record?.binding?.enabled ? record.binding.preset_id : '';
   const canBind = validUid(event.user_id) || !!String(event.user_name || '').trim();
-  const presets = snapshot.presets || [];
-  return `<button type="button" class="voice-chip${bound ? '' : ' on'}" data-action="viewer.bind" data-id="" aria-pressed="${!bound}"${canBind ? '' : ' disabled'}>${esc(t('跟随默认'))}</button>`
-    + presets.map(preset => `<button type="button" class="voice-chip${bound === preset.id ? ' on' : ''}" data-action="viewer.bind" data-id="${esc(preset.id)}" aria-pressed="${bound === preset.id}" title="${esc(`${presetLabel(preset)} · ${providerLabel(preset.provider)}`)}"${canBind ? '' : ' disabled'}>${esc(presetLabel(preset))}</button>`).join('');
+  return `<button type="button" class="voice-chip${bound ? '' : ' on'}" data-action="viewer.bind" data-id="" aria-pressed="${!bound}"${canBind ? '' : ' disabled'}>${lakeVoiceWave(!bound)}<span>${esc(t('跟随默认'))}</span></button>`
+    + (snapshot.presets || []).map(preset => `<button type="button" class="voice-chip${bound === preset.id ? ' on' : ''}" data-action="viewer.bind" data-id="${esc(preset.id)}" aria-pressed="${bound === preset.id}"${canBind ? '' : ' disabled'}>${lakeVoiceWave(bound === preset.id, !lakeVoiceReady(preset))}<span>${esc(presetLabel(preset))}</span><small>${esc(providerLabel(preset.provider))}</small></button>`).join('');
 }
 
 function updateViewerVoices(event) {
@@ -1512,14 +1852,36 @@ function updateViewerVoices(event) {
   if (active !== undefined) [...host.querySelectorAll('[data-action="viewer.bind"]')].find(button => button.dataset.id === active && !button.disabled)?.focus({ preventScroll: true });
 }
 
+async function loadViewerSaid(event, retry = false) {
+  const archive = currentLakeHistory();
+  if (!archive || !event) return;
+  const identity = viewerIdentity(event);
+  const previous = archive.viewers.get(identity);
+  const total = Math.max(snapshot.live_history.messages, archive.stats.messages);
+  const revision = Math.max(Number(snapshot.live_history.metadata_revision || 0), Number(archive.stats.metadata_revision || 0));
+  if (previous?.busy || !retry && previous && (previous.total >= total && previous.revision >= revision || previous.error)) return;
+  const query = { ...previous, busy: true, total, revision, error: '' };
+  archive.viewers.set(identity, query);
+  try {
+    const page = await requestLakeHistory(archive, { limit: 3, viewer: identity });
+    if (archive !== currentLakeHistory()) return;
+    Object.assign(query, { items: page.items.map(item => item.event), count: page.viewer_messages, total: page.messages, revision: Number(page.metadata_revision || 0) });
+  } catch (error) { query.error = errorMessage(error); }
+  finally {
+    query.busy = false;
+    if (archive === currentLakeHistory() && viewerIdentity(viewerContext) === identity) updateViewerSaid(viewerContext);
+  }
+}
+
 function viewerSaidMarkup(event) {
-  const recent = normalizedEvents(snapshot).filter(item => viewerIdentity(item) === viewerIdentity(event) && ['danmaku', 'super_chat'].includes(item.kind) && eventText(item)).slice(-3);
-  const lines = recent.length ? recent.map(item => {
-    const body = renderChatBody(item);
-    const hasText = messageParts(item).some(part => part.type === 'text' && part.text.trim());
-    return `<p>${hasText ? `“${body}”` : body}</p>`;
-  }).join('') : `<p>“${esc(t('今晚还没说过话'))}”</p>`;
-  return { count: recent.length, html: `<span class="panel-kicker" aria-hidden="true">SAID TONIGHT</span>${lines}` };
+  const archive = currentLakeHistory();
+  const cached = archive?.viewers.get(viewerIdentity(event));
+  if (archive) void loadViewerSaid(event);
+  const all = normalizedEvents(snapshot).filter(item => viewerIdentity(item) === viewerIdentity(event) && ['danmaku', 'super_chat'].includes(item.kind) && eventText(item));
+  const recent = cached?.items || all.slice(-3).reverse();
+  const lines = recent.length ? recent.map(item => `<p><span>${renderChatBody(item)}</span><time>${esc(clockLabel(item.observed_at_ms))}</time></p>`).join('') : `<p>${esc(t('今晚还没说过话'))}</p>`;
+  const error = cached?.error ? `<p class="lake-history-error">${esc(cached.error)} <button type="button" data-action="lake.viewer.history.retry">${esc(t('重试'))}</button></p>` : '';
+  return { count: archive ? cached?.count ?? (cached?.error ? '—' : '…') : all.length, html: lines + error };
 }
 
 function updateViewerSaid(event) {
@@ -1538,24 +1900,26 @@ function renderViewerDrawer() {
   if (!event) {
     const returnFocus = layer.viewerReturnFocus;
     layer.viewerReturnFocus = null;
-    layer.hidden = true; layer.innerHTML = '';
+    leaveThenHide(layer, 280, () => { if (!viewerContext) layer.innerHTML = ''; });
     if (returnFocus) requestAnimationFrame(() => {
       const usable = returnFocus.isConnected && !returnFocus.disabled && returnFocus.getClientRects().length && !returnFocus.closest('[hidden], dialog:not([open])');
       (usable ? returnFocus : document.querySelector('#tts-switch'))?.focus({ preventScroll: true });
     });
     return;
   }
+  cancelLeave(layer);
   if (layer.hidden) layer.viewerReturnFocus = document.activeElement;
   const alias = viewerAliasValue(event);
   const voiceMarkup = viewerChipsHtml(event);
   const mentionDisabled = !snapshot.account?.user_id || snapshot.network_disabled || !String(event.user_name || '').trim();
   const saidView = viewerSaidMarkup(event);
   const said = `<section class="viewer-section viewer-said" aria-label="${esc(t('收到的弹幕'))}">${saidView.html}</section>`;
-  layer.innerHTML = `<button type="button" class="viewer-scrim" data-action="viewer.close" aria-label="${esc(t('关闭观众卡片'))}"></button><aside class="viewer-sheet" role="dialog" aria-modal="true" aria-label="${esc(t('观众设置'))}"><header class="viewer-head">${viewerAvatar(event, true)}<div class="viewer-name"${validUid(event.user_id) ? ` title="UID ${esc(event.user_id)}"` : ''}>${esc(event.user_name || t('访客'))}</div><span class="viewer-uid">said ${saidView.count} tonight</span><div class="viewer-quick"><button type="button" class="viewer-quick-button" data-action="viewer.at"${mentionDisabled ? ' disabled' : ''}>@ TA</button><button type="button" class="viewer-quick-button" data-action="viewer.audition">${esc(t('试听称呼'))}</button></div></header><div class="viewer-body">${said}<section class="viewer-section viewer-voice-settings"><label class="viewer-alias-field" for="viewer-alias"><span>${esc(t('读作'))}</span><input id="viewer-alias" class="viewer-alias" maxlength="40" autocomplete="off" placeholder="${esc(event.user_name || t('访客'))}" value="${esc(alias)}"${String(event.user_name || '').trim() ? '' : ' disabled'}></label><div id="viewer-voices" class="voice-chips" role="group" aria-label="${esc(t('观众声音'))}">${voiceMarkup}</div></section><section id="viewer-moderation" class="viewer-section"></section></div></aside>`;
+  layer.innerHTML = `<button type="button" class="viewer-scrim" data-action="viewer.close" aria-label="${esc(t('关闭观众卡片'))}"></button><aside class="viewer-sheet" role="dialog" aria-modal="true" aria-label="${esc(t('观众设置'))}"><header class="viewer-head">${viewerAvatar(event, true)}<div class="viewer-name"${validUid(event.user_id) ? ` title="UID ${esc(event.user_id)}"` : ''}>${esc(event.user_name || t('访客'))}</div><span class="viewer-uid">said ${saidView.count} tonight</span><div class="viewer-quick"><button type="button" class="viewer-quick-button" data-action="viewer.at"${mentionDisabled ? ' disabled' : ''}>@ TA</button></div></header><div class="viewer-body">${said}<section class="viewer-section viewer-voice-settings"><label class="viewer-alias-field" for="viewer-alias"><span>${esc(t('读作'))}</span><input id="viewer-alias" class="viewer-alias" maxlength="40" autocomplete="off" placeholder="${esc(event.user_name || t('访客'))}" value="${esc(alias)}"${String(event.user_name || '').trim() ? '' : ' disabled'}><button type="button" class="viewer-alias-preview" data-action="viewer.audition" aria-label="${esc(t('试听称呼'))}">▷</button></label><span class="viewer-settings-label">${esc(t('TA 的声音'))}</span><div id="viewer-voices" class="voice-chips" role="group" aria-label="${esc(t('观众声音'))}">${voiceMarkup}</div></section><section id="viewer-moderation" class="viewer-section"></section></div></aside>`;
   markupCache.set(layer.querySelector('#viewer-voices'), voiceMarkup);
   markupCache.set(layer.querySelector('.viewer-said'), saidView.html);
   layer.hidden = false;
   updateViewerModeration();
+  if (currentLakeHistory()) void loadViewerSaid(event);
   layer.querySelector('.viewer-sheet').addEventListener('keydown', key => {
     if (key.key !== 'Tab') return;
     const controls = [...layer.querySelectorAll('.viewer-sheet button:enabled, .viewer-sheet input:enabled, .viewer-sheet [tabindex="0"]')].filter(node => node.getClientRects().length && (node.type !== 'radio' || node.checked));
@@ -1578,45 +1942,21 @@ function viewerModerationTarget() {
 function updateViewerModeration() {
   const host = document.querySelector('#viewer-moderation');
   if (!host || !viewerContext) return;
-  host.hidden = !broadcastEnabled();
-  if (host.hidden) return;
+  host.hidden = !broadcastEnabled(); if (host.hidden) return;
   const target = viewerModerationTarget();
   const account = snapshot.account?.user_id;
   const view = snapshot.moderation || {};
   const matching = target && String(view.user_id) === target;
   const ready = matching && !!account && viewerModerationAccount === String(account) && String(account) !== target && !view.busy && !viewerModerationBusy && !snapshot.network_disabled;
   const self = target && String(account) === target;
-  const note = !target ? t('该用户没有公开 UID，无法管理。') : !account ? t('扫码登录后可管理直播间用户') : self ? t('不能禁言或拉黑自己') : snapshot.network_disabled ? t('离线测试窗口不可管理直播间') : matching && view.message ? localizeDiagnostic(view.message) : matching && (view.can_moderate || view.can_blacklist || view.can_manage_admins) ? `${t('当前直播间')} · ${view.room_id}` : matching && view.busy ? t('正在读取管理权限…') : t('仅主播或获授权的房管可操作');
-  const mute = ready && !self && view.can_moderate && typeof view.muted === 'boolean';
-  const blacklist = ready && !self && view.can_blacklist && typeof view.blacklisted === 'boolean';
+  const note = !target ? t('该用户没有公开 UID，无法管理。') : !account ? t('扫码登录后可管理直播间用户') : self ? t('不能禁言或拉黑自己') : snapshot.network_disabled ? t('离线测试窗口不可管理直播间') : matching && view.message ? localizeDiagnostic(view.message) : matching && view.busy ? t('正在读取管理权限…') : t('仅主播或获授权的房管可操作');
+  const mute = ready && view.can_moderate && typeof view.muted === 'boolean';
+  const blacklist = ready && view.can_blacklist && typeof view.blacklisted === 'boolean';
   const admin = ready && view.can_manage_admins && typeof view.is_admin === 'boolean';
-  const oldHours = host.querySelector('#viewer-mute-hours')?.value ?? '1';
-  const durations = [[0, '本场'], [1, '1 小时'], [24, '24 小时'], [168, '7 天'], [-1, '永久']];
-  const muted = !!(matching && view.muted);
-  const blocked = !!(matching && view.blacklisted);
-  const appointed = !!(matching && view.is_admin);
+  const muted = !!(matching && view.muted); const blocked = !!(matching && view.blacklisted); const appointed = !!(matching && view.is_admin);
   const blockArmed = !blocked && host.dataset.blockArmed === target && host.dataset.blockArmAccount === String(account);
-  const durationLabel = t(durations.find(([value]) => String(value) === oldHours)?.[1] || '本场');
   const permissionVisible = !ready || !(view.can_moderate || view.can_blacklist || view.can_manage_admins);
-  const html = `<span class="viewer-settings-label">${esc(t('直播间管理'))}</span><div class="viewer-room-controls"><p class="viewer-hint viewer-permissions" role="status"${permissionVisible ? '' : ' hidden'}>${esc(note)}</p><div class="viewer-mute-group"><div class="viewer-moderation-row"><span class="viewer-control-copy"><strong>${esc(t('禁言'))}</strong><small${muted ? ' class="air"' : ''}>${esc(t(muted ? '已禁言' : '不能在直播间发言'))}</small></span>${muted ? `<button type="button" class="viewer-line-button" data-action="viewer.moderation.unmute"${mute ? '' : ' disabled'}>${esc(t('解除'))}</button>` : `<button type="button" class="viewer-mute-action" data-action="viewer.moderation.mute"${mute ? '' : ' disabled'}>${esc(`${t('禁言')} ${durationLabel}`)}</button>`}</div><select class="viewer-duration-value" aria-label="${esc(t('禁言时长'))}" id="viewer-mute-hours" hidden tabindex="-1" aria-hidden="true"${mute && !muted ? '' : ' disabled'}>${durations.map(([value, label]) => option(value, t(label), oldHours)).join('')}</select><fieldset class="viewer-durations" aria-label="${esc(t('禁言时长'))}"${muted ? ' hidden' : ''}${mute && !muted ? '' : ' disabled'}>${durations.map(([value, label]) => `<label class="viewer-duration"><input type="radio" id="viewer-duration-${value}" name="viewer-mute-duration" value="${value}"${String(value) === oldHours ? ' checked' : ''}><span>${esc(t(label))}</span></label>`).join('')}</fieldset></div><div class="viewer-moderation-row viewer-block-row"><span class="viewer-control-copy"><strong>${esc(t('直播间拉黑'))}</strong><small>${esc(t(blocked ? '已在直播间黑名单' : blockArmed ? '再点一次确认' : '不能再进入你的直播间'))}</small></span><button type="button" class="viewer-line-button${blocked ? '' : ' risk'}${blockArmed ? ' armed' : ''}" data-action="${blocked ? 'viewer.moderation.unblacklist' : 'viewer.moderation.blacklist'}"${blacklist ? '' : ' disabled'}>${esc(t(blocked ? '解除' : blockArmed ? '确认拉黑' : '拉黑'))}</button></div><div class="viewer-moderation-row viewer-admin-row"><span class="viewer-control-copy"><strong>${esc(t('房管'))}</strong><small>${esc(t(appointed ? '可以帮你禁言' : '让 TA 帮你管理弹幕'))}</small></span><button type="button" class="viewer-admin-switch${appointed ? ' on' : ''}" data-action="${appointed ? 'viewer.moderation.dismiss' : 'viewer.moderation.appoint'}" role="switch" aria-checked="${appointed}" aria-label="${esc(t(appointed ? '撤销房管' : '设为房管'))}"${admin ? '' : ' disabled'}><span class="viewer-switch-track"></span></button></div></div>`;
-  const active = host.contains(document.activeElement) ? document.activeElement?.id : '';
-  // The native select remains the canonical command value; radios provide the visible duration control.
-  if (markupCache.get(host) === html) return;
-  closeSelect();
-  patchMarkup(host, html);
-  const select = host.querySelector('#viewer-mute-hours');
-  select.value = oldHours;
-  host.querySelector('.viewer-durations').addEventListener('change', change => {
-    if (change.target.name !== 'viewer-mute-duration' || select.disabled) return;
-    select.value = change.target.value;
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-  });
-  select.addEventListener('change', () => {
-    for (const radio of host.querySelectorAll('[name="viewer-mute-duration"]')) radio.checked = radio.value === select.value;
-    const action = host.querySelector('.viewer-mute-action');
-    if (action) action.textContent = `${t('禁言')} ${t(durations.find(([value]) => String(value) === select.value)?.[1] || '本场')}`;
-  });
-  if (active) host.querySelector(`#${active}`)?.focus({ preventScroll: true });
+  patchMarkup(host, `<span class="viewer-settings-label">${esc(t('直播间管理'))}</span><div class="viewer-room-controls"><p class="viewer-hint viewer-permissions" role="status"${permissionVisible ? '' : ' hidden'}>${esc(note)}</p><div class="viewer-moderation-row"><span class="viewer-control-copy"><strong>${esc(t('禁言'))}</strong>${muted ? `<small>${esc(t('已禁言'))}</small>` : ''}</span>${muted ? `<button type="button" class="viewer-line-button" data-action="viewer.moderation.unmute"${mute ? '' : ' disabled'}>${esc(t('解除'))}</button>` : `<span class="lake-mute-durations">${[[10, '10 分钟'], [60, '1 小时'], [1440, '1 天']].map(([minutes, label]) => `<button type="button" data-action="lake.viewer.mute" data-id="${minutes}"${minutes === 10 ? ` disabled title="${esc(t('B站目前只能按小时禁言'))}"` : mute ? '' : ' disabled'}>${esc(t(label))}</button>`).join('')}</span>`}</div><div class="viewer-moderation-row viewer-block-row"><span class="viewer-control-copy"><strong>${esc(t('直播间拉黑'))}</strong><small>${esc(t(blocked ? '已在直播间黑名单' : blockArmed ? '再点一次确认' : '不能再进入你的直播间'))}</small></span><button type="button" class="viewer-line-button${blocked ? '' : ' risk'}${blockArmed ? ' armed' : ''}" data-action="${blocked ? 'viewer.moderation.unblacklist' : 'viewer.moderation.blacklist'}"${blacklist ? '' : ' disabled'}>${esc(t(blocked ? '解除' : blockArmed ? '确认拉黑' : '拉黑'))}</button></div><div class="viewer-moderation-row viewer-admin-row"><span class="viewer-control-copy"><strong>${esc(t('房管'))}</strong><small>${esc(t(appointed ? '可以帮你禁言' : '让 TA 帮你管理弹幕'))}</small></span><button type="button" class="viewer-admin-switch${appointed ? ' on' : ''}" data-action="${appointed ? 'viewer.moderation.dismiss' : 'viewer.moderation.appoint'}" role="switch" aria-checked="${appointed}" aria-label="${esc(t(appointed ? '撤销房管' : '设为房管'))}"${admin ? '' : ' disabled'}><span class="viewer-switch-track"></span></button></div></div>`);
 }
 
 async function refreshViewerModeration() {
@@ -1634,7 +1974,7 @@ async function refreshViewerModeration() {
   }
 }
 
-async function moderateViewer(action) {
+async function moderateViewer(action, minutes = 60) {
   const user_id = viewerModerationTarget();
   const view = snapshot.moderation;
   if (!broadcastEnabled() || !user_id || !snapshot.account?.user_id || viewerModerationAccount !== String(snapshot.account.user_id) || snapshot.network_disabled || viewerModerationBusy || String(snapshot.account.user_id) === user_id || String(view?.user_id) !== user_id || view.busy) return;
@@ -1656,7 +1996,10 @@ async function moderateViewer(action) {
     delete host.dataset.blockArmed;
     delete host.dataset.blockArmAccount;
   }
-  if (action === 'mute') payload.hours = Number(document.querySelector('#viewer-mute-hours')?.value ?? 1);
+  if (action === 'mute') {
+    if (![60, 1440].includes(minutes)) return;
+    payload.hours = minutes / 60;
+  }
   viewerModerationBusy = true;
   updateViewerModeration();
   let applied = false;
@@ -1668,7 +2011,7 @@ async function moderateViewer(action) {
   }
   if (applied && broadcastEnabled() && viewerModerationTarget() === user_id && String(snapshot.account?.user_id || '') === account && String(snapshot.moderation?.room_id || '') === String(payload.room_id)) {
     if (action === 'mute') {
-      const duration = t({ 0: '本场', 1: '1 小时', 24: '24 小时', 168: '7 天', '-1': '永久' }[payload.hours] || '本场');
+      const duration = t(minutes === 10 ? '10 分钟' : minutes === 60 ? '1 小时' : '1 天');
       showToast(ui`已禁言 ${viewerName} · ${duration}`, false, () => undoLakeMute({ account, user_id, room_id: payload.room_id }));
     } else if (action === 'appoint') showToast(ui`已任命 ${viewerName} 为房管`);
     else showToast(t({ unmute: '已解除禁言', blacklist: '已加入直播间黑名单', unblacklist: '已解除直播间拉黑', dismiss: '已撤销房管' }[action]));
@@ -1750,7 +2093,7 @@ function openAudience(pinned = true) {
   const dialog = document.querySelector('#audience-dialog');
   if (!dialog) return;
   closeVoicePanel(); closeQueuePanel();
-  clearTimeout(audienceCloseTimer);
+  clearTimeout(audienceCloseTimer); clearTimeout(audienceFinishTimer); audienceFinishTimer = null;
   dialog.classList.remove('closing');
   audienceSignature = '';
   renderAudience();
@@ -1773,9 +2116,10 @@ function closeAudience(restoreFocus = true) {
   if (!dialog?.open) return;
   document.querySelector('#audience-count')?.setAttribute('aria-expanded', 'false');
   clearTimeout(audienceCloseTimer);
-  dialog.classList.remove('closing');
-  dialog.close();
-  updateLakePopScrim();
+  if (dialog.classList.contains('closing')) return;
+  const finish = () => { audienceFinishTimer = null; dialog.classList.remove('closing'); if (dialog.open) dialog.close(); updateLakePopScrim(); };
+  if (!motionAllowed()) finish();
+  else { dialog.classList.add('closing'); audienceFinishTimer = setTimeout(finish, 190); }
   if (restoreFocus) document.querySelector('#audience-count')?.focus();
 }
 
@@ -1891,8 +2235,7 @@ async function saveViewerVoice(event, presetId) {
 }
 
 function updateLive() {
-  // The opaque settings surface owns the visible UI; catch up once it closes.
-  if (settingsDialog.open) return;
+  // The lake remains live beneath the translucent settings drawer.
   const scroll = document.querySelector('#chat-scroll');
   if (!scroll || !snapshot) return;
   updateChatCompose();
@@ -1900,8 +2243,10 @@ function updateLive() {
   updateAudience();
   updateThemeControl();
   updateLakeClock();
+  void settleLakeWake().catch(showError);
+  syncLakeReadingProgress();
   const notice = updateFallbackStatus(snapshot.queue || {});
-  const renderSignature = JSON.stringify([snapshot.live, snapshot.queue, snapshot.setup, snapshot.account, snapshot.broadcast, snapshot.preferences?.broadcast_console, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, notice, viewerOpenIdentity]);
+  const renderSignature = JSON.stringify([snapshot.live, snapshot.live_history, snapshot.queue, snapshot.setup, snapshot.account, snapshot.broadcast, snapshot.preferences?.broadcast_console, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, notice, viewerOpenIdentity]);
   if (viewerContext) updateViewerModeration();
   if (liveRenderSignature === renderSignature) return;
   liveRenderSignature = renderSignature;
@@ -1983,31 +2328,24 @@ function updateLive() {
 function updateVolumeControls() {
   const stored = Math.round((snapshot.preferences?.master_volume ?? 1) * 100);
   const muted = volumeDraft === null ? (!!snapshot.preferences?.muted || stored === 0) : volumeDraft === 0;
-  // Muting shows zero; the saved level returns when sound is turned back on.
   const volume = volumeDraft ?? (muted ? 0 : stored);
-  const slider = document.querySelector('#main-volume-range');
-  if (slider && slider.value !== String(volume)) slider.value = String(volume);
-  if (slider?.style) slider.style.setProperty('--fill', `${Math.round((volume / Number(slider.max || 200)) * 100)}%`);
-  const output = document.querySelector('#main-volume-value');
-  if (output) output.textContent = String(volume);
-  const control = document.querySelector('[data-action="audio.mute"]');
+  const host = document.querySelector('.lake-voice-control');
+  host?.classList.toggle('muted', muted);
+  const output = document.querySelector('#main-volume-value'); if (output) output.textContent = String(volume);
+  const control = document.querySelector('.lake-volume-waterline');
   if (control) {
-    const label = muted ? t('取消静音') : t('静音');
-    control.title = label;
-    control.setAttribute('aria-label', label);
-    control.setAttribute('aria-pressed', String(muted));
-    control.classList?.toggle('on', muted);
-    if (control.dataset.muted !== String(muted)) {
-      control.dataset.muted = String(muted);
-      control.innerHTML = lakeVolumeIcon(muted);
-    }
+    control.style.setProperty('--volume', `${Math.min(100, volume)}%`);
+    control.setAttribute('aria-label', t('播报音量'));
+    control.setAttribute('aria-valuemax', String(Math.max(100, volume)));
+    control.setAttribute('aria-valuenow', String(volume));
+    control.setAttribute('aria-valuetext', `${volume}%${muted ? ` · ${t('已静音')}` : ''}`);
+    control.title = t(muted ? '取消静音' : '静音');
   }
 }
 
-const tabs = [['room', 'navRoom', '直播间'], ['voices', 'navVoice', '声音'], ['rules', 'navRules', '播报内容'], ['assets', 'navSounds', '音效'], ['live', 'navBroadcast', 'OBS 与开播'], ['general', 'navGeneral', '通用'], ['data', 'navAbout', '数据与关于']];
-// Older entry points still name the pages that were merged into 通用, 数据与关于 and OBS 与开播.
-const legacyTabs = { audio: 'general', appearance: 'general', about: 'data', broadcast: 'live', overlay: 'live' };
-const settingsTabId = id => legacyTabs[id] || (tabs.some(([tab]) => tab === id) ? id : 'voices');
+const tabs = [['home', 'settings', '设置'], ['room', 'navRoom', '直播间'], ['voices', 'navVoice', '声音'], ['overlay', 'navOverlay', 'OBS'], ['readings', 'navRules', '记住的读法'], ['general', 'navGeneral', '通用'], ['advanced', 'navRules', '高级']];
+const legacyTabs = { rules: 'advanced', assets: 'advanced', audio: 'general', appearance: 'general', about: 'general', data: 'general', broadcast: 'overlay', live: 'overlay' };
+const settingsTabId = id => legacyTabs[id] || (tabs.some(([tab]) => tab === id) ? id : 'home');
 // 开播台 and 叠加层 share the OBS 与开播 page; the old tab IDs open their panel.
 const livePanels = ['broadcast', 'overlay'];
 let livePanel = 'broadcast';
@@ -2129,6 +2467,8 @@ function updateServiceIndicators() {
 }
 
 function collectAutosave(form) {
+  const lakeEnvelope = collectLakeSettingsAutosave(form);
+  if (lakeEnvelope) return lakeEnvelope;
   if (!form.checkValidity()) throw new Error(t('请检查未填或格式不正确的项目'));
   const type = form.dataset.form;
   const data = new FormData(form);
@@ -2136,6 +2476,11 @@ function collectAutosave(form) {
   const number = key => Number(data.get(key));
   const checked = key => data.has(key);
   const id = form.dataset.id || '';
+  if (type === 'lake-voice-edit') {
+    const existing = snapshot.presets.find(preset => preset.id === id);
+    if (!existing) throw new Error(t('请重新打开声音设置。'));
+    return { action: 'presets.save', payload: { preset: { ...existing, name: value('name'), speed: number('speed'), volume: number('volume') } } };
+  }
   if (type === 'room-uid') {
     if (!validUid(value('uid'))) throw new Error(t('请输入有效的主播 UID'));
     throw new Error(t('请扫码登录哔哩哔哩后接收弹幕'));
@@ -2196,7 +2541,12 @@ function collectAutosave(form) {
   if (type === 'overlay') {
     const current = snapshot.overlay?.settings;
     if (!current) throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
-    const settings = { ...current, enabled: checked('enabled'), style: value('style'), corner: value('corner'), scale: number('scale'), vignette: number('vignette'), title: current.title, tagline: value('tagline'), show_danmaku: checked('show_danmaku'), show_gift: checked('show_gift'), show_super_chat: checked('show_super_chat'), show_guard: checked('show_guard'), names: value('names'), merge_duplicates: checked('merge_duplicates'), linger_seconds: number('linger_seconds') };
+    const settings = { ...current, style: 'spine', vignette: .6, linger_seconds: 14 };
+    for (const key of ['corner', 'title', 'tagline', 'names']) if (form.elements[key]) settings[key] = value(key);
+    for (const key of ['offset_x', 'offset_y', 'scale']) if (form.elements[key]) settings[key] = number(key);
+    for (const key of ['enabled', 'show_danmaku', 'show_gift', 'show_super_chat', 'show_guard', 'merge_duplicates']) if (form.elements[key]) settings[key] = checked(key);
+    if (!settings.title || [...settings.title].length > 24 || /[\u0000-\u001f\u007f-\u009f]/u.test(settings.title)) throw new Error(t('请填写 1 到 24 字的叠加层主标题'));
+    if (![settings.offset_x, settings.offset_y].every(value => Number.isInteger(value) && Math.abs(value) <= 8192)) throw new Error(t('位置偏移需为 -8192 到 8192 之间的整数'));
     if (!Number.isInteger(settings.linger_seconds) || settings.linger_seconds < 3 || settings.linger_seconds > 120) throw new Error(t('停留时间需在 3 到 120 秒之间'));
     return { action: 'overlay.save', payload: { settings } };
   }
@@ -2376,7 +2726,7 @@ function scheduleAutosave(form, immediate = false, deferUid = false, composing =
 }
 
 async function flushAutosaves() {
-  if ([...settingsDialog.querySelectorAll('input,textarea')].some(input => composingInputs.has(input))) {
+  if ([...settingsDialog.querySelectorAll('input,textarea,[contenteditable="true"]')].some(input => composingInputs.has(input))) {
     showToast(t('请先完成输入法选字，再切换或退出设置'), true);
     return false;
   }
@@ -2408,9 +2758,24 @@ function renderSettings() {
   closeSelect();
   unmountAutosaves();
   settingsDirty = false;
-  settingsDialog.innerHTML = ui`<div class="settings-shell"><header class="settings-heading" data-tauri-drag-region><button type="button" class="settings-back" data-action="settings.close">${icon('back')}<span>返回直播</span></button><span class="settings-heading-space" data-tauri-drag-region></span>${iconButton('moon', t('切换深浅色'), 'theme.toggle')}<span class="titlebar-divider" aria-hidden="true"></span>${windowControls()}</header><div id="settings-error" class="settings-status" role="alert" hidden></div><div class="settings-body"><label class="settings-category-label" for="settings-category"><span class="sr-only">设置分类</span><select id="settings-category" aria-label="设置分类">${tabs.map(([id, , title]) => option(id, t(title), settingsTab)).join('')}</select></label><nav class="settings-nav" aria-label="设置分类"><h2 id="settings-title" class="settings-nav-title">设置</h2><span class="settings-nav-ink" aria-hidden="true"></span>${tabs.map(([id, glyph, title]) => `<button type="button" data-action="settings.tab" data-id="${id}"${settingsTab === id ? ' aria-current="page"' : ''}>${icon(glyph)}${t(title)}${id === 'live' ? `<span class="settings-nav-badge">${esc(t('实验'))}</span>` : ''}</button>`).join('')}</nav><section class="settings-content" id="settings-content" tabindex="-1">${editor ? `<div class="editor-navigation">${button(aliasReturnContext && editor?.type === 'alias' ? t('返回主界面') : `${t('返回')} ${t(tabs.find(([id]) => id === settingsTab)?.[2] || '设置')}`, 'editor.cancel', { class: 'small quiet', icon: 'back' })}</div>` : ''}${renderSettingsPage()}</section></div></div>`;
+  settingsTab = settingsTabId(settingsTab);
+  const isObs = settingsTab === 'overlay';
+  const obsAdvanced = isObs && typeof lakeObsPage !== 'undefined' && lakeObsPage === 'advanced';
+  const voiceEditor = settingsTab === 'voices' && editor;
+  const title = obsAdvanced ? t('OBS 高级') : voiceEditor ? t('添加声音') : t(tabs.find(([id]) => id === settingsTab)?.[2] || '设置');
+  const subtitle = obsAdvanced ? 'advanced' : voiceEditor ? 'new voice' : ({ home: 'settings', voices: 'voices', room: 'room', overlay: 'overlay', readings: 'readings', general: 'general', advanced: 'advanced' })[settingsTab];
+  const backToAdd = voiceEditor && ['service', 'qr'].includes(editor.type) && editor.provider !== 'bilibili';
+  const backAction = obsAdvanced ? 'lake.obs.back' : backToAdd ? 'voice.provider' : editor ? 'editor.cancel' : 'settings.tab';
+  settingsDialog.classList.add('lake-settings');
+  settingsDialog.classList.toggle('lake-settings-wide', isObs && typeof isLakeObsWide === 'function' && isLakeObsWide());
+  settingsDialog.dataset.page = settingsTab;
+  // Re-rendering the same page (an accordion, an inline editor) keeps the reader's place.
+  const keepScroll = settingsDialog.open && lastSettingsTab === settingsViewKey() ? settingsDialog.querySelector('#settings-content')?.scrollTop || 0 : 0;
+  settingsDialog.innerHTML = `<div class="settings-shell"><header class="lake-settings-heading">${settingsTab !== 'home' ? iconButton('back', editor ? t('返回') : t('返回设置'), backAction, backAction === 'settings.tab' ? 'home' : backToAdd ? editor.provider : '') : ''}<h2 id="settings-title"><span>${esc(title)}</span><i>${subtitle}</i></h2>${iconButton('close', t('关闭设置'), 'settings.close')}</header><div id="settings-error" class="settings-status" role="alert" hidden></div><section class="settings-content" id="settings-content" tabindex="-1">${renderSettingsPage()}</section></div>`;
   settleSettingsMotion();
+  if (keepScroll) { const content = settingsDialog.querySelector('#settings-content'); if (content) content.scrollTop = keepScroll; }
   mountAutosaves();
+  for (const node of settingsDialog.querySelectorAll('[data-lake-template]')) node.innerHTML = lakeTemplateMarkup(node.closest('form').elements[`template_${node.dataset.lakeTemplate}`].value);
   if (editor?.type === 'preset') hideLegacyVoiceFields();
   if (editor?.type === 'preset' && !editor.id) applyModelPairToForm(false);
   updateVoiceSettings();
@@ -2434,13 +2799,25 @@ function renderAbout() {
   return ui`${hero}<div class="s-card"><div class="s-row s-wrap"><span class="s-text"><span>更新</span><small role="status" class="${updateError ? 'field-error' : ''}">${esc(status)}</small>${updateInfo?.status === 'available' ? t('<small>下载后解压 ZIP，退出程序，再用新版 EXE 替换原文件，设置会保留。</small>') : ''}</span><span class="s-row-actions">${updateActions}</span></div>${dataRow}<div class="s-row"><span class="s-text"><span>项目主页</span></span><span class="s-row-actions">${button('GitHub', 'external.open', { id: 'project', class: 'small', icon: 'external' })}${button(t('发布页面'), 'external.open', { id: 'releases', class: 'small', icon: 'external' })}</span></div></div>`;
 }
 
-// A new page rises in; the highlight in the category list slides to the chosen page.
+// The OBS page counts its connect / stage / advanced views as separate pages.
+const settingsViewKey = () => `${settingsTab}|${editor?.type || ''}|${editor?.id || editor?.provider || ''}|${settingsTab === 'overlay' && typeof lakeObsViewKind === 'function' ? lakeObsViewKind() : ''}`;
+const settingsViewDepth = () => settingsTab === 'home' ? 0 : editor || (settingsTab === 'overlay' && typeof lakeObsPage !== 'undefined' && lakeObsPage === 'advanced') ? 2 : 1;
+let lastSettingsDepth = 0;
+
+// Deeper pages come in from the right and shallower ones from the left; a page that
+// only changes state (OBS connecting) fades. Opening the drawer keeps the rise.
 function settleSettingsMotion() {
-  const view = `${settingsTab}|${editor?.type || ''}|${editor?.id || editor?.provider || ''}`;
+  const view = settingsViewKey();
+  const depth = settingsViewDepth();
   const changed = lastSettingsTab !== view || !settingsDialog.open;
-  lastSettingsTab = view;
+  const direction = !settingsDialog.open ? '' : depth > lastSettingsDepth ? 'fwd' : depth < lastSettingsDepth ? 'back' : 'swap';
+  lastSettingsTab = view; lastSettingsDepth = depth;
   const motion = motionAllowed();
-  if (changed && motion) settingsDialog.querySelector('#settings-content')?.classList?.add('tab-enter');
+  if (changed && motion) {
+    if (direction) settingsDialog.dataset.nav = direction; else delete settingsDialog.dataset.nav;
+    settingsDialog.querySelector('#settings-content')?.classList?.add('tab-enter');
+    if (direction) settingsDialog.querySelector('.lake-settings-heading')?.classList?.add('lake-heading-enter');
+  }
   const nav = settingsDialog.querySelector('.settings-nav');
   const ink = nav?.querySelector?.('.settings-nav-ink');
   const current = nav?.querySelector?.('[aria-current="page"]');
@@ -2466,21 +2843,18 @@ function placeSettingsInk() {
   ink.style.transform = `translateY(${settingsInkTop}px)`;
 }
 
-// Settings cover the custom title bar, so they carry their own copy of the window buttons.
+// Used by legacy setup screens; the lake settings drawer keeps the real title bar visible.
 const windowControls = () => document.querySelector('#titlebar .titlebar-controls')?.outerHTML || '';
 
 function renderSettingsPage() {
   if (!snapshot) return empty(t('桌面连接不可用。'));
+  if (settingsTab === 'home') return renderLakeSettingsHome();
   if (settingsTab === 'room') return renderRoomSettings();
   if (settingsTab === 'voices') return renderVoicesSettings();
-  if (settingsTab === 'rules') return renderRulesSettings();
-  if (settingsTab === 'assets') return renderAssetsSettings();
-  if (settingsTab === 'live') return renderLiveSettings();
-  if (settingsTab === 'general') {
-    const reset = ui`<section class="s-section">${sLabel(t('初次设置'))}<div class="s-card"><div class="s-row"><span class="s-text"><span>重新打开引导</span><small>重新走一遍扫码、直播间和豆包设置。已有声音和规则仍会保留。</small></span>${button(t('重新打开'), 'onboarding.reset', { class: 'small' })}</div></div></section>`;
-    return `<div class="s-page">${heading(t('通用'))}${renderAppearanceSettings()}${renderAudioSettings()}${reset}</div>`;
-  }
-  return `<div class="s-page s-about">${renderAbout()}${renderDataSettings()}<p class="s-license">AGPL-3.0-only · ${esc(t('许可信息见 GitHub 仓库 NOTICE。'))}</p></div>`;
+  if (settingsTab === 'readings') return renderLakeReadings();
+  if (settingsTab === 'advanced') return renderRulesSettings();
+  if (settingsTab === 'overlay') return renderLiveSettings();
+  return renderLakeGeneral();
 }
 
 function renderRoomSettings() {
@@ -2495,14 +2869,15 @@ function renderRoomSettings() {
   const note = expired ? t('重新扫码登录后即可继续接收弹幕。') : loggedIn ? '' : t('用哔哩哔哩 App 扫码，自动找到自己的直播间。');
   const avatar = `<span class="s-avatar large color-${identityColor(snapshot.account?.user_id || name)}" aria-hidden="true">${loggedIn ? `<span>${esc(initial(name))}</span>` : icon('person')}${identity.avatar ? `<img src="${esc(identity.avatar)}" alt="" referrerpolicy="no-referrer">` : ''}</span>`;
   const heroActions = loggedIn
-    ? `${button(t('重新扫码'), 'bili.begin', { class: `small${expired ? ' primary' : ''}`, icon: 'qr' })}${button(t('退出账号'), 'bili.logout', { class: 'small danger' })}`
+    ? expired ? button(t('重新扫码'), 'bili.begin', { class: 'small lake-gold-outline', icon: 'qr' }) : button(t('换一个账号'), 'bili.begin', { class: 'quiet' })
     : button(t('扫码登录'), 'bili.begin', { class: 'primary small', icon: 'qr' });
   const hero = scanning
-    ? `<section class="s-hero s-qr-hero">${qrMarkup('bilibili', true)}<div class="actions">${button(t('取消扫码'), 'editor.cancel', { class: 'small' })}</div></section>`
-    : ui`<section class="s-hero s-account"><span class="s-hero-glow" aria-hidden="true"></span>${avatar}<div class="s-account-text"><strong>${esc(name)}</strong><span class="${expired ? 's-bad' : ''}">哔哩哔哩账号 · ${esc(state)}</span>${note ? `<small>${esc(note)}</small>` : ''}</div><div class="s-hero-actions">${heroActions}</div></section>`;
-  const card = ui`<div class="s-card"><div class="s-row"><span class="s-text"><span>直播间</span></span><span class="s-num">${room ? esc(room) : '—'}</span></div></div>`;
+    ? `<section class="lake-room-qr">${qrMarkup('bilibili', true)}<p class="lake-note">${esc(t('用哔哩哔哩 App 扫一扫'))}<br>${esc(t('在手机上确认登录'))}</p><p class="lake-note">${esc(t('二维码两分钟后会过期'))} · <button type="button" class="text-button" data-action="qr.retry">${esc(t('换一张'))}</button></p>${button(t('取消扫码'), 'editor.cancel', { class: 'small quiet' })}</section>`
+    : ui`<section class="lake-room-account">${avatar}<div class="s-account-text"><strong>${esc(name)}</strong><span class="${expired ? 'lake-gold' : ''}">哔哩哔哩账号 · ${esc(state)}</span>${note ? `<small>${esc(note)}</small>` : ''}</div><div class="s-hero-actions">${heroActions}</div></section>`;
+  const changing = editor?.type === 'lake-room';
+  const card = changing ? `<form data-form="lake-room"><label class="lake-note" for="lake-room-id">${esc(t('直播间号'))}</label><input id="lake-room-id" name="room_id" value="${esc(room || '')}" inputmode="numeric" pattern="[1-9][0-9]*" required aria-label="${esc(t('直播间号'))}"><div class="actions">${button(t('好了'), 'lake.room.save', { class: 'primary small' })}${button(t('取消'), 'lake.editor.cancel', { class: 'quiet small' })}</div><p class="lake-note">${esc(t('切换直播间会先断开当前连接。'))}</p></form>` : `<div class="lake-room-number"><span>${esc(t('直播间号'))}</span><div><strong>${room ? esc(room) : '—'}</strong>${button(t('换一个'), 'lake.room.edit', { class: 'quiet small' })}</div><small>${esc(t('现在'))} · ${esc(snapshot.broadcast?.room?.live_status === 1 ? t('直播中') : t('还没开播'))}</small></div>`;
   const targetNote = needsRoom ? t('未找到本账号直播间，请先在 B站开通直播间后重新扫码') : '';
-  return `<div class="s-page">${heading(t('直播间'))}${hero}${sSection(t('我的直播间'), card, '', targetNote)}${sSection(t('礼物合并'), renderGiftMerge(), '', t('断开直播间后可更改。礼物先按播报规则过滤，再合并数量。'))}</div>`;
+  return `<div class="lake-settings-page lake-room">${hero}${scanning ? '' : card}${targetNote ? `<p class="lake-note lake-gold">${esc(targetNote)}</p>` : ''}<footer class="lake-settings-footer">${loggedIn ? button(t('退出这个账号'), 'bili.logout', { class: 'quiet' }) : ''}</footer></div>`;
 }
 
 // ---- 开播 (experimental) ----
@@ -2683,7 +3058,7 @@ function hidePushCredentials(root = document) {
   }
 }
 
-async function runBroadcastAction(action, payload = {}) {
+async function runBroadcastAction(action, payload = {}, options = {}) {
   if (broadcastBusy) return;
   broadcastBusy = true;
   // An earlier room read may already have finished on the server while its
@@ -2695,7 +3070,7 @@ async function runBroadcastAction(action, payload = {}) {
   controls.forEach(([node]) => { node.disabled = true; });
   for (const scope of scopes) scope.classList.add('broadcast-busy');
   for (const go of document.querySelectorAll('[data-onair-go]')) go.classList.add('working');
-  try { return await command(`bili.broadcast.${action}`, payload); }
+  try { return await command(`bili.broadcast.${action}`, payload, options); }
   finally {
     broadcastBusy = false;
     controls.forEach(([node, disabled]) => { if (node.isConnected) node.disabled = disabled; });
@@ -2727,6 +3102,45 @@ async function saveBroadcastForm(form) {
 }
 
 // A changed title or category is submitted first, so the room opens with what is on screen.
+let lakeFaceAttempt = null;
+let lakeFaceTimer = null;
+let lakeFaceError = '';
+
+function cancelLakeFaceWait() {
+  clearTimeout(lakeFaceTimer); lakeFaceTimer = null; lakeFaceAttempt = null;
+}
+
+function beginLakeFaceWait() {
+  cancelLakeFaceWait(); lakeFaceError = '';
+  lakeFaceAttempt = { account: broadcastAccount(), room: String(snapshot.broadcast?.room?.room_id || ''), until: Date.now() + 120000 };
+  scheduleLakeFaceWait(lakeFaceAttempt);
+}
+
+function scheduleLakeFaceWait(attempt) {
+  clearTimeout(lakeFaceTimer);
+  lakeFaceTimer = setTimeout(async () => {
+    const same = () => lakeFaceAttempt === attempt && broadcastEnabled() && broadcastAccount() === attempt.account && String(snapshot.broadcast?.room?.room_id || '') === attempt.room && !snapshot.network_disabled;
+    if (!same() || broadcastLive(snapshot.broadcast?.room)) { cancelLakeFaceWait(); if (onAirPanelMode === 'face') closeOnAirPanel(); return; }
+    if (Date.now() >= attempt.until) {
+      lakeFaceError = t('验证等待已超时，请重新开播。'); cancelLakeFaceWait(); renderOnAirPanel(); return;
+    }
+    if (broadcastBusy || snapshot.broadcast?.busy) { scheduleLakeFaceWait(attempt); return; }
+    try {
+      const next = await runBroadcastAction('start', { confirmed: true, area_id: snapshot.broadcast.room.area_id }, {
+        quiet: true, silent: true,
+        accept: next => same() && String(next.account?.user_id || '') === attempt.account && String(next.broadcast?.room?.room_id || '') === attempt.room,
+      });
+      if (!same()) return;
+      if (next && !snapshot.broadcast?.face_image && broadcastLive(snapshot.broadcast?.room)) {
+        cancelLakeFaceWait(); closeOnAirPanel();
+        showToast(t(next.result?.obs?.outcome === 'started' ? '已开播，OBS 已开始推流' : '已开播，请在 OBS 中开始推流'));
+      } else scheduleLakeFaceWait(attempt);
+    } catch (error) {
+      if (same()) { lakeFaceError = errorMessage(error); cancelLakeFaceWait(); renderOnAirPanel(); }
+    }
+  }, 5000);
+}
+
 async function startBroadcast() {
   if (broadcastBusy) return;
   if (!snapshot.broadcast?.room) await runBroadcastAction('refresh');
@@ -2736,6 +3150,7 @@ async function startBroadcast() {
   if (form && !await saveBroadcastForm(form)) return;
   const next = await runBroadcastAction('start', { confirmed: true, area_id: snapshot.broadcast.room.area_id });
   if (snapshot.broadcast?.face_image) {
+    beginLakeFaceWait();
     if (step === 'main' && !settingsDialog.open) openOnAirPanel('face');
     else showToast(t('请先扫码完成人脸验证'));
     return;
@@ -2745,12 +3160,13 @@ async function startBroadcast() {
   if (obs?.outcome === 'started' || obs?.outcome === 'starting') { showToast(t(obs.outcome === 'started' ? '已开播，OBS 已开始推流' : '已开播，OBS 正在开始推流')); return; }
   if (obs?.outcome === 'already_streaming') { showToast(t('已开播。OBS 原本就在推流，没有改动它的推流设置')); return; }
   closeOnAirPanel();
-  if (obs?.error) showToast(`${t('已开播，但 OBS 没能自动推流，请检查「设置 → OBS 与开播」：')}${errorMessage(obs.error)}`, true);
+  if (obs?.error) showToast(`${t('已开播，但 OBS 没能自动推流，请检查「设置 → OBS」：')}${errorMessage(obs.error)}`, true);
   else showToast(t('已开播，请在 OBS 中开始推流'));
 }
 
 // No confirmation: ending is one click. With the OBS link on, Rust stops OBS before closing the room.
 async function stopBroadcast() {
+  cancelLakeFaceWait();
   closeOnAirPanel();
   const next = await runBroadcastAction('stop', { confirmed: true });
   hidePushCredentials();
@@ -2864,7 +3280,7 @@ function updateOnAir() {
     actions = onAirSideButton(t('扫码登录'), 'settings.room', 'qr');
   } else if (!room) {
     const failed = broadcastRefreshError && !broadcastRefreshing;
-    copy = `${kicker('OFF AIR')}<span class="onair-title static${failed ? ' error' : ' loading'}">${esc(failed ? t('读取开播状态失败') : t('正在读取开播状态…'))}</span>${failed ? `<span class="onair-area" title="${esc(broadcastRefreshError)}">${esc(broadcastRefreshError)}</span>` : ''}`;
+    copy = `${kicker('OFF AIR', failed ? `<span class="onair-failure" title="${esc(broadcastRefreshError)}">${esc(t('没读到开播状态'))}</span>` : '')}<span class="onair-title static${failed ? ' error' : ' loading'}">${esc(failed ? t('读取开播状态失败') : t('正在读取开播状态…'))}</span>`;
     actions = failed ? onAirSideButton(t('重试'), 'broadcast.refresh', 'refresh') : onAirGoButton(room, { ...view, busy: true });
   } else {
     const state = live ? 'ON AIR' : faceWaiting || broadcastBusy || view.busy ? 'GOING LIVE' : lakeEnded ? 'WRAPPED' : room.live_status === 2 ? 'REPLAY' : 'OFF AIR';
@@ -2888,7 +3304,7 @@ function renderOnAirPanel() {
   const content = onAirPanelMode === 'details'
     ? [onAirBitrate, onAirBitrateBusy, onAirBitrateError]
     : onAirPanelMode === 'info' ? [room.title, room.parent_area_id, room.area_id, view.areas]
-      : [view.face_image, room.live_status, view.busy, broadcastBusy];
+      : [view.face_image, room.live_status, view.busy, broadcastBusy, lakeFaceError];
   const signature = JSON.stringify([onAirPanelMode, content, getLanguage()]);
   if (panel.dataset.signature === signature && !panel.hidden) return;
   const active = panel.contains(document.activeElement) ? document.activeElement : null;
@@ -2899,9 +3315,9 @@ function renderOnAirPanel() {
   panel.dataset.signature = signature;
   const head = (title, note = '') => `<header class="onair-panel-head"><div><strong>${esc(title)}</strong>${note ? `<small>${esc(note)}</small>` : ''}</div><button type="button" class="onair-close" data-action="onair.close" aria-label="${esc(t('关闭'))}" title="${esc(t('关闭'))}">${icon('close')}</button></header>`;
   if (onAirPanelMode === 'info') {
-    panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="broadcast-room" class="onair-info lake-title-form" novalidate><span class="lake-edit-kicker">TONIGHT’S TITLE<em>— ${esc(t('B站直播间'))}</em></span>${lakeBroadcastInfoFields(view, room)}<div class="onair-panel-foot"><button type="submit" class="onair-save">${esc(t('保存'))}</button></div></form>`;
+    panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="broadcast-room" class="onair-info lake-title-form" novalidate><span class="lake-edit-kicker">TONIGHT’S TITLE<em>— ${esc(t('B站直播间'))}</em></span>${lakeBroadcastInfoFields(view, room)}<div class="onair-panel-foot"><button type="button" class="onair-text-button" data-action="onair.close">${esc(t('取消'))}</button><button type="submit" class="onair-save">${esc(t('好了'))}</button></div></form>`;
   } else if (onAirPanelMode === 'face' && view.face_image) {
-    panel.innerHTML = `<span class="lake-face-kicker">FACE CHECK</span><h3>${esc(t('开播前需要验证本人'))}</h3><div class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></div><p class="lake-face-note">${esc(t('用哔哩哔哩 App 扫码完成人脸验证，'))}<br>${esc(t('再回来点继续。'))}</p><div class="onair-panel-foot">${onAirGoButton(room, view, t('继续开播'))}</div>`;
+    panel.innerHTML = `<span class="lake-face-kicker">FACE CHECK</span><h3>${esc(t('开播前需要验证本人'))}</h3><div class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></div><p class="lake-face-note">${esc(t('用哔哩哔哩 App 扫一扫，完成验证后会自动开播。'))}</p><div class="onair-panel-foot">${lakeFaceError ? `<span role="alert">${esc(lakeFaceError)}</span><button type="button" class="onair-text-button" data-action="broadcast.start">${esc(t('重试'))}</button>` : `<span class="lake-face-waiting" role="status">${esc(t('等待验证…'))}</span>`}</div>`;
   } else if (onAirPanelMode === 'details') {
     panel.innerHTML = `${head(t('直播详情'))}${onAirDetailsFields()}`;
   }
@@ -2950,6 +3366,7 @@ function openOnAirPanel(mode) {
 function closeOnAirPanel(focus = false) {
   const panel = document.querySelector('#onair-panel');
   const wasFace = onAirPanelMode === 'face';
+  if (wasFace) cancelLakeFaceWait();
   onAirPanelMode = '';
   document.querySelector('#live-shell')?.classList.remove('lake-editing');
   ++onAirBitrateSequence;
@@ -3042,7 +3459,7 @@ let obsRefreshTimer = null;
 const OBS_REFRESH_MS = 15000;
 
 const obsConnectionKey = () => JSON.stringify([snapshot?.obs?.settings?.host, snapshot?.obs?.settings?.port, snapshot?.obs?.has_password]);
-const obsPageActive = () => !disposed && !!snapshot && !snapshot.network_disabled && settingsDialog.open && settingsTab === 'live' && !editor && !!settingsDialog.querySelector('[data-obs-root]') && uiIsActive(nativeActive, windowFocused, document.hidden);
+const obsPageActive = () => !disposed && !!snapshot && !snapshot.network_disabled && settingsDialog.open && ['overlay', 'live'].includes(settingsTab) && !editor && !!settingsDialog.querySelector('[data-obs-root]') && uiIsActive(nativeActive, windowFocused, document.hidden);
 
 function acceptObsObservation(next, key) {
   if (disposed || key !== obsConnectionKey() || !next?.obs) return false;
@@ -3091,9 +3508,33 @@ async function refreshObsStatus() {
   }
 }
 
+let lakeObsPage = 'preview';
+let lakeObsDrag = null;
+let lakeObsSaveTimer = null;
+let lakeObsEventsInstalled = false;
+const lakeObsPasswordSaves = new WeakMap();
+// Once OBS has been reached (or the overlay was added, or broadcasts drive OBS), a
+// closed OBS is only "not running": the page stays the stage instead of asking for
+// the connection again. Wrong passwords and too-old versions still need the form.
+const lakeObsReachedKey = 'dv.obs.reached';
+function lakeObsConfigured() {
+  if (snapshot?.overlay?.settings?.enabled || snapshot?.obs?.settings?.enabled) return true;
+  try { return localStorage.getItem(lakeObsReachedKey) === '1'; } catch { return false; }
+}
+function rememberLakeObsReached() {
+  if (snapshot?.obs?.status?.state !== 'ok') return;
+  try { localStorage.setItem(lakeObsReachedKey, '1'); } catch { /* Only a layout hint. */ }
+}
+const lakeObsNeedsSetup = () => snapshot?.obs?.status?.state === 'error' && /DV-OB0[234]/.test(snapshot.obs.status.message || '');
+const lakeObsViewKind = () => lakeObsPage === 'advanced' ? 'advanced' : snapshot?.obs?.status?.state === 'ok' ? 'preview' : lakeObsConfigured() && !lakeObsNeedsSetup() ? 'offline' : 'connect';
+const isLakeObsWide = () => ['preview', 'offline'].includes(lakeObsViewKind());
+
 function renderLiveSettings() {
-  const panel = id => `<div class="s-live-panel" data-live-panel="${id}" role="tabpanel" aria-labelledby="live-tab-${id}"${livePanel === id ? '' : ' hidden'}>${id === 'broadcast' ? renderBroadcastPanel() : renderOverlayPanel()}</div>`;
-  return ui`<div class="s-page s-live"><div class="s-page-head"><div class="s-ovl-head"><div class="s-ovl-title-row">${heading(t('OBS 与开播'))}<span class="s-ovl-badge">实验性</span></div></div></div>${renderObsConnection()}<div class="s-live-tabs" role="tablist" aria-label="${esc(t('OBS 功能'))}">${liveTab('broadcast')}${liveTab('overlay')}</div>${panel('broadcast')}${panel('overlay')}</div>`;
+  const kind = lakeObsViewKind();
+  if (kind === 'advanced') return `<div class="lake-obs lake-obs-advanced" data-obs-root data-obs-view="advanced">${renderObsConnection()}${renderOverlayAdvanced()}${renderObsLinkSection()}</div>`;
+  rememberLakeObsReached();
+  if (kind === 'preview' || kind === 'offline') return `<div class="lake-obs lake-obs-connected" data-obs-root data-obs-view="${kind}">${renderOverlayPanel()}</div>`;
+  return `<div class="lake-obs lake-obs-setup" data-obs-root data-obs-view="connect"><section class="lake-obs-intro"><div class="lake-obs-connect-symbol" aria-hidden="true"><i class="lake-obs-app-dot"></i><span></span><i class="lake-obs-orbit">${icon('navOverlay')}</i></div><h3>${esc(t('还没连上 OBS'))}</h3><p>${esc(t('在 OBS 里打开「工具 › WebSocket 服务器设置」，勾上「开启 WebSocket 服务器」，把端口和密码填在下面。'))}</p></section>${renderObsConnection()}<div class="lake-obs-setup-foot"><span class="s-ovl-thumb spine" aria-hidden="true"><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i><i class="e"></i><i class="f"></i></span><p>${esc(t('连上以后，抽屉会变宽，让你直接在画面上摆放弹幕。'))}</p></div></div>`;
 }
 
 function liveTabState(id) {
@@ -3137,6 +3578,7 @@ function obsStatusView(view = snapshot.obs || {}) {
   if (obsBusy === 'launch') return { tone: 'pending', text: t('正在启动 OBS…'), detail: t('等 OBS 打开 WebSocket，最多约 45 秒') };
   if (obsBusy) return { tone: 'pending', text: t('正在连接 OBS…'), detail: address };
   if (status.state === 'checking' || (obsRefreshing && (!status.state || status.state === 'idle'))) return { tone: 'pending', text: t('正在检测 OBS…'), detail: address };
+  if (status.state === 'error' && /DV-OB01/.test(status.message || '')) return { tone: 'error', text: t('没能连上：OBS 没打开，或者 WebSocket 服务器没开启'), detail: '', reason: errorMessage(status.message || '') };
   if (status.state === 'error') return { tone: 'error', text: t('没能连上 OBS'), detail: errorMessage(status.message || '') };
   if (status.state === 'ok') {
     const stream = status.streaming === true ? t('正在推流') : status.streaming === false ? t('未在推流') : '';
@@ -3152,56 +3594,39 @@ const obsProgramHint = view => view.settings?.executable ? t('已手动选择。
 function renderObsConnection(view = snapshot.obs || {}) {
   const s = view.settings || { host: '127.0.0.1', port: 4455 };
   const status = obsStatusView(view);
-  const hostId = `field-${++fieldSequence}`;
-  const portId = `field-${++fieldSequence}`;
-  const passwordId = `field-${++fieldSequence}`;
-  const open = obsDetailsOpen ?? view.status?.state !== 'ok';
-  const program = pathField('executable', t('OBS 程序'), s.executable || '', 'obs.pick_executable', view.detected ? ui`自动：${view.detected}` : t('点击选择 obs64.exe'), obsProgramHint(view));
-  const details = ui`<form data-form="obs" class="s-obs-form" novalidate><div class="s-row s-wrap"><label class="s-text" for="${hostId}"><span>OBS 地址</span><small>OBS 和弹幕姬在同一台电脑时保持 127.0.0.1。</small></label><input id="${hostId}" class="s-input" name="host" value="${esc(s.host)}" required maxlength="253" spellcheck="false" autocomplete="off"></div><div class="s-row s-wrap"><label class="s-text" for="${portId}"><span>WebSocket 端口</span><small>OBS 默认是 4455。</small></label><input id="${portId}" class="s-input s-num-input s-obs-port" name="port" value="${esc(s.port)}" type="number" min="1" max="65535" step="1" required></div><div class="s-row s-wrap s-obs-program" data-obs-program>${program}<span class="s-row-actions"><button type="button" class="button small quiet" data-action="obs.auto_detect"${s.executable ? '' : ' hidden'}>${esc(t('自动查找'))}</button></span></div>${autoStatus()}</form><form data-form="obs-password" class="s-obs-form" novalidate><div class="s-row s-wrap"><label class="s-text" for="${passwordId}"><span>WebSocket 密码</span><small data-obs-password-hint>${esc(obsPasswordHint(view))}</small></label><span class="s-row-actions"><input id="${passwordId}" class="s-input" name="password" type="password" autocomplete="new-password" maxlength="256" spellcheck="false" placeholder="${view.has_password ? '••••••••' : esc(t('未设置'))}"><button type="submit" class="button small">${esc(t('保存密码'))}</button><button type="button" class="button small quiet" data-action="obs.password.clear"${view.has_password ? '' : ' hidden'}>${esc(t('清除'))}</button></span></div></form><p class="s-obs-help">${esc(t('在 OBS 中打开“工具 → WebSocket 服务器设置”，勾选“开启 WebSocket 服务器”，端口和密码与这里一致（需要 OBS 28 或更高版本）。'))}</p>`;
-  // Starting OBS is offered only while it is not known to be connected, and only for this computer.
-  const launch = `<button type="button" class="button small" data-action="obs.launch"${view.local === false || status.tone === 'ready' ? ' hidden' : ''}${obsBusy ? ' disabled' : ''}>${icon('play')}${esc(t('启动 OBS'))}</button>`;
-  const test = `<button type="button" class="button small" data-action="obs.test"${obsBusy ? ' disabled' : ''}>${icon('refresh')}${esc(t('测试连接'))}</button>`;
-  return ui`<section class="s-section">${sLabel(t('OBS 连接'))}<div class="s-card s-obs-card" data-obs-root data-tone="${status.tone}"><div class="s-obs-status" data-obs-status><span class="s-obs-mark" aria-hidden="true"><span class="service-light ${status.tone}"></span></span><span class="s-obs-copy"><strong data-obs-status-text>${esc(status.text)}</strong><small data-obs-status-detail>${esc(status.detail)}</small></span><span class="s-row-actions">${launch}${test}</span></div><details class="s-obs-more" data-obs-more${open ? ' open' : ''}><summary><span>连接设置</span>${icon('arrow')}</summary>${details}</details></div></section>`;
+  const id = `obs-connect-${++fieldSequence}`;
+  const program = s.executable || view.detected || '';
+  const programName = program ? program.split(/[\\/]/).at(-1) : t('选择 obs64.exe');
+  return `<section class="lake-obs-connection" aria-label="${esc(t('连接设置'))}">${lakeObsPage === 'advanced' ? `<h3 class="lake-obs-connection-heading">${esc(t('连接'))}</h3>` : ''}<form data-form="obs" class="lake-obs-form" novalidate><label class="lake-obs-field" for="${id}-host"><span>${esc(t('地址'))}</span><input id="${id}-host" name="host" value="${esc(s.host || '127.0.0.1')}" required maxlength="253" spellcheck="false" autocomplete="off"></label><label class="lake-obs-field" for="${id}-port"><span>${esc(t('端口'))}</span><input id="${id}-port" name="port" value="${esc(s.port || 4455)}" type="number" min="1" max="65535" step="1" required></label><div class="lake-obs-field"><label for="${id}-password">${esc(t('密码'))}</label><input id="${id}-password" data-obs-secret type="password" autocomplete="new-password" maxlength="256" spellcheck="false" placeholder="${view.has_password ? '••••••••' : esc(t('未设置'))}"><button type="button" class="lake-obs-eye" data-action="lake.obs.password.show" aria-label="${esc(t('显示密码'))}" aria-pressed="false">${icon('eye')}</button></div><div class="lake-obs-program"><span>${esc(t('OBS 程序'))}</span><span data-lake-obs-program title="${esc(program)}">${esc(!s.executable && view.detected ? t('已自动找到 obs64.exe') : programName)}</span><input type="hidden" name="executable" value="${esc(s.executable || '')}"><button type="button" data-action="obs.pick_executable">${esc(t('更改'))}</button></div>${autoStatus()}</form><div class="lake-obs-connect-actions">${button(t('连接'), 'lake.obs.connect', { class: 'primary' })}${view.local === false ? '' : button(t('先打开 OBS'), 'lake.obs.launch', { class: 'quiet' })}</div><p class="lake-obs-connection-status" role="status" data-obs-status-text title="${esc(status.reason || '')}"${status.tone === 'idle' ? ' hidden' : ''}>${esc(status.text)}</p><p class="lake-obs-connection-detail" data-obs-status-detail${status.tone === 'error' && status.detail ? '' : ' hidden'}>${esc(status.detail)}</p></section>`;
 }
 
-// 开播台's own OBS choices: drive OBS on go-live/end, and start it first if needed.
 function renderObsLinkSection(view = snapshot.obs || {}) {
   const s = view.settings || { enabled: false, auto_launch: true };
-  const launchNote = view.local === false ? t('OBS 设在其他电脑上，无法自动启动。') : '';
-  return ui`<section class="s-section">${sLabel(t('OBS 联动'))}<form data-form="obs-link" class="s-card s-obs-link" novalidate>${sSwitch('enabled', t('开播、下播时同步控制 OBS'), s.enabled, t('开播后自动把推流码填进 OBS 并开始推流；下播时先停止 OBS 推流，再关闭直播间。'))}${sSwitch('auto_launch', t('OBS 没开时自动启动'), s.auto_launch !== false, launchNote)}${autoStatus()}</form><p class="s-note">${esc(t('开播会把 OBS 当前配置的推流服务改为“自定义”，填入 B站服务器和推流码；OBS 已经在推流时不会改动。'))}</p></section>`;
+  return `<section class="lake-obs-section"><h3>${esc(t('开播联动'))}</h3><form data-form="obs-link" novalidate>${sSwitch('enabled', t('开播、下播时同步控制 OBS 推流'), s.enabled)}${sSwitch('auto_launch', t('OBS 没开时先自动启动'), s.auto_launch !== false, view.local === false ? t('OBS 设在其他电脑上，无法自动启动。') : '')}${autoStatus()}</form></section>`;
 }
 
 // Snapshots only touch visibility, hints, buttons and status text, never typed values.
 function updateObsSettings() {
   if (!settingsDialog.open) return;
-  const view = snapshot.obs || {};
-  const link = settingsDialog.querySelector('[data-obs-link-body]');
-  if (link) {
-    link.hidden = !broadcastEnabled();
-    const autoLaunch = link.querySelector('input[name="auto_launch"]');
-    if (autoLaunch) autoLaunch.disabled = view.local === false;
-  }
   const root = settingsDialog.querySelector('[data-obs-root]');
-  if (root) {
-    const status = obsStatusView(view);
-    root.dataset.tone = status.tone;
-    const light = root.querySelector('.s-obs-mark .service-light');
-    if (light) light.className = `service-light ${status.tone}`;
-    for (const [selector, value] of [['[data-obs-status-text]', status.text], ['[data-obs-status-detail]', status.detail], ['[data-obs-password-hint]', obsPasswordHint(view)]]) {
-      const node = root.querySelector(selector);
-      if (node && node.textContent !== value) node.textContent = value;
-    }
-    const programHint = root.querySelector('[data-obs-program] .hint');
-    if (programHint && programHint.textContent !== obsProgramHint(view)) programHint.textContent = obsProgramHint(view);
-    const clear = root.querySelector('[data-action="obs.password.clear"]');
-    if (clear) clear.hidden = !view.has_password;
-    const input = root.querySelector('form[data-form="obs-password"] input[name="password"]');
-    if (input) input.placeholder = view.has_password ? '••••••••' : t('未设置');
-    const launch = root.querySelector('[data-action="obs.launch"]');
-    if (launch) launch.hidden = view.local === false || status.tone === 'ready';
-    for (const node of root.querySelectorAll('[data-action="obs.test"], [data-action="obs.launch"]')) node.disabled = !!obsBusy;
-  }
-  updateLiveTabs();
+  if (!root) return;
+  const view = snapshot.obs || {};
+  const status = obsStatusView(view);
+  root.dataset.tone = status.tone;
+  const statusText = root.querySelector('[data-obs-status-text]');
+  if (statusText) { statusText.textContent = status.text; statusText.title = status.reason || ''; statusText.hidden = status.tone === 'idle' || (root.dataset.obsView === 'advanced' && status.tone === 'ready'); }
+  const connectionActions = root.querySelector('.lake-obs-connect-actions');
+  if (connectionActions) connectionActions.hidden = root.dataset.obsView === 'advanced' && status.tone === 'ready';
+  const detail = root.querySelector('[data-obs-status-detail]');
+  if (detail) { detail.textContent = status.detail; detail.hidden = status.tone !== 'error' || !status.detail; }
+  const password = root.querySelector('[data-obs-secret]');
+  if (password) password.placeholder = view.has_password ? '••••••••' : t('未设置');
+  for (const node of root.querySelectorAll('[data-action="lake.obs.connect"], [data-action="lake.obs.launch"], [data-action="overlay.obs_add"]')) node.disabled = !!obsBusy;
+  const autoLaunch = root.querySelector('input[name="auto_launch"]');
+  if (autoLaunch) autoLaunch.disabled = view.local === false;
+  rememberLakeObsReached();
+  const desired = lakeObsViewKind();
+  if (root.dataset.obsView !== desired && !obsBusy && !lakeObsDrag) { renderSettings(); return; }
   void refreshObsStatus();
 }
 
@@ -3237,6 +3662,10 @@ async function launchObs() {
 }
 
 async function addOverlayToObs() {
+  if (!await flushAutosaves()) return;
+  const settings = snapshot.overlay?.settings;
+  if (!settings) return;
+  if (!settings.enabled) await command('overlay.save', { settings: { ...settings, enabled: true, style: 'spine', vignette: .6, linger_seconds: 14 } }, { quiet: true });
   const placed = await runObs('overlay', 'obs.overlay.add');
   if (!placed) return;
   const where = `“${placed.scene}” · ${placed.width} × ${placed.height}`;
@@ -3246,6 +3675,498 @@ async function addOverlayToObs() {
 function renderGiftMerge() {
   const merge = snapshot.live_settings?.gift_merge || { enabled: false, initial_seconds: 1.5, increment_seconds: .5, maximum_seconds: 5 };
   return `<form data-form="gift-merge" class="s-card s-merge">${sSwitch('enabled', t('合并连续赠送的礼物'), merge.enabled)}<div class="s-row s-grid3">${field('initial_seconds', t('初始等待（秒）'), merge.initial_seconds, 'type="number" min="0.1" max="30" step="0.1" required')}${field('increment_seconds', t('每次延长（秒）'), merge.increment_seconds, 'type="number" min="0" max="30" step="0.1" required')}${field('maximum_seconds', t('最长等待（秒）'), merge.maximum_seconds, 'type="number" min="0.1" max="60" step="0.1" required')}</div>${autoStatus()}</form>`;
+}
+
+let lakeVoiceEditId = '';
+let lakeVoiceQuery = '';
+let lakeVoiceChoice = '';
+function voiceWaveMarkup(flat = false) {
+  return flat ? '<span class="voice-wave flat" aria-hidden="true"></span>' : `<span class="voice-wave" aria-hidden="true">${[5,12,18,9,15,6].map(h => `<i style="--height:${h}px"></i>`).join('')}</span>`;
+}
+function voiceIsSleeping(preset) {
+  return ['gpt_sovits', 'dots'].includes(preset.provider) && !['ready', 'external'].includes(localServiceState(preset.provider).state);
+}
+function voiceWaterline(name, label, value, min, max, suffix) {
+  const shown = suffix === '×' ? `${Number(value).toFixed(1)}×` : `${Math.round(Number(value) * 100)}`;
+  return `<label class="voice-waterline"><span>${esc(label)}</span><input type="range" name="${name}" min="${min}" max="${max}" step="0.05" value="${Number(value)}" style="--fill:${100 * (Number(value) - min) / (max - min)}%" data-waterline-suffix="${suffix}" aria-label="${esc(label)}"><output>${shown}</output></label>`;
+}
+function renderVoiceAudition(presets, preferred) {
+  if (!preferred) return `<div class="voice-default"><p class="voice-kicker">${esc(t('弹幕默认用'))}</p><h2>${esc(t('还没选择默认声音'))}</h2><p class="quiet-note">${esc(t('在下面选一个声音，设为默认。'))}</p><div id="voice-playback-error" class="inline-error" role="alert" hidden></div></div>`;
+  const playing = snapshot.queue?.current?.origin === 'audition';
+  return `<section class="voice-default" aria-label="${esc(t('默认声音'))}"><p class="voice-kicker">${esc(t('弹幕默认用'))}</p><form data-form="voice-audition" data-provider="${esc(preferred.provider)}"><input type="hidden" name="preset_id" value="${esc(preferred.id)}"><div class="voice-default-head"><div><h2 style="--name-len:${[...presetLabel(preferred)].length}" title="${esc(presetLabel(preferred))}" data-default-voice-name>${esc(presetLabel(preferred))}</h2><p><span data-default-voice-provider>${esc(providerLabel(preferred.provider))}</span> · <i data-default-voice-speed>${Number(preferred.speed ?? 1).toFixed(1)}×</i> ${esc(t('语速'))}</p></div><button type="submit" class="voice-round-preview" aria-label="${esc(t('试听'))}">${icon('play')}</button></div><div class="voice-default-wave${playing ? ' playing' : ''}" aria-hidden="true">${Array.from({length:54},(_,i)=>`<i style="--height:${5 + Math.round(Math.abs(Math.sin(i * .63) * Math.cos(i * .31)) * 29)}px;--delay:${i * -29}ms"></i>`).join('')}</div><textarea id="voice-audition-text" class="voice-sample" name="text" maxlength="2000" rows="2" required aria-label="${esc(t('试听文字'))}">${esc(voiceAuditionDraft.text)}</textarea></form><div id="voice-playback-error" class="inline-error" role="alert" hidden></div></section>`;
+}
+function updateVoiceSettings() {
+  if (settingsTab !== 'voices' || editor) return;
+  let form = settingsDialog.querySelector('[data-form="voice-audition"]');
+  const preferred = snapshot.presets.find(preset => preset.id === snapshot.rules?.default_preset_id);
+  if (!form && preferred) {
+    const placeholder = settingsDialog.querySelector('.voice-default');
+    if (placeholder) placeholder.outerHTML = renderVoiceAudition(snapshot.presets, preferred);
+    form = settingsDialog.querySelector('[data-form="voice-audition"]');
+  }
+  if (form && preferred) {
+    form.elements.preset_id.value = preferred.id;
+    form.dataset.provider = preferred.provider;
+    const name = form.querySelector('[data-default-voice-name]');
+    name.textContent = presetLabel(preferred); name.title = presetLabel(preferred);
+    name.style.setProperty('--name-len', String([...presetLabel(preferred)].length));
+    form.querySelector('[data-default-voice-provider]').textContent = providerLabel(preferred.provider);
+    form.querySelector('[data-default-voice-speed]').textContent = `${Number(preferred.speed ?? 1).toFixed(1)}×`;
+    form.querySelector('.voice-default-wave').classList.toggle('playing', snapshot.queue?.current?.origin === 'audition');
+  }
+  // Editing controls and the sample sentence survive background snapshots.
+  const list = settingsDialog.querySelector('#voice-management');
+  const signature = JSON.stringify([snapshot.presets, snapshot.local_services, getLanguage()]);
+  if (list && !lakeVoiceEditId && list.dataset.signature && list.dataset.signature !== signature) list.innerHTML = renderVoiceManagement(snapshot.presets, preferred, true);
+  if (list) {
+    list.dataset.signature = signature;
+    for (const row of list.querySelectorAll('[data-voice-id]')) {
+      const isDefault = row.dataset.voiceId === preferred?.id;
+      const mark = row.querySelector('.voice-default-mark');
+      if (mark) mark.hidden = !isDefault;
+      const button = row.querySelector('[data-action="voice.default"]');
+      if (button) button.hidden = isDefault;
+      const said = row.querySelector('.voice-edit-default');
+      if (said) said.hidden = !isDefault;
+    }
+  }
+}
+function renderVoiceManagement(presets, preferred, bodyOnly = false) {
+  const rows = presets.map(preset => {
+    const sleeping = voiceIsSleeping(preset);
+    const editing = lakeVoiceEditId === preset.id;
+    const isDefault = preferred?.id === preset.id;
+    return `<div class="lake-voice-row${sleeping ? ' sleeping' : ''}${editing ? ' editing' : ''}${lakeVoiceFlash === preset.id ? ' flash' : ''}" data-voice-id="${esc(preset.id)}"><button type="button" class="voice-row-main" data-action="voice.edit" data-id="${esc(preset.id)}" aria-expanded="${editing}"><span class="voice-initial" data-provider="${esc(preset.provider)}">${sleeping ? voiceWaveMarkup(true) : esc(initial(presetLabel(preset)))}</span><span class="voice-row-name">${esc(presetLabel(preset))}<small>${esc(providerLabel(preset.provider))}</small></span></button><span class="voice-row-actions"><span class="voice-default-mark"${isDefault ? '' : ' hidden'}>${esc(t('默认'))}</span>${iconButton('play', t('试听'), 'voice.preview', preset.id)}</span>${editing ? renderVoiceInlineEdit(preset, isDefault) : ''}</div>`;
+  }).join('');
+  lakeVoiceFlash = '';
+  const body = `<div class="voice-section-heading"><p class="voice-kicker">${esc(t('全部声音'))}<i>${presets.length}</i></p>${iconButton('plus', t('添加声音'), 'voice.add')}</div><div class="lake-voice-list">${rows}</div>`;
+  return bodyOnly ? body : `<section class="voice-all" id="voice-management">${body}</section>`;
+}
+function renderVoicesSettings() {
+  if (['voice-add', 'service', 'qr'].includes(editor?.type)) return renderLakeVoiceAdd();
+  if (editor?.type === 'preset') return renderPresetEditor(editor.id);
+  if (editor?.type === 'binding') return renderBindingEditor(editor.id);
+  const presets = snapshot.presets || [];
+  const preferred = presets.find(item => item.id === snapshot.rules?.default_preset_id);
+  if (!presets.length) return `<div class="lake-voices-page"><section class="voice-empty"><span class="voice-empty-line" aria-hidden="true"></span><h2>${esc(t('还没有声音'))}</h2><p>${esc(t('挑一个你喜欢的声音，让弹幕有声音。'))}</p>${button(t('添加声音'), 'voice.add', { class: 'primary' })}</section><p class="voice-page-foot">${esc(t('不读弹幕也能照常显示。'))}</p></div>`;
+  return `<div class="lake-voices-page">${renderVoiceAudition(presets, preferred)}${renderVoiceManagement(presets, preferred)}</div>`;
+}
+function lakeVoiceCatalog(provider) {
+  const connection = serviceConnection(provider);
+  if (provider === 'doubao') return (snapshot.doubao_voices || []).map(voice => ({key:voice.id || voice.voice_id || voice.value,name:voice.name || voice.label,provider,connectionId:connection?.id}));
+  if (provider === 'gpt_sovits') return (modelScan.pairs || []).map((pair,index) => ({key:String(index),name:pair.name,provider,connectionId:connection?.id,pair}));
+  if (provider === 'dots') return referenceProfiles.filter(entry => entry.profile?.role?.kind === 'dots').map(entry => ({key:entry.profile.role.role,name:entry.profile.role.role,provider,connectionId:connection?.id}));
+  return (snapshot.presets || []).filter(preset => preset.provider === provider).map(preset => ({key:preset.voice_id,name:presetLabel(preset),provider,connectionId:connection?.id,preset}));
+}
+function lakeCatalogAdded(item) {
+  return (snapshot.presets || []).find(preset => preset.provider === item.provider && preset.connection_id === item.connectionId && (item.pair ? preset.sovits?.gpt_weights_path === item.pair.gpt_path && preset.sovits?.sovits_weights_path === item.pair.sovits_path : preset.voice_id === item.key));
+}
+// ---------- Voices: one add page with the four services as tabs ----------
+// A service that is not connected yet is connected in place, and adding continues
+// on the same page; nothing sends the streamer back to a list to start over.
+const voiceProviders = ['doubao', 'fish_audio', 'gpt_sovits', 'dots'];
+let lakeVoiceTab = '';
+let lakeVoiceDraft = {};
+let lakeVoiceFlash = '';
+let lakeFishLookupTimer = null;
+let lakeFishLookupRevision = 0;
+let lakeReferenceLoad = 0;
+
+function lakeProviderConfigured(provider) {
+  const connection = serviceConnection(provider);
+  if (!connection) return false;
+  if (provider === 'doubao' || provider === 'fish_audio') return !!connection.has_credential;
+  const service = localServiceState(provider, connection);
+  return !!service.directory || (!!service.state && !['unconfigured', 'unknown'].includes(service.state));
+}
+
+function lakeProviderRunning(provider) {
+  return !['gpt_sovits', 'dots'].includes(provider) || ['ready', 'external'].includes(localServiceState(provider).state);
+}
+
+function defaultVoiceTab() {
+  if (voiceProviders.includes(lakeVoiceTab)) return lakeVoiceTab;
+  const preferred = (snapshot.presets || []).find(item => item.id === snapshot.rules?.default_preset_id);
+  if (preferred && voiceProviders.includes(preferred.provider)) return preferred.provider;
+  return voiceProviders.find(lakeProviderConfigured) || 'doubao';
+}
+
+function renderVoiceProviderTabs(current) {
+  const dot = provider => !lakeProviderConfigured(provider) ? '' : `<i class="voice-tab-dot${lakeProviderRunning(provider) ? '' : ' off'}" aria-hidden="true"></i>`;
+  return `<nav class="voice-provider-tabs" role="tablist" aria-label="${esc(t('声音服务'))}">${voiceProviders.map(provider => `<button type="button" role="tab" aria-selected="${provider === current}" data-action="voice.provider" data-id="${provider}">${esc(providerLabel(provider))}${dot(provider)}</button>`).join('')}</nav>`;
+}
+
+function renderLakeVoiceAdd() {
+  const provider = voiceProviders.includes(editor?.provider) ? editor.provider : defaultVoiceTab();
+  lakeVoiceTab = provider;
+  const connection = serviceConnection(provider);
+  const connecting = editor?.type === 'qr' || editor?.type === 'service' || !lakeProviderConfigured(provider);
+  const body = connecting ? renderVoiceConnect(provider, connection)
+    : provider === 'doubao' ? renderVoiceAddDoubao(connection)
+      : provider === 'fish_audio' ? renderVoiceAddFish()
+        : provider === 'gpt_sovits' ? renderVoiceAddSovits(connection)
+          : renderVoiceAddDots();
+  return `<div class="lake-voices-page voice-add-page" data-provider="${provider}">${renderVoiceProviderTabs(provider)}${body}</div>`;
+}
+
+function renderVoiceAddHead(title, provider) {
+  return `<header class="voice-add-head"><h2>${esc(title)}</h2>${button(t('连接设置'), 'service.configure', { id: provider, class: 'quiet' })}</header>`;
+}
+
+function renderReferenceFile(path, id) {
+  const name = path ? String(path).split(/[\\/]/).at(-1) : '';
+  return `<button type="button" class="voice-file-row${name ? ' chosen' : ''}" data-action="voice.reference.pick" data-id="${esc(id)}" title="${esc(path || '')}">${voiceWaveMarkup(!name)}<span class="voice-file-text"><small>${esc(t('参考音频'))}</small><span>${esc(name || t('选一段参考音频'))}</span></span><span class="voice-file-action">${esc(t(name ? '更换' : '选择'))}</span></button>`;
+}
+
+function renderVoiceNameField(value) {
+  return `<label class="voice-field"><small>${esc(t('名字'))}</small><input data-voice-draft="name" value="${esc(value)}" maxlength="100" spellcheck="false"></label>`;
+}
+
+// Doubao: listening is a click on the row, adding is the word on its right.
+function renderVoiceAddDoubao(connection) {
+  const catalog = lakeVoiceCatalog('doubao');
+  const query = lakeVoiceQuery.toLocaleLowerCase();
+  const rows = catalog.map(item => {
+    const added = lakeCatalogAdded(item);
+    const hidden = query && !`${item.name || ''} ${item.key}`.toLocaleLowerCase().includes(query);
+    return `<div class="voice-catalog-row${added ? ' added' : ''}"${hidden ? ' hidden' : ''}><button type="button" class="voice-catalog-pick" data-action="voice.catalog.preview" data-id="${esc(item.key)}" title="${esc(t('试听'))}">${voiceWaveMarkup()}<span>${esc(item.name || item.key)}</span></button>${added ? `<small>${esc(t('已添加'))}</small>` : button(t('添加'), 'voice.catalog.add', { id: item.key })}</div>`;
+  }).join('');
+  const search = catalog.length > 8 ? `<label class="voice-search">${icon('search')}<input type="search" data-voice-search value="${esc(lakeVoiceQuery)}" placeholder="${esc(t('搜索声音'))}" aria-label="${esc(t('搜索声音'))}"></label>` : '';
+  return `<section class="voice-add">${renderVoiceAddHead(t('挑一个声音'), 'doubao')}${search}<div class="voice-catalog-list">${rows || `<div class="voice-add-empty">${voiceWaveMarkup(true)}<p>${esc(t('豆包还没有返回可用的声音，稍后再试。'))}</p></div>`}</div></section>`;
+}
+
+// Fish Audio has no browsable list here: a voice page link is pasted, its name is
+// looked up as soon as it looks complete, and it can be heard before adding.
+function renderVoiceAddFish() {
+  return `<section class="voice-add">${renderVoiceAddHead(t('收藏一个 Fish 声音'), 'fish_audio')}<p class="voice-add-lead">${esc(t('在 Fish Audio 找到喜欢的声音，把页面链接贴到这里。'))} ${button(t('去找声音'), 'fish.open_discovery', { class: 'quiet', icon: 'external' })}</p><label class="voice-field"><small>${esc(t('声音链接或 ID'))}</small><input data-voice-draft="fish" value="${esc(lakeVoiceDraft.fish || '')}" placeholder="https://fish.audio/m/…" autocomplete="off" spellcheck="false"></label><div class="voice-fish-result" data-fish-result>${renderFishResult()}</div></section>`;
+}
+
+function renderFishResult() {
+  const draft = lakeVoiceDraft;
+  if (draft.fishState === 'looking') return `<p class="voice-status waking"><i aria-hidden="true"></i>${esc(t('正在查找…'))}</p>`;
+  if (draft.fishState === 'error') return `<p class="voice-status error">${esc(draft.fishError || '')}</p>`;
+  if (!draft.fishFound) return '';
+  return `<div class="voice-found">${voiceWaveMarkup()}<span>${esc(draft.fishFound.name)}</span>${iconButton('play', t('试听'), 'voice.fish.preview')}</div>${renderVoiceNameField(draft.name ?? draft.fishFound.name)}<div class="voice-add-actions">${button(t('添加'), 'voice.fish.add', { class: 'primary' })}</div>`;
+}
+
+// GPT-SoVITS: pick a model, then the reference audio right under it.
+function renderVoiceAddSovits(connection) {
+  const pairs = modelScan.pairs || [];
+  const rows = pairs.map((pair, index) => {
+    const item = { provider: 'gpt_sovits', connectionId: connection?.id, pair, key: String(index) };
+    const added = lakeCatalogAdded(item);
+    const chosen = !added && lakeVoiceChoice === String(index);
+    return `<div class="voice-catalog-row${chosen ? ' selected' : ''}${added ? ' added' : ''}"><button type="button" class="voice-catalog-pick" data-action="${added ? 'voice.added.edit' : 'voice.catalog.pick'}" data-id="${added ? esc(added.id) : index}" aria-expanded="${chosen}">${voiceWaveMarkup()}<span>${esc(pair.name)}<small>${esc(pair.version || '')}</small></span></button>${added ? `<small>${esc(t('已添加'))}</small>` : ''}${chosen ? renderSovitsDraft(pair) : ''}</div>`;
+  }).join('');
+  const empty = modelScan.error
+    ? `<p class="voice-status error">${esc(modelScan.error)}</p>`
+    : `<div class="voice-add-empty">${voiceWaveMarkup(true)}<p>${esc(t('安装目录里还没找到成对的模型。'))}</p></div>`;
+  return `<section class="voice-add"><header class="voice-add-head"><h2>${esc(t('选一个角色模型'))}</h2>${button(t('重新查找'), 'voice.models.refresh', { class: 'quiet', icon: 'refresh' })}</header><div class="voice-catalog-list">${rows || empty}</div><footer class="voice-add-foot">${button(t('连接设置'), 'service.configure', { id: 'gpt_sovits', class: 'quiet' })}</footer></section>`;
+}
+
+function sovitsDraftReady() {
+  const draft = lakeVoiceDraft;
+  return !!draft.audio_path && (draft.text_free || !!String(draft.reference_text || '').trim()) && !!String(draft.name || '').trim();
+}
+
+function renderSovitsDraft(pair) {
+  const draft = lakeVoiceDraft;
+  return `<div class="voice-draft">${renderReferenceFile(draft.audio_path, '')}<label class="voice-field"><small>${esc(t('参考文本'))}</small><input data-voice-draft="reference_text" value="${esc(draft.reference_text || '')}" placeholder="${esc(t('参考音频里说的话'))}" maxlength="8192"${draft.text_free ? ' disabled' : ''}></label><label class="voice-check"><input type="checkbox" data-voice-draft="text_free"${draft.text_free ? ' checked' : ''}><span>${esc(t('不用参考文本'))}</span></label>${renderVoiceNameField(draft.name ?? pair.name)}<div class="voice-add-actions">${button(t('添加'), 'voice.sovits.add', { class: 'primary', disabled: !sovitsDraftReady() })}</div></div>`;
+}
+
+// dots.tts: one recording makes a voice.
+function dotsDraftReady() { return !!lakeVoiceDraft.audio_path && !!String(lakeVoiceDraft.name || '').trim(); }
+function renderVoiceAddDots() {
+  const draft = lakeVoiceDraft;
+  return `<section class="voice-add">${renderVoiceAddHead(t('用一段录音做一个声音'), 'dots')}<p class="voice-add-lead">${esc(t('选一段几秒钟、只有一个人说话的录音。'))}</p><div class="voice-draft">${renderReferenceFile(draft.audio_path, '')}<label class="voice-field"><small>${esc(t('参考文本（可选）'))}</small><input data-voice-draft="reference_text" value="${esc(draft.reference_text || '')}" placeholder="${esc(t('录音里说的话'))}" maxlength="8192"></label>${renderVoiceNameField(draft.name || '')}<div class="voice-add-actions">${button(t('添加'), 'voice.dots.add', { class: 'primary', disabled: !dotsDraftReady() })}</div></div></section>`;
+}
+
+function renderVoiceConnect(provider, connection) {
+  if (provider === 'doubao') {
+    const scanning = editor?.type === 'qr';
+    return `<section class="voice-connect"><h2>${esc(t('连接豆包'))}</h2><p class="voice-add-lead">${esc(t('用豆包 App 扫码，在手机上确认登录。'))}</p>${scanning ? `${qrMarkup('doubao', true)}<p class="lake-note"><button type="button" class="text-button" data-action="qr.retry">${esc(t('换一张'))}</button></p>` : `<div class="voice-add-actions">${button(t('扫码连接'), 'voice.doubao.connect', { id: connection?.id || '', class: 'primary' })}</div>`}<p class="voice-note">${esc(t('登录只存在这台电脑上，不会跟着备份导出。'))}</p></section>`;
+  }
+  if (provider === 'fish_audio') {
+    return `<section class="voice-connect"><h2>${esc(t('连接 Fish Audio'))}</h2><p class="voice-add-lead">${esc(t('在 Fish Audio 新建一个 API 密钥，复制到这里。'))} ${button(t('打开密钥页面'), 'fish.open_keys', { class: 'quiet', icon: 'external' })}</p><form data-form="service-fish">${field('credential', t('API 密钥'), '', 'type="password" required autocomplete="off" spellcheck="false"')}<p class="voice-note">${esc(t('只存在这台电脑上，不会被导出。'))}</p><div class="voice-add-actions">${saveButton(t('连接'))}</div></form></section>`;
+  }
+  // A local service needs its install folder; connecting starts it and lists its voices.
+  const service = localServiceState(provider, connection);
+  const directory = service.directory || '';
+  const starting = service.state === 'starting';
+  const failed = service.state === 'failed' && service.message;
+  return `<section class="voice-connect"><h2>${esc(t('连接'))} ${esc(providerLabel(provider))}</h2><p class="voice-add-lead">${esc(t('选一下它在这台电脑上的安装目录。'))}</p><form data-form="service-local" data-provider="${provider}">${pathField('directory', t('安装目录'), directory, 'service.pick_directory', t('选择安装目录'))}${autoStatus()}</form><div class="voice-add-actions">${button(t(starting ? '正在启动…' : '连接'), 'voice.local.connect', { id: provider, class: 'primary', disabled: !directory || starting })}</div>${failed ? `<p class="voice-status error" data-service-message>${esc(service.message)}</p>` : ''}</section>`;
+}
+
+// Inline edit: what matters first (the name, and for local voices the reference
+// recording), then speed and volume as quiet waterlines, then two word actions.
+function renderVoiceReference(preset) {
+  const role = referenceRole(preset.provider, preset, null);
+  const profile = currentReference(role)?.profile || {};
+  const text = profile.text_free ? '' : profile.reference_text ?? preset.sovits?.reference_text ?? '';
+  return `<div class="voice-reference" data-reference-preset="${esc(preset.id)}">${renderReferenceFile(profile.audio_path || '', preset.id)}${preset.provider === 'gpt_sovits' ? `<label class="voice-field"><small>${esc(t('参考文本'))}</small><input data-reference-text value="${esc(text)}" placeholder="${esc(profile.text_free ? t('不用参考文本') : t('参考音频里说的话'))}" maxlength="8192" spellcheck="false"></label>` : ''}</div>`;
+}
+
+function renderVoiceInlineEdit(preset, isDefault) {
+  const local = ['gpt_sovits', 'dots'].includes(preset.provider);
+  return `<form data-form="lake-voice-edit" data-id="${esc(preset.id)}" class="voice-inline-edit"><label class="voice-field"><small>${esc(t('名字'))}</small><input name="name" value="${esc(presetLabel(preset))}" required maxlength="100" spellcheck="false"></label>${local ? renderVoiceReference(preset) : ''}<div class="voice-tuning">${voiceWaterline('speed', t('语速'), preset.speed ?? 1, .5, 2, '×')}${voiceWaterline('volume', t('音量'), preset.volume ?? 1, 0, 2, '')}</div>${autoStatus()}<div class="voice-edit-actions"><span class="voice-edit-default"${isDefault ? '' : ' hidden'}>${esc(t('这是默认声音'))}</span><button type="button" class="button" data-action="voice.default" data-id="${esc(preset.id)}"${isDefault ? ' hidden' : ''}>${esc(t('设为默认'))}</button>${button(t('删除这个声音'), 'voice.remove', { id: preset.id, class: 'danger' })}</div></form>`;
+}
+
+async function loadReferenceProfiles(connectionId) {
+  const load = ++lakeReferenceLoad;
+  const listed = await command('references.list', { connection_id: connectionId }, { quiet: true, silent: true });
+  if (load !== lakeReferenceLoad) return false;
+  referenceProfiles = Array.isArray(listed.result) ? listed.result : [];
+  return true;
+}
+
+// The file name of a GPT-SoVITS reference usually is its transcript ("角色_今天也要加油哦.wav").
+function referenceTextFromFile(path) {
+  const stem = String(path).split(/[\\/]/).at(-1).replace(/\.[^.]+$/, '');
+  const text = stem.includes('_') ? stem.slice(stem.lastIndexOf('_') + 1) : stem;
+  return /[㐀-鿿]/u.test(text) ? text.trim() : '';
+}
+
+async function pickReferenceAudio() {
+  const pick = window.__TAURI__?.dialog?.open;
+  if (!pick) throw new Error(t('文件选择器不可用，请重新打开应用。'));
+  const path = await pick({ multiple: false, title: t('选择参考音频'), filters: [{ name: t('音频'), extensions: ['wav', 'mp3', 'flac', 'ogg', 'm4a'] }] });
+  return typeof path === 'string' ? path : '';
+}
+
+async function saveVoiceReference(preset, changes) {
+  const role = referenceRole(preset.provider, preset, null);
+  if (!role) throw new Error(t('找不到这个声音的模型，请重新添加。'));
+  const current = currentReference(role)?.profile || {};
+  const profile = { connection_id: preset.connection_id, role, audio_path: current.audio_path || '', reference_text: current.reference_text || '', reference_language: current.reference_language || (preset.provider === 'gpt_sovits' ? 'auto' : ''), text_language: current.text_language || (preset.provider === 'gpt_sovits' ? 'auto' : ''), text_free: preset.provider === 'gpt_sovits' && !!current.text_free, ...changes };
+  if (!profile.audio_path) throw new Error(t('请先选择参考音频。'));
+  if (preset.provider === 'dots') await command('dots.voice.save', { preset, profile, make_preferred: false }, { quiet: true, silent: true });
+  else await command('references.save', { profile }, { quiet: true, silent: true });
+  await loadReferenceProfiles(preset.connection_id);
+}
+
+function refreshVoiceDraftState() {
+  const sovits = settingsDialog.querySelector('[data-action="voice.sovits.add"]');
+  if (sovits) sovits.disabled = !sovitsDraftReady();
+  const dots = settingsDialog.querySelector('[data-action="voice.dots.add"]');
+  if (dots) dots.disabled = !dotsDraftReady();
+  const text = settingsDialog.querySelector('.voice-draft [data-voice-draft="reference_text"]');
+  if (text && editor?.provider === 'gpt_sovits') text.disabled = !!lakeVoiceDraft.text_free;
+}
+
+function scheduleFishLookup() {
+  clearTimeout(lakeFishLookupTimer);
+  const value = String(lakeVoiceDraft.fish || '').trim();
+  const revision = ++lakeFishLookupRevision;
+  const result = () => settingsDialog.querySelector('[data-fish-result]');
+  if (!/fish\.audio\/|^[0-9a-f]{32}$/i.test(value)) {
+    lakeVoiceDraft.fishState = ''; lakeVoiceDraft.fishFound = null;
+    const node = result(); if (node) node.innerHTML = '';
+    return;
+  }
+  lakeFishLookupTimer = setTimeout(async () => {
+    lakeVoiceDraft.fishState = 'looking'; lakeVoiceDraft.fishFound = null;
+    const node = result(); if (node) node.innerHTML = renderFishResult();
+    try {
+      const found = await command('fish.voice.lookup', { connection_id: serviceConnection('fish_audio')?.id, id_or_url: value }, { quiet: true, silent: true });
+      if (revision !== lakeFishLookupRevision) return;
+      const name = String(found.result?.name || '').slice(0, 100).trim();
+      lakeVoiceDraft.fishFound = { voice_id: found.result?.voice_id || value, name: name || t('Fish 声音') };
+      lakeVoiceDraft.name = lakeVoiceDraft.fishFound.name;
+      lakeVoiceDraft.fishState = '';
+    } catch (error) {
+      if (revision !== lakeFishLookupRevision) return;
+      lakeVoiceDraft.fishState = 'error'; lakeVoiceDraft.fishError = errorMessage(error);
+    }
+    const next = result(); if (next) next.innerHTML = renderFishResult();
+  }, 450);
+}
+
+async function finishVoiceAdd(id, name) {
+  lakeVoiceDraft = {}; lakeVoiceChoice = ''; lakeVoiceFlash = id || '';
+  editor = null; lakeVoiceEditId = '';
+  renderSettings();
+  showToast(ui`已添加「${name}」`);
+}
+async function selectLakeVoiceProvider(provider) {
+  if (!await allowLeaveSettings()) return;
+  if (qrProvider) await cancelQr();
+  const connection = serviceConnection(provider);
+  lakeVoiceQuery = ''; lakeVoiceChoice = ''; lakeVoiceDraft = {}; lakeVoiceTab = provider;
+  editor = { type: 'voice-add', provider, connectionId: connection?.id };
+  if (['gpt_sovits', 'dots'].includes(provider) && lakeProviderConfigured(provider)) {
+    referenceProfiles = []; modelScan = { pairs: [], issues: [] }; renderSettings();
+    if (!await loadVoiceEditorData(connection.id)) return;
+  }
+  renderSettings();
+}
+
+async function handleLakeVoiceAction(action, id, target) {
+  if (action === 'voice.add' || action === 'preset.new') {
+    if (!await allowLeaveSettings()) return true;
+    lakeVoiceEditId = '';
+    await selectLakeVoiceProvider(defaultVoiceTab());
+    return true;
+  }
+  if (action === 'voice.provider') { await selectLakeVoiceProvider(id); return true; }
+  if (action === 'voice.edit' || action === 'preset.edit' || action === 'voice.added.edit') {
+    if (!await flushAutosaves()) return true;
+    const preset = snapshot.presets.find(item => item.id === id);
+    const opening = action === 'voice.added.edit' || lakeVoiceEditId !== id;
+    editor = null; lakeVoiceEditId = opening ? id : '';
+    if (opening && preset && ['gpt_sovits', 'dots'].includes(preset.provider)) {
+      try { await loadReferenceProfiles(preset.connection_id); } catch { /* The row still opens; the recording shows as not chosen. */ }
+    }
+    renderSettings();
+    if (opening) settingsDialog.querySelector(`[data-voice-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
+    return true;
+  }
+  if (action === 'voice.reference.edit') {
+    if (!await allowLeaveSettings()) return true;
+    const preset = snapshot.presets.find(item => item.id === id); if (!preset) return true;
+    editor = { type: 'preset', id, connectionId: preset.connection_id };
+    if (!await loadVoiceEditorData(preset.connection_id)) return true;
+    renderSettings(); return true;
+  }
+  if (action === 'voice.preview') { if (!await flushAutosaves()) return true; if (!snapshot.presets.some(p => p.id === id)) return true; await command('audition', { preset_id: id, text: voiceAuditionDraft.text }, { success: t('试听已加入播放队列') }); return true; }
+  if (action === 'voice.default') { if (!await flushAutosaves()) return true; await command('presets.default', { id }); updateVoiceSettings(); return true; }
+  if (action === 'voice.remove') {
+    if (!await flushAutosaves()) return true;
+    if (!await confirmAction(t('删除这个声音？'), t('观众绑定和播报规则仍在使用时，需要先解除引用。'), t('删除'))) return true;
+    await command('presets.remove', { id, confirmed: true }); lakeVoiceEditId = ''; renderSettings(); return true;
+  }
+  if (action === 'voice.catalog.pick') {
+    const pair = (modelScan.pairs || [])[Number(id)];
+    if (lakeVoiceChoice === id) { lakeVoiceChoice = ''; renderSettings(); return true; }
+    lakeVoiceChoice = id;
+    // A model that already has a remembered recording starts from it.
+    const saved = pair ? currentReference(referenceRole('gpt_sovits', {}, pair))?.profile : null;
+    lakeVoiceDraft = { name: pair?.name || '', audio_path: saved?.audio_path || '', reference_text: saved?.reference_text || '', text_free: !!saved?.text_free };
+    renderSettings(); return true;
+  }
+  if (action === 'voice.catalog.add' || action === 'voice.catalog.preview') {
+    const item = lakeVoiceCatalog(editor?.provider).find(entry => entry.key === id); if (!item) return true;
+    const added = lakeCatalogAdded(item);
+    if (action.endsWith('.preview')) {
+      if (added) await command('audition', { preset_id: added.id, text: voiceAuditionDraft.text });
+      else await command('audition.catalog', { connection_id: item.connectionId, voice_id: item.key, text: voiceAuditionDraft.text });
+      return true;
+    }
+    if (added) return true;
+    const saved = await command('presets.save', { preset: { id: '', name: item.name, connection_id: item.connectionId, provider: item.provider, voice_id: item.key, speed: 1, volume: 1, sovits: null } });
+    // Several Doubao voices are often added in a row, so the list stays open.
+    renderSettings();
+    showToast(ui`已添加「${item.name}」`);
+    return true;
+  }
+  if (action === 'voice.models.refresh') {
+    const connection = serviceConnection('gpt_sovits');
+    if (connection && await loadVoiceEditorData(connection.id)) renderSettings();
+    return true;
+  }
+  if (action === 'voice.reference.pick') {
+    const path = await pickReferenceAudio(); if (!path) return true;
+    if (id) {
+      const preset = snapshot.presets.find(item => item.id === id); if (!preset) return true;
+      const changes = { audio_path: path };
+      const text = settingsDialog.querySelector(`[data-reference-preset="${CSS.escape(id)}"] [data-reference-text]`)?.value.trim();
+      if (preset.provider === 'gpt_sovits') {
+        const guess = text || referenceTextFromFile(path);
+        if (guess) { changes.reference_text = guess; changes.text_free = false; }
+      }
+      await saveVoiceReference(preset, changes);
+      renderSettings();
+      showToast(t('参考音频已更换'));
+      return true;
+    }
+    lakeVoiceDraft.audio_path = path;
+    if (!String(lakeVoiceDraft.reference_text || '').trim()) lakeVoiceDraft.reference_text = referenceTextFromFile(path);
+    if (editor?.provider === 'dots' && !String(lakeVoiceDraft.name || '').trim()) lakeVoiceDraft.name = String(path).split(/[\\/]/).at(-1).replace(/\.[^.]+$/, '').slice(0, 100);
+    renderSettings(); return true;
+  }
+  if (action === 'voice.sovits.add') {
+    const pair = (modelScan.pairs || [])[Number(lakeVoiceChoice)];
+    const connection = serviceConnection('gpt_sovits');
+    if (!pair || !connection || !sovitsDraftReady()) return true;
+    const draft = lakeVoiceDraft;
+    const name = String(draft.name).trim();
+    const reference_text = draft.text_free ? '' : String(draft.reference_text || '').trim();
+    const saved = await command('presets.save', { preset: { id: '', name, connection_id: connection.id, provider: 'gpt_sovits', voice_id: pair.name, speed: 1, volume: 1, sovits: { model_selection: 'per_request_atomic', gpt_weights_path: pair.gpt_path, sovits_weights_path: pair.sovits_path, reference_text, reference_text_free: !!draft.text_free } } }, { quiet: true, silent: true });
+    await command('references.save', { profile: { connection_id: connection.id, role: { kind: 'gpt_sovits', gpt_weights_path: pair.gpt_path, sovits_weights_path: pair.sovits_path }, audio_path: draft.audio_path, reference_text, reference_language: 'auto', text_language: 'auto', text_free: !!draft.text_free } }, { quiet: true, silent: true });
+    await finishVoiceAdd(saved?.result?.id, name);
+    return true;
+  }
+  if (action === 'voice.fish.preview') {
+    const found = lakeVoiceDraft.fishFound; const connection = serviceConnection('fish_audio');
+    if (found && connection) await command('audition.catalog', { connection_id: connection.id, voice_id: found.voice_id, text: voiceAuditionDraft.text });
+    return true;
+  }
+  if (action === 'voice.fish.add') {
+    const found = lakeVoiceDraft.fishFound; const connection = serviceConnection('fish_audio');
+    if (!found || !connection) return true;
+    const name = String(lakeVoiceDraft.name || found.name).trim().slice(0, 100) || found.name;
+    const saved = await command('fish.voice.save', { connection_id: connection.id, id_or_url: lakeVoiceDraft.fish.trim(), name }, { quiet: true, silent: true });
+    await finishVoiceAdd(saved?.result?.id, name);
+    return true;
+  }
+  if (action === 'voice.dots.add') {
+    const connection = serviceConnection('dots');
+    if (!connection || !dotsDraftReady()) return true;
+    const draft = lakeVoiceDraft;
+    const name = String(draft.name).trim();
+    const voiceId = `dots-${crypto.randomUUID()}`;
+    const preset = { id: '', name, connection_id: connection.id, provider: 'dots', voice_id: voiceId, speed: 1, volume: 1, sovits: null };
+    const profile = { connection_id: connection.id, role: { kind: 'dots', role: voiceId }, audio_path: draft.audio_path, reference_text: String(draft.reference_text || '').trim(), reference_language: '', text_language: '', text_free: false };
+    const saved = await command('dots.voice.save', { preset, profile, make_preferred: false }, { quiet: true, silent: true });
+    await finishVoiceAdd(saved?.result?.id, name);
+    return true;
+  }
+  if (action === 'voice.doubao.connect') {
+    editor = { type: 'qr', provider: 'doubao', id: id || '', returnTo: 'voice-add' };
+    renderSettings(); await startQr('doubao', id || undefined); return true;
+  }
+  if (action === 'voice.local.connect') {
+    if (!await flushAutosaves()) return true;
+    await command('local_services.start', { provider: id, connection_id: serviceConnection(id)?.id });
+    await selectLakeVoiceProvider(id); return true;
+  }
+  return false;
+}
+
+function installLakeVoiceEvents() {
+  autoFormTypes.add('lake-voice-edit');
+  document.addEventListener('input', event => {
+    const input = event.target;
+    if (input.matches('[data-waterline-suffix]')) {
+      input.style.setProperty('--fill', `${100 * (Number(input.value) - Number(input.min)) / (Number(input.max) - Number(input.min))}%`);
+      input.parentElement.querySelector('output').textContent = input.dataset.waterlineSuffix === '×' ? `${Number(input.value).toFixed(1)}×` : String(Math.round(Number(input.value) * 100));
+    }
+    if (input.matches('[data-voice-search]')) {
+      lakeVoiceQuery = input.value;
+      const query = lakeVoiceQuery.toLocaleLowerCase();
+      const catalog = lakeVoiceCatalog(editor?.provider);
+      for (const row of settingsDialog.querySelectorAll('.voice-catalog-row')) {
+        const key = row.querySelector('.voice-catalog-pick')?.dataset.id;
+        const item = catalog.find(entry => entry.key === key);
+        row.hidden = !!query && !`${item?.name || ''} ${key}`.toLocaleLowerCase().includes(query);
+      }
+    }
+    if (input.matches('[data-voice-draft]')) {
+      const key = input.dataset.voiceDraft;
+      lakeVoiceDraft[key] = input.type === 'checkbox' ? input.checked : input.value;
+      if (key === 'fish') scheduleFishLookup();
+      refreshVoiceDraftState();
+    }
+  });
+  settingsDialog.addEventListener('change', event => {
+    const input = event.target;
+    if (!input.matches('[data-reference-text]')) return;
+    const preset = snapshot.presets.find(item => item.id === input.closest('[data-reference-preset]')?.dataset.referencePreset);
+    if (!preset) return;
+    const reference_text = input.value.trim();
+    void saveVoiceReference(preset, { reference_text, text_free: !reference_text && !!currentReference(referenceRole(preset.provider, preset, null))?.profile?.text_free })
+      .then(() => showToast(t('参考文本已保存')))
+      .catch(error => showToast(errorMessage(error), true));
+  });
 }
 
 function renderVoiceChoices(presets, preferred) {
@@ -3268,40 +4189,7 @@ function renderVoiceChoices(presets, preferred) {
   return { provider, html: ui`<div class="s-chips" role="radiogroup" aria-label="直播首选音色">${chips}<button type="button" class="s-chip s-chip-add" data-action="voice-audition.add">${icon('plus')}添加音色</button></div>${setup}`, selected };
 }
 
-function renderVoiceAudition(presets, preferred) {
-  const choices = renderVoiceChoices(presets, preferred);
-  return ui`<section class="s-hero voice-audition" aria-labelledby="voice-audition-title"><span class="s-hero-glow" aria-hidden="true"></span><span class="s-label" id="voice-audition-title">直播首选</span><div class="s-tiles service-grid" role="group" aria-label="默认语音服务">${serviceProviders.map(item => renderServiceCard(item, preferred)).join('')}</div><form data-form="voice-audition" data-provider="${esc(choices.provider)}"><div data-voice-choices>${choices.html}</div><div class="s-audition"><textarea id="voice-audition-text" name="text" aria-label="试听文字" maxlength="2000" rows="2" required placeholder="输入想试听的文字">${esc(voiceAuditionDraft.text)}</textarea><button type="submit" class="button primary"${choices.selected ? '' : ' disabled'}>${icon('play')}试听</button></div></form><div id="voice-playback-error" class="inline-error" role="alert" hidden></div></section>`;
-}
 
-function updateVoiceSettings() {
-  if (settingsTab !== 'voices' || editor) return;
-  const form = settingsDialog.querySelector('[data-form="voice-audition"]');
-  const choices = form?.querySelector('[data-voice-choices]');
-  if (!choices) return;
-  const presets = snapshot.presets || [];
-  const preferred = presets.find(preset => preset.id === snapshot.rules?.default_preset_id);
-  const next = renderVoiceChoices(presets, preferred);
-  // Retain the form, text field, focus, selection and independent autosaves.
-  // Only the available voices change when switching providers.
-  const signature = JSON.stringify([next.provider, presets, serviceConnection(next.provider), getLanguage()]);
-  if (form.dataset.provider !== next.provider || (choices.dataset.signature && choices.dataset.signature !== signature)) {
-    choices.innerHTML = next.html;
-  }
-  choices.dataset.signature = signature;
-  form.dataset.provider = next.provider;
-  form.elements.preset_id.value = next.selected?.id || '';
-  const audition = form.querySelector('[type="submit"]');
-  if (audition) audition.disabled = !next.selected;
-  const list = settingsDialog.querySelector('#voice-management');
-  const listSignature = JSON.stringify([next.provider, preferred?.id, presets, getLanguage()]);
-  if (list && list.dataset.signature !== listSignature) {
-    const open = list.querySelector('details')?.open;
-    // The management section has no forms; keep its surrounding page intact.
-    list.innerHTML = renderVoiceManagement(presets, preferred, true);
-    if (open && list.querySelector('details')) list.querySelector('details').open = true;
-    list.dataset.signature = listSignature;
-  }
-}
 
 function updateVoiceAudition(form) {
   const provider = form.dataset.provider;
@@ -3310,6 +4198,7 @@ function updateVoiceAudition(form) {
   voice.disabled = !voices.length;
   voiceAuditionDraft.provider = provider;
   voiceAuditionDraft.presetId = voice.value;
+  if (voiceAuditionDraft.text !== form.elements.text.value) voiceAuditionDraft.customText = true;
   voiceAuditionDraft.text = form.elements.text.value;
   const selected = voices.find(preset => preset.id === voice.value);
   const audition = form.querySelector('[type="submit"]');
@@ -3377,47 +4266,7 @@ async function flushExitEdits() {
   return true;
 }
 
-function renderVoiceManagement(presets, preferred, bodyOnly = false) {
-  const selectedProvider = preferred?.provider || voiceAuditionDraft.provider || presets[0]?.provider || 'doubao';
-  const managedPresets = presets.filter(preset => preset.provider === selectedProvider);
-  const presetRow = preset => ui`<div class="s-row"><span class="s-text"><span>${esc(presetLabel(preset))}${preferred?.id === preset.id ? t('<span class="s-tag">正在使用</span>') : ''}</span><small>${esc(providerLabel(preset.provider))} · ${esc(displayNumber(preset.speed))} 倍速</small></span><span class="s-row-actions">${iconButton('edit', ui`编辑 ${presetLabel(preset)}`, 'preset.edit', preset.id)}${iconButton('trash', ui`删除 ${presetLabel(preset)}`, 'preset.delete', preset.id)}</span></div>`;
-  const otherPresets = presets.filter(preset => preset.provider !== selectedProvider);
-  const otherVoices = otherPresets.length ? ui`<details class="s-details"><summary>其他服务的音色 · ${otherPresets.length}</summary><div class="s-card">${otherPresets.map(presetRow).join('')}</div></details>` : '';
-  const body = `<div class="s-card">${managedPresets.length ? managedPresets.map(presetRow).join('') : `<div class="s-row s-empty-row">${esc(t('还没有音色。'))}</div>`}</div>${otherVoices}`;
-  const extra = ui`<span class="s-caption">${esc(providerLabel(selectedProvider))} · ${managedPresets.length} 个音色</span>`;
-  return bodyOnly ? sLabel(t('音色管理'), extra) + body : sSection(t('音色管理'), body, extra, '', 'voice-management');
-}
 
-function renderVoicesSettings() {
-  const presets = snapshot.presets || [];
-  const bindings = snapshot.bindings || [];
-  if (editor?.type === 'service') return renderServiceEditor(editor.provider);
-  if (editor?.type === 'preset') return renderPresetEditor(editor.id);
-  if (editor?.type === 'binding') return renderBindingEditor(editor.id);
-  if (editor?.type === 'qr') return `${heading(t('连接豆包'), t('使用豆包 App 扫码，并在手机上确认登录。'))}${qrMarkup('doubao', true)}<div class="actions">${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div>`;
-  const preferred = presets.find(item => item.id === snapshot.rules?.default_preset_id);
-  const voiceList = renderVoiceManagement(presets, preferred);
-  const aliasFor = name => name && (snapshot.rules?.user_words || []).find(row => row.from === name)?.to;
-  const bindingRow = ({ id, binding }) => {
-    const name = binding.user_name || (binding.user_id ? `UID ${binding.user_id}` : ui`${binding.legacy_user_name || t('旧用户名')} · 待确认`);
-    const alias = aliasFor(binding.user_name);
-    const preset = presets.find(item => item.id === binding.preset_id);
-    const detail = [alias ? ui`别名「${alias}」` : '', binding.user_name && binding.user_id ? `UID ${binding.user_id}` : '', binding.enabled ? '' : t('停用')].filter(Boolean).join(' · ');
-    return `<div class="s-row"><span class="s-avatar color-${identityColor(binding.user_id || binding.user_name)}" aria-hidden="true"><span>${esc(initial(binding.user_name || binding.legacy_user_name || name))}</span></span><span class="s-text"><span>${esc(name)}</span>${detail ? `<small>${esc(detail)}</small>` : ''}</span><span class="s-value">${esc(preset ? `${providerLabel(preset.provider)} · ${presetLabel(preset)}` : binding.preset_id)}</span><span class="s-row-actions">${iconButton('edit', t('编辑声音绑定'), 'binding.edit', id)}${iconButton('trash', t('删除声音绑定'), 'binding.delete', id)}</span></div>`;
-  };
-  const viewers = sSection(t('观众专属声音'), `<div class="s-card">${bindings.length ? bindings.map(bindingRow).join('') : `<div class="s-row s-empty-row">${esc(t('还没有为观众指定声音。'))}</div>`}</div>`, button(t('添加观众'), 'binding.new', { class: 'small', icon: 'plus', disabled: !presets.length }), t('也可以在直播界面点击弹幕，直接指定声音或读作。'));
-  const serviceRow = provider => {
-    const connection = serviceConnection(provider);
-    const status = providerStatus(provider, connection);
-    const action = provider === 'doubao'
-      ? button(connection?.has_credential ? t('重新扫码') : t('扫码登录'), 'doubao.begin', { id: connection?.id || '', class: 'small' })
-      : button(provider === 'fish_audio' && !connection?.has_credential ? t('连接账号') : t('设置'), 'service.configure', { id: provider, class: 'small' });
-    return `<div class="s-row" data-service-provider="${esc(provider)}"><span class="s-text"><span>${esc(providerLabel(provider))}</span></span><span class="s-status" title="${esc(status.detail || status.label)}"><span class="service-light ${status.tone}" aria-hidden="true"></span><small class="service-status-label">${esc(status.label)}</small></span>${action}</div>`;
-  };
-  const services = sSection(t('服务连接'), `<div class="s-card">${serviceProviders.map(serviceRow).join('')}</div>`);
-  const power = ui`<form data-form="tts-toggle" class="s-power"><label for="tts-power">弹幕播报</label><input id="tts-power" class="s-switch" type="checkbox" role="switch" name="tts_enabled" aria-label="为新弹幕播报"${snapshot.preferences?.tts_enabled ?? true ? ' checked' : ''}>${autoStatus()}</form>`;
-  return `<div class="s-page"><div class="s-page-head">${heading(t('声音'))}${power}</div>${draftNotices()}${renderVoiceAudition(presets, preferred)}${voiceList}${viewers}${services}<div id="operation-result" class="form-result"></div></div>`;
-}
 
 function renderServiceCard(provider, preferred) {
   const connection = serviceConnection(provider);
@@ -3426,44 +4275,16 @@ function renderServiceCard(provider, preferred) {
   return `<div class="s-tile-wrap${isPreferred ? ' preferred' : ''}" data-service-provider="${esc(provider)}"><button type="button" class="service-card-select s-tile" data-action="service.prefer" data-id="${esc(provider)}" aria-pressed="${isPreferred}" aria-label="${esc(serviceChoiceLabel(provider, status, isPreferred))}" title="${esc(status.detail || status.label)}"><strong class="service-card-name">${esc(providerLabel(provider))}</strong><span class="s-tile-status"><span class="service-light ${status.tone}" aria-hidden="true"></span><small class="service-card-status">${esc(status.label)}</small></span></button></div>`;
 }
 
-function renderFishServiceEditor(connection, statusRow, back) {
-  const connected = !!connection?.has_credential;
-  const settings = snapshot.fish_audio_settings?.[connection?.id] || {};
-  const voices = (snapshot.presets || []).filter(preset => preset.provider === 'fish_audio' && preset.connection_id === connection?.id);
-  const preferred = snapshot.rules?.default_preset_id;
-  const rows = voices.map(preset => ui`<div class="setting-row"><div class="row-text"><div class="row-title">${esc(presetLabel(preset))}${preferred === preset.id ? t('<span class="badge">首选</span>') : ''}</div><div class="row-description">${esc(displayNumber(preset.speed))} 倍速</div></div><div class="row-actions">${preferred !== preset.id ? button(t('设为首选'), 'preset.default', { id: preset.id, class: 'small' }) : ''}${button(t('试听'), 'fish.audition', { id: preset.id, class: 'small quiet' })}${iconButton('edit', ui`编辑 ${presetLabel(preset)}`, 'preset.edit', preset.id)}</div></div>`).join('');
-  const credentialForm = `<form data-form="service-fish" data-id="${esc(connection?.id || '')}">${field('credential', 'API Key', '', t('type="password" autocomplete="new-password" required placeholder="在这里粘贴 API Key"'), connected ? t('验证新密钥后才会替换。') : t('验证账号后加密保存在本机。'))}<div class="form-footer">${saveButton(connected ? t('验证并更换密钥') : t('验证并连接'))}</div></form>`;
-  const account = ui`<section class="settings-card"><h3>账号连接</h3><div class="actions external-actions">${button(t('获取 API Key'), 'fish.open_keys', { class: 'small', icon: 'external' })}${button(t('浏览音色广场'), 'fish.open_discovery', { class: 'small', icon: 'external' })}</div>${connected ? ui`<details class="details"><summary>更换 API Key</summary>${credentialForm}</details>` : credentialForm}</section>`;
-  if (!connected) return `${heading('Fish Audio')}${statusRow}${account}${back}`;
-  const options = ui`<form data-form="fish-settings" data-connection-id="${esc(connection.id)}" class="form-section"><h3>生成设置</h3>${select('model', t('生成模型'), option('s2.1-pro-free', t('S2.1 Pro Free（默认）'), settings.model || 's2.1-pro-free') + option('s2.1-pro', 'S2.1 Pro', settings.model) + option('s2-pro', 'S2 Pro', settings.model) + option('s1', 'S1', settings.model))}<div class="field-grid">${select('latency', t('延迟模式'), option('normal', t('普通'), settings.latency || 'normal') + option('balanced', t('平衡'), settings.latency) + option('low', t('低延迟'), settings.latency))}${field('volume_db', t('合成音量（dB）'), settings.volume_db ?? 0, 'type="number" min="-20" max="20" step="0.5" required')}${field('temperature', t('温度'), settings.temperature ?? .7, 'type="number" min="0" max="1" step="0.05" required')}${field('top_p', 'Top P', settings.top_p ?? .7, 'type="number" min="0" max="1" step="0.05" required')}</div><div class="form-footer">${autoStatus()}</div></form>`;
-  return ui`${heading('Fish Audio')}${statusRow}${account}<div class="settings-section-title"><h3>音色收藏</h3><div class="actions">${button(t('添加音色'), 'service.add_preset', { id: 'fish_audio', class: 'small', icon: 'plus' })}${button(t('恢复内置五音色'), 'fish.restore_builtin', { class: 'small quiet' })}</div></div><div class="row-list">${rows || empty(t('还没有 Fish 音色。'))}</div>${options}${back}`;
-}
 
-function renderServiceEditor(provider) {
-  const connection = serviceConnection(provider);
-  const status = providerStatus(provider, connection);
-  const state = localServiceState(provider, connection);
-  const statusRow = `<div class="service-editor-state" data-service-provider="${esc(provider)}"><div class="service-editor-status"><span class="service-light ${status.tone}" aria-hidden="true"></span><span class="service-status-label" title="${esc(status.detail || status.label)}">${esc(status.label)}</span></div><p class="quiet-note${state.state === 'failed' ? ' status-error' : ''}" data-service-message${state.state === 'failed' && state.message ? '' : ' hidden'}>${esc(state.message || '')}</p></div>`;
-  const back = '';
-  if (provider === 'doubao') return `${heading(t('豆包'))}${statusRow}${button(connection?.has_credential ? t('重新扫码') : t('扫码连接'), 'doubao.begin', { id: connection?.id || '', class: 'primary small', icon: 'qr' })}${back}`;
-  if (provider === 'fish_audio') return renderFishServiceEditor(connection, statusRow, back);
-  const directory = state.directory || '';
-  const directoryLabel = provider === 'dots' ? t('dots.tts 目录') : t('GPT-SoVITS 目录');
-  return `${heading(providerLabel(provider), t('设为默认语音服务后，随本应用启动。'))}${statusRow}<form data-form="service-local" data-provider="${esc(provider)}">${pathField('directory', directoryLabel, directory, 'service.pick_directory', t('点击选择安装目录'))}${autoStatus()}</form><div class="actions">${button(t('启动服务'), 'service.start', { id: provider, class: 'small primary', disabled: !connection || !state.directory || !!state.owned })}${button(t('停止服务'), 'service.stop', { id: provider, class: 'small quiet', disabled: !state.owned })}${button(t('检查连接'), 'service.check', { id: provider, class: 'small quiet', disabled: !connection })}${connection ? button(t('添加音色'), 'service.add_preset', { id: provider, class: 'small quiet' }) : ''}</div>`;
-}
 
 function renderPresetCore(id) {
   const first = snapshot.connections.find(item => item.id === editor?.connectionId) || snapshot.connections[0];
   const preset = snapshot.presets.find(item => item.id === id) || { id: '', name: '', connection_id: first?.id || '', provider: first?.settings.provider, voice_id: '', speed: 1, volume: 1, sovits: null };
-  const voices = snapshot.doubao_voices || [];
-  const sovits = preset.sovits || {};
-  const provider = snapshot.connections.find(item => item.id === preset.connection_id)?.settings.provider || preset.provider;
-  const voiceLabel = provider === 'gpt_sovits' ? t('角色名称') : t('音色');
-  const hasVoice = voices.some(voice => (voice.id || voice.voice_id || voice.value) === preset.voice_id);
-  const voicePicker = provider === 'doubao'
-    ? select('voice_id', t('豆包音色'), option('', t('请选择音色'), preset.voice_id) + (!hasVoice && preset.voice_id ? option(preset.voice_id, t('已保存的音色'), preset.voice_id) : '') + voices.map(voice => option(voice.id || voice.voice_id || voice.value, voice.name || voice.label || t('未命名音色'), preset.voice_id)).join(''))
-    : field('voice_id', voiceLabel, preset.voice_id, 'required autocomplete="off"', t('选择成对模型后会自动填入角色名称。'));
-  return ui`${heading(id ? t('编辑音色') : t('添加音色'))}<form data-form="preset" data-id="${esc(id || '')}"><input type="hidden" name="connection_id" value="${esc(preset.connection_id)}"><p class="quiet-note">语音服务：${esc(providerLabel(provider))}</p>${voicePicker}<details class="details"><summary>语速与其他选项</summary>${field('name', t('自定义名称（选填）'), provider === 'doubao' && (preset.name === voiceName(preset.voice_id) || preset.name.includes(preset.voice_id)) ? '' : presetLabel(preset), t('maxlength="100" placeholder="默认使用音色名称"'))}<div class="field-grid">${field('speed', t('语速'), preset.speed, 'type="number" min="0.5" max="2" step="0.05" required')}${field('volume', t('音色音量'), preset.volume, 'type="number" min="0" max="2" step="0.05" required')}</div><div id="sovits-fields"${provider === 'gpt_sovits' ? '' : ' hidden'}><details class="details"><summary>GPT-SoVITS 参数</summary>${select('model_selection', t('模型选择'), option('global_resident', t('使用服务当前加载的模型'), sovits.model_selection || 'global_resident') + option('per_request_atomic', t('为每次请求指定模型'), sovits.model_selection))}${field('gpt_weights_path', t('GPT 模型路径'), sovits.gpt_weights_path || '')}${field('sovits_weights_path', t('SoVITS 模型路径'), sovits.sovits_weights_path || '')}${field('reference_text', t('参考文本'), sovits.reference_text || '')}${check('reference_text_free', t('无参考文本模式'), sovits.reference_text_free ?? true)}<div class="field-grid">${field('reference_language', t('参考语言'), sovits.reference_language || 'all_zh')}${field('text_language', t('合成语言'), sovits.text_language || 'all_zh')}${field('split', t('分句方法'), sovits.split || 'cut0')}${field('fragment_interval_secs', t('片段间隔（秒）'), sovits.fragment_interval_secs ?? .3, 'type="number" min="0" max="5" step="0.05"')}${field('top_k', 'Top K', sovits.top_k ?? 5, 'type="number" min="1" max="100"')}${field('top_p', 'Top P', sovits.top_p ?? 1, 'type="number" min="0" max="1" step="0.05"')}${field('temperature', t('温度'), sovits.temperature ?? 1, 'type="number" min="0" max="2" step="0.05"')}${field('sample_steps', t('采样步数'), sovits.sample_steps ?? 8, 'type="number" min="1" max="128"')}</div>${check('super_sampling', t('超采样'), sovits.super_sampling || false)}</details></div></details><div class="form-footer">${autoStatus()}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
+  const provider = first?.settings.provider || preset.provider;
+  const defaults = { model_selection: 'per_request_atomic', gpt_weights_path: '', sovits_weights_path: '', reference_text: '', reference_language: 'all_zh', text_language: 'all_zh', split: 'cut0', top_k: 5, top_p: 1, temperature: 1, sample_steps: 8, fragment_interval_secs: .3, ...preset.sovits };
+  const hidden = provider === 'gpt_sovits' ? Object.entries(defaults).filter(([key])=>!['reference_text_free','super_sampling'].includes(key)).map(([key,value])=>`<input type="hidden" name="${key}" value="${esc(value ?? '')}">`).join('') + `<input type="checkbox" name="reference_text_free" hidden${preset.sovits?.reference_text_free !== false?' checked':''}><input type="checkbox" name="super_sampling" hidden${preset.sovits?.super_sampling?' checked':''}>` : '';
+  const picker = provider === 'gpt_sovits' ? modelPairPicker(preset) + `<input type="hidden" name="voice_id" value="${esc(preset.voice_id)}">` : select('voice_id',t('豆包音色'),(snapshot.doubao_voices || []).map(voice=>option(voice.id,voice.name,preset.voice_id)).join(''));
+  return `<section class="lake-voices-page"><div class="voice-add-intro"><h2>${esc(t('添加角色声音'))}</h2><p>${esc(providerLabel(provider))}</p></div><form data-form="preset" data-id="${esc(id || '')}"><input type="hidden" name="connection_id" value="${esc(preset.connection_id)}">${picker}${field('name',t('声音名称'),preset.name || '',t('maxlength="100" placeholder="默认使用音色名称"'))}${voiceWaterline('speed',t('语速'),preset.speed ?? 1,.5,2,'×')}${voiceWaterline('volume',t('音量'),preset.volume ?? 1,0,2,'')}${hidden}${autoStatus()}</form></section>`;
 }
 
 function selectedModelPair(preset) {
@@ -3522,7 +4343,7 @@ function renderDotsPresetEditor(id, preset, connection) {
   const hint = legacy
     ? t('此旧音色尚未记录原文件路径，仍可沿用服务内文件名；选择原文件后会改用新路径。')
     : t('使用原文件，不复制音频。原文件移动或删除后需重新选择。');
-  return `${heading(id ? t('编辑 dots 音色') : t('添加 dots 音色'))}<form data-form="dots-preset" data-id="${esc(id || '')}" data-connection-id="${esc(connection.id)}">${field('name', t('音色名称'), preset.name || '', t('required maxlength="100" placeholder="例如：日常播报"'))}${pathField('audio_path', t('参考音频'), profile.audio_path || '', 'reference.pick_audio', t('点击选择参考音频'), hint)}${textArea('reference_text', t('参考文本（可选）'), profile.reference_text || '', 'maxlength="8192"', t('可填写参考音频中说出的文字。'))}<div class="field-grid">${field('speed', t('语速'), preset.speed ?? 1, 'type="number" min="0.5" max="2" step="0.05" required')}${field('volume', t('音色音量'), preset.volume ?? 1, 'type="number" min="0" max="2" step="0.05" required')}</div><div class="form-footer">${saveButton(t('保存音色'))}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
+  return `${heading(id ? t('编辑 dots 音色') : t('添加 dots 音色'))}<form data-form="dots-preset" data-id="${esc(id || '')}" data-connection-id="${esc(connection.id)}">${field('name', t('音色名称'), preset.name || '', t('required maxlength="100" placeholder="例如：日常播报"'))}${pathField('audio_path', t('参考音频'), profile.audio_path || '', 'reference.pick_audio', t('点击选择参考音频'), hint)}${textArea('reference_text', t('参考文本（可选）'), profile.reference_text || '', 'maxlength="8192"', t('可填写参考音频中说出的文字。'))}<div class="field-grid">${voiceWaterline('speed',t('语速'),preset.speed ?? 1,.5,2,'×')}${voiceWaterline('volume',t('音量'),preset.volume ?? 1,0,2,'')}</div><div class="form-footer">${saveButton(t('保存音色'))}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
 }
 
 function renderFishPresetEditor(id, preset, connection) {
@@ -3543,8 +4364,6 @@ function renderPresetEditor(id) {
   if (provider === 'fish_audio' && connection) return renderFishPresetEditor(id, preset, connection);
   const selected = selectedModelPair(preset);
   let html = renderPresetCore(id);
-  // A function replacement keeps `$` in model file names literal.
-  if (provider === 'gpt_sovits') html = html.replace(t('<details class="details"><summary>语速与其他选项'), () => ui`${modelPairPicker(preset)}<details class="details"><summary>语速与其他选项`);
   if (provider === 'gpt_sovits') html += renderReferenceEditor(provider, preset, selected.pair);
   return html;
 }
@@ -3633,40 +4452,320 @@ function previewEventForm() {
   return ui`<form data-form="preview"><div class="field-grid">${select('kind', t('事件类型'), option('danmaku', t('弹幕'), 'danmaku') + option('gift', t('礼物')) + option('super_chat', t('醒目留言')) + option('guard', t('大航海')))}${field('user_name', t('观众名字'), '', t('required placeholder="输入用于预览的名字"'))}${field('user_id', t('观众 UID（选填）'), '', 'inputmode="numeric"')}${field('price_yuan', t('金额（元）'), 0, 'type="number" min="0" step="0.1"')}${field('gift_name', t('礼物名称'), '')}${field('quantity', t('礼物数量'), 1, 'type="number" min="1"')}${field('guard_name', t('大航海称号'), t('舰长'))}${select('coin_type', t('礼物类型'), option('gold', t('付费礼物'), 'gold') + option('silver', t('免费礼物')))}</div>${textArea('message', t('预览消息'), '', t('placeholder="输入一段文字"'))}<div class="form-footer"><button class="button" type="submit">预览处理结果</button></div><p class="quiet-note">只预览处理结果，不请求语音服务。实际试听在“声音”页面。</p></form><div id="preview-result" class="form-result" aria-live="polite"></div>`;
 }
 
-function renderRulesSettings() {
+let lakeAdvancedSection = '';
+let lakeReadingsSearch = '';
+let lakeTemplateRange = null;
+const lakeTemplateDefaults = { danmaku: '"{user_name}"说:"{message}"', gift: '"{user_name}"赠送了{gift_num}个{gift_name}', super_chat: '"{user_name}"发送了一条醒目留言，他说"{message}"', guard: '感谢"{user_name}"赠送的{guard_name}' };
+const lakeTokenLabels = { user_name: '名字', message: '内容', gift_name: '礼物', gift_num: '数量', price: '金额', guard_name: '舰长' };
+
+function lakeMiniWave() { return '<svg class="lake-mini-wave" viewBox="0 0 40 20" aria-hidden="true"><path d="M1 10h5m2 0 3-6 4 12 4-14 4 16 4-12 4 8 3-4h5"/></svg>'; }
+
+function lakeReadingRows() {
+  const bindings = snapshot.bindings || [];
+  const used = new Set();
+  const rows = (snapshot.rules.user_words || []).map(row => {
+    const record = bindings.find(item => !item.binding.user_id && item.binding.user_name === row.from);
+    if (record) used.add(record.id);
+    return { kind: 'user_words', ...row, bindingId: record?.id, binding: record?.binding };
+  });
+  for (const record of bindings) if (!used.has(record.id)) rows.push({ kind: 'user_words', from: record.binding.user_name || record.binding.legacy_user_name || `UID ${record.binding.user_id}`, to: '', bindingId: record.id, binding: record.binding });
+  for (const kind of ['message_words', 'emote_words']) for (const row of snapshot.rules[kind] || []) rows.push({ kind, ...row });
+  return rows;
+}
+
+// Store installs are updated by Microsoft Store on its own, so their version line is
+// only a version. The portable GitHub build has no other way to hear about a new
+// release: its line doubles as the update check, and the result stays on the line.
+function lakeVersionState() {
+  if (snapshot.update_channel === 'store') return { state: 'store', hint: t('由 Microsoft Store 自动更新'), title: '' };
+  if (updateBusy) return { state: 'checking', hint: t('正在检查…'), action: 'update.check', disabled: true, title: '' };
+  if (updateInfo?.status === 'available' && updateInfo.download_url) return { state: 'available', hint: `${ui`发现新版本 ${updateInfo.latest_version}`} · ${t('下载新版')}`, action: 'external.open', id: 'update_download', title: t('下载后解压 ZIP，退出程序，再用新版 EXE 替换原文件，设置会保留。') };
+  const offline = !!snapshot.network_disabled;
+  if (updateError) return { state: 'error', hint: t('没查到，再试一次'), action: 'update.check', disabled: offline, title: updateError };
+  if (['up_to_date', 'no_release'].includes(updateInfo?.status)) return { state: 'current', hint: updateInfo.status === 'no_release' ? t('暂无正式发布版本') : t('已是最新版本'), action: 'update.check', disabled: offline, title: '' };
+  return { state: 'idle', hint: t('检查更新'), action: 'update.check', disabled: offline, title: '' };
+}
+
+function lakeVersionRow(logo = false) {
+  const view = lakeVersionState();
+  const inner = `${logo ? '<img src="./logo.png" width="28" height="28" alt="" draggable="false">' : ''}<span class="lake-version-name">${esc(t('超绝可爱弹幕姬'))}<i>${esc(snapshot.app_version || '—')}</i></span><span class="lake-version-hint" role="status">${esc(view.hint)}</span>`;
+  if (!view.action) return `<div class="lake-version" data-state="${view.state}">${inner}</div>`;
+  return `<button type="button" class="lake-version" data-state="${view.state}" data-action="${view.action}"${view.id ? ` data-id="${view.id}"` : ''}${view.disabled ? ' disabled' : ''} title="${esc(view.title)}">${inner}</button>`;
+}
+
+function updateLakeVersionRows() {
+  if (!settingsDialog.open) return;
+  const view = lakeVersionState();
+  if (!view.action) return;
+  for (const node of settingsDialog.querySelectorAll('button.lake-version')) {
+    node.dataset.state = view.state; node.dataset.action = view.action; node.disabled = !!view.disabled; node.title = view.title;
+    if (view.id) node.dataset.id = view.id; else delete node.dataset.id;
+    const hint = node.querySelector('.lake-version-hint');
+    if (hint && hint.textContent !== view.hint) hint.textContent = view.hint;
+  }
+}
+
+function renderLakeSettingsHome() {
+  const identity = headerIdentity(snapshot);
+  const voice = snapshot.presets.find(item => item.id === snapshot.rules?.default_preset_id);
+  const count = lakeReadingRows().length;
+  const row = (id, graphic, title, detail) => `<button type="button" class="lake-home-row" data-action="settings.tab" data-id="${id}"><span class="lake-home-graphic">${graphic}</span><span class="lake-home-text"><strong>${esc(t(title))}</strong><small>${esc(detail)}</small></span>${icon('arrow')}</button>`;
+  const minor = (id, title) => `<button type="button" class="lake-home-minor" data-action="settings.tab" data-id="${id}"><span>${esc(t(title))}</span>${icon('arrow')}</button>`;
+  const avatar = `<span class="s-avatar color-${identityColor(identity.name)}">${esc(initial(identity.name))}${identity.avatar ? `<img src="${esc(identity.avatar)}" alt="" referrerpolicy="no-referrer">` : ''}</span>`;
+  const obsConnected = snapshot.obs?.status?.state === 'ok' || !!snapshot.obs?.status?.connected;
+  const obsDetail = obsConnected ? t('已连接') : lakeObsConfigured() ? t('OBS 还没打开') : t('还没连上');
+  const warning = snapshot.live?.state === 'session_expired' ? `<button type="button" class="lake-settings-warning" data-action="lake.room.relogin">${esc(t('哔哩哔哩登录已失效 · 重新扫码'))}${icon('arrow')}</button>` : '';
+  return `<div class="lake-settings-page lake-home">${warning}<nav class="lake-home-primary" aria-label="${esc(t('设置分类'))}">${row('room', avatar, '直播间', snapshot.account?.user_id ? identity.name : t('还没登录'))}${row('voices', lakeMiniWave(), '声音', `${voice ? presetLabel(voice) : t('还没有默认声音')} · ${snapshot.presets.length}`)}${row('overlay', `<span class="lake-overlay-mini${obsConnected ? ' on' : ''}"><i></i><b></b><b></b><b></b></span>`, 'OBS', obsDetail)}${row('readings', `<i class="lake-home-count">${count}</i>`, '记住的读法', t('观众名字、词和表情'))}</nav><div class="lake-home-foot"><nav class="lake-home-secondary" aria-label="${esc(t('更多设置'))}">${minor('general', '通用')}${minor('advanced', '高级')}</nav><footer class="lake-settings-footer">${lakeVersionRow()}</footer></div></div>`;
+}
+
+function renderLakeReadings() {
   if (editor?.type === 'alias') return renderAliasEditor();
+  if (editor?.type === 'binding') return renderBindingEditor(editor.id);
+  const composing = editor?.type === 'lake-reading';
+  const editingKey = composing && editor.row ? `${editor.row.kind}\u0000${editor.row.from}` : '';
+  const rows = lakeReadingRows();
+  const query = lakeReadingsSearch.toLocaleLowerCase();
+  const group = (kind, label) => {
+    const items = rows.map((row, index) => ({ ...row, index })).filter(row => row.kind === kind);
+    if (!items.length) return '';
+    return `<section class="lake-reading-group" data-reading-group><h3>${esc(t(label))}<i>${items.length}</i></h3>${items.map(row => {
+      if (`${row.kind}\u0000${row.from}` === editingKey) return renderLakeReadingComposer();
+      const preset = snapshot.presets.find(item => item.id === row.binding?.preset_id);
+      const emote = kind === 'emote_words' ? normalizedEvents(snapshot).flatMap(item => item.emotes || []).find(item => item.text === row.from) : null;
+      const image = emote && safeMediaUrl(emote.url);
+      const marker = kind === 'user_words' ? `<i class="lake-reading-dot color-${identityColor(row.from)}"></i>` : kind === 'emote_words' ? (image ? `<img src="${esc(image)}" alt="" referrerpolicy="no-referrer">` : '<span>☺</span>') : '';
+      const search = `${row.from} ${row.to} ${preset ? presetLabel(preset) : ''}`.toLocaleLowerCase();
+      return `<div class="lake-reading-row" data-reading-search="${esc(search)}"${query && !search.includes(query) ? ' hidden' : ''}><button type="button" data-action="lake.reading.edit" data-id="${row.index}" aria-label="${esc(t('编辑读法'))}: ${esc(row.from)}"><span class="lake-reading-mark">${marker}</span><span class="lake-reading-from">${esc(row.from)}</span><span class="lake-reading-arrow">→</span><span class="lake-reading-to">${esc(row.to)}${preset ? `<small>${lakeMiniWave()}${esc(presetLabel(preset))}</small>` : ''}</span></button>${iconButton('close', t('删除这条'), 'lake.reading.delete', String(row.index))}</div>`;
+    }).join('')}</section>`;
+  };
+  const adding = composing && !editor.row ? renderLakeReadingComposer() : '';
+  const emptyState = adding ? '' : `<div class="lake-readings-empty"><h3>${esc(t('还没有记住的读法'))}</h3><p>${esc(t('教它几个名字、词和表情，下次就会这样读。'))}</p><div aria-hidden="true"><span>Kinoko7</span>→<strong>${esc(t('蘑菇七'))}</strong><span>yyds</span>→<strong>${esc(t('永远的神'))}</strong><span>☺ doge</span>→<strong>${esc(t('狗头'))}</strong></div>${button(t('添加一条'), 'lake.reading.add', { class: 'primary' })}</div>`;
+  return `<div class="lake-settings-page"><div class="lake-readings-search">${icon('search')}<input id="lake-readings-search" type="search" value="${esc(lakeReadingsSearch)}" placeholder="${esc(t('找一个名字、词或表情'))}" aria-label="${esc(t('找一个名字、词或表情'))}">${iconButton('plus', t('添加一条'), 'lake.reading.add')}</div><div class="lake-reading-list">${adding}${rows.length ? group('user_words', '观众') + group('message_words', '词') + group('emote_words', '表情') : emptyState}</div></div>`;
+}
+
+function renderLakeReadingComposer() {
+  const current = editor.row || { kind: 'user_words', from: '', to: '' };
+  const kinds = [['user_words', '观众'], ['message_words', '词'], ['emote_words', '表情']];
+  const voices = option('', t('跟随默认'), current.binding?.preset_id || '') + snapshot.presets.map(preset => option(preset.id, presetLabel(preset), current.binding?.preset_id)).join('');
+  return `<form data-form="lake-reading" class="lake-reading-composer"><div class="lake-obs-choices lake-reading-kinds" role="radiogroup" aria-label="${esc(t('种类'))}">${kinds.map(([kind, label]) => `<label><input type="radio" name="kind" value="${kind}"${kind === current.kind ? ' checked' : ''}><span>${esc(t(label))}</span></label>`).join('')}</div><div class="lake-reading-pair"><input name="from" value="${esc(current.from)}" placeholder="${esc(t('原文'))}" aria-label="${esc(t('原文'))}" required maxlength="160" autocomplete="off" spellcheck="false"><span aria-hidden="true">→</span><input name="to" value="${esc(current.to)}" placeholder="${esc(t('读法'))}" aria-label="${esc(t('读法'))}" maxlength="500" autocomplete="off" spellcheck="false"></div><div data-reading-voice${current.kind !== 'user_words' ? ' hidden' : ''}>${select('preset_id', t('TA 的声音'), voices)}</div><input type="hidden" name="user_id" value="${esc(current.binding?.user_id || '')}"><p class="lake-note" data-reading-emote-note${current.kind !== 'emote_words' ? ' hidden' : ''}>${esc(t('填表情的完整名字，例如 [doge]。'))}</p><div class="lake-reading-actions">${button(t(editor.row ? '保存' : '记住'), 'lake.reading.save', { class: 'primary' })}${button(t('取消'), 'lake.editor.cancel', { class: 'quiet' })}</div></form>`;
+}
+
+function lakeTemplateMarkup(value) {
+  return esc(value).replace(/\{(user_name|message|gift_name|gift_num|price|guard_name)\}/g, (_, key) => `<span class="lake-template-token" contenteditable="false" data-token="${key}">${esc(t(lakeTokenLabels[key]))}</span>`);
+}
+
+function renderRulesSettings() {
   const rules = snapshot.rules;
   const events = rules.events;
-  const amount = (name, value, label) => `<span class="s-amount"><span aria-hidden="true">≥ ¥</span><input name="${name}" type="number" min="0" step="0.1" required value="${esc(displayNumber(value))}" aria-label="${esc(label)}"></span>`;
-  const toggles = sSwitch('danmaku_on', t('弹幕'), events.danmaku_on)
-    + sSwitch('filter_bilibili_emoticons', t('过滤 B站官方表情'), events.filter_bilibili_emoticons ?? true, t('仅跳过单独发送的 B站表情播报，仍显示在聊天中。普通文字、emoji 和行内表情照常播报。'))
-    + sSwitch('gift_on', t('礼物'), events.gift_on, '', amount('gift_threshold_yuan', events.gift_threshold_yuan, t('礼物最低金额（元）')))
-    + sSwitch('free_gift_on', t('免费礼物'), events.free_gift_on)
-    + sSwitch('super_chat_on', t('醒目留言'), events.super_chat_on, '', amount('super_chat_threshold_yuan', events.super_chat_threshold_yuan, t('醒目留言最低金额（元）')))
-    + sSwitch('guard_on', t('大航海'), events.guard_on);
-  const template = (key, label) => {
-    const id = `field-${++fieldSequence}`;
-    const value = rules.templates[key] || '';
-    return ui`<div class="s-row s-template"><label for="${id}">${esc(label)}</label><div class="s-template-body"><textarea id="${id}" name="template_${key}" rows="1" required data-template="${key}">${esc(value)}</textarea><span class="s-preview">预览：<span data-template-preview>${esc(templatePreview(key, value))}</span></span></div></div>`;
-  };
-  const templates = `<div class="s-card">${template('danmaku', t('弹幕'))}${template('gift', t('礼物'))}${template('super_chat', t('醒目留言'))}${template('guard', t('大航海'))}</div>`;
-  const view = dictionaryView === 'user_words' ? 'user_words' : 'message_words';
-  const seg = ui`<div class="s-seg small" role="group" aria-label="读音词典"><button type="button" data-action="dictionary.view" data-id="message_words" class="${view === 'message_words' ? 'on' : ''}" aria-pressed="${view === 'message_words'}">正文</button><button type="button" data-action="dictionary.view" data-id="user_words" class="${view === 'user_words' ? 'on' : ''}" aria-pressed="${view === 'user_words'}">用户名</button></div>`;
-  const dictionary = ['message_words', 'user_words'].map(type => `<div class="s-dict" data-view="${type}"${view === type ? '' : ' hidden'}>${dictionaryRows(type, rules[type])}<p class="s-note">${esc(type === 'user_words' ? t('观众名字按这里的读法播报；直播界面观众卡片里的“读作”也保存在这里。') : t('弹幕正文中的词按这里替换后再朗读。'))}</p></div>`).join('');
-  return `<div class="s-page">${heading(t('播报内容'))}<form data-form="rules">${sSection(t('读哪些消息'), `<div class="s-card">${toggles}</div>`)}${sSection(t('播报模板'), templates, '', t('可用字段：{user_name}、{message}、{gift_name}、{gift_num}、{guard_name}、{price}。'))}<section class="s-section">${sLabel(t('读音词典'), seg)}${dictionary}</section><div class="form-footer">${autoStatus()}</div></form><details class="s-details s-try"><summary>${t('预览规则')}</summary>${previewEventForm()}</details></div>`;
+  const amount = (name, value, label) => `<span class="lake-amount">${esc(t('至少'))} ¥<input name="${name}" type="number" min="0" step="0.1" required value="${esc(displayNumber(value))}" aria-label="${esc(t(label))}"></span>`;
+  const thresholds = `<form data-form="lake-thresholds">${sSwitch('danmaku_on', t('弹幕'), events.danmaku_on)}${sSwitch('gift_on', t('礼物'), events.gift_on, '', amount('gift_threshold_yuan', events.gift_threshold_yuan, '礼物最低金额（元）'))}<div class="lake-indented">${sSwitch('free_gift_on', t('免费礼物也读'), events.free_gift_on)}</div>${sSwitch('super_chat_on', t('醒目留言'), events.super_chat_on, '', amount('super_chat_threshold_yuan', events.super_chat_threshold_yuan, '醒目留言最低金额（元）'))}${sSwitch('guard_on', t('大航海'), events.guard_on)}${autoStatus()}</form>`;
+  const templates = `<form data-form="lake-templates">${[['danmaku', '弹幕'], ['gift', '礼物'], ['super_chat', '醒目留言'], ['guard', '大航海']].map(([key, label]) => `<div class="lake-template-row"><label id="lake-template-label-${key}">${esc(t(label))}</label><div class="lake-template-edit" data-lake-template="${key}" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="lake-template-label-${key}">${lakeTemplateMarkup(rules.templates[key] || '')}</div><input type="hidden" name="template_${key}" value="${esc(rules.templates[key] || '')}"><div class="lake-template-tools"><span>${esc(t('插入'))}:</span>${Object.entries(lakeTokenLabels).map(([token, label]) => `<button type="button" data-action="lake.template.insert" data-id="${token}">${esc(t(label))}</button>`).join('')}<button type="button" data-action="lake.template.reset" data-id="${key}">${esc(t('恢复这句'))}</button></div></div>`).join('')}${autoStatus()}</form>`;
+  const section = (key, label, detail, body) => `<section class="lake-accordion"><button type="button" class="lake-accordion-toggle" data-action="lake.advanced.section" data-id="${key}" aria-expanded="${lakeAdvancedSection === key}" aria-controls="lake-advanced-${key}"><span>${esc(t(label))}</span><small>${esc(detail)}</small>${icon(lakeAdvancedSection === key ? 'up' : 'down')}</button><div id="lake-advanced-${key}" class="lake-accordion-body"${lakeAdvancedSection === key ? '' : ' hidden'}>${body}</div></section>`;
+  const merge = snapshot.live_settings?.gift_merge || { enabled: false, initial_seconds: 1.5, increment_seconds: .5, maximum_seconds: 5 };
+  const giftMerge = `<form data-form="gift-merge" class="lake-merge">${sSwitch('enabled', t('合并连续赠送的礼物'), merge.enabled)}${['initial_seconds', 'increment_seconds', 'maximum_seconds'].map(key => `<input type="hidden" name="${key}" value="${esc(merge[key])}">`).join('')}${autoStatus()}</form>`;
+  return `<div class="lake-settings-page lake-advanced">${section('messages', '播报哪些消息', '', thresholds)}${section('templates', '播报模板', '4', templates)}${section('sounds', '关键词音效', (rules.sounds || []).map(row => row.trigger).slice(0, 2).join('、'), renderAssetsSettings())}${giftMerge}<footer class="lake-settings-footer lake-reset-note"><span>${esc(t('这些一般不用动，改乱了可以一键恢复。'))}</span>${button(t('恢复默认'), 'lake.advanced.reset', { class: 'quiet small' })}</footer></div>`;
 }
 
 function renderAssetsSettings() {
-  const asset = editor?.type === 'asset' ? snapshot.assets.find(item => item.id === editor.id) : null;
   const sounds = snapshot.rules.sounds || [];
-  const add = button(t('添加音效'), 'dictionary.add.sounds', { class: 'primary small', icon: 'plus', disabled: !snapshot.assets.length });
-  const assetRow = item => ui`<div class="s-row"><span class="s-text"><span>${esc(item.name)}</span><small>${Math.round(item.bytes / 1024)} KB · ${sounds.filter(rule => rule.asset_id === item.id).length} 条关键词规则引用</small></span><span class="s-row-actions">${button(t('替换'), 'asset.replace', { id: item.id, class: 'small' })}${iconButton('trash', ui`删除 ${item.name}`, 'asset.delete', item.id)}</span></div>`;
-  const library = `<div class="s-card">${snapshot.assets.length ? snapshot.assets.map(assetRow).join('') : `<div class="s-row s-empty-row">${esc(t('还没有音效素材，先导入一段音频。'))}</div>`}</div>`;
-  const importForm = ui`<form data-form="asset" data-id="${esc(asset?.id || '')}" class="s-card s-import"><div class="s-import-title">${asset ? ui`替换「${esc(asset.name)}」` : t('导入音频')}</div><div class="s-import-fields">${asset ? '' : field('name', t('素材名称'), '', 'required')}${field('path', t('音频文件完整路径'), '', t('required placeholder="例如：E:\\Audio\\hello.wav"'), t('支持 WAV、MP3 等常用音频；文件会复制到当前应用的数据目录。'))}</div><div class="form-footer">${saveButton(asset ? t('替换音频') : t('导入素材'))}${asset ? button(t('取消替换'), 'editor.cancel', { class: 'quiet' }) : ''}</div></form>`;
-  return `<div class="s-page"><div class="s-page-head">${heading(t('关键词音效'))}${add}</div><form data-form="sound-words" class="s-sound-form">${dictionaryRows('sounds', sounds)}${autoStatus()}</form>${sSection(t('音效素材'), library + importForm)}</div>`;
+  return `<form data-form="sound-words" class="lake-sound-words"><div data-dictionary="sounds">${sounds.map(row => `<div class="dict-row lake-sound-row"><input data-key="from" aria-label="${esc(t('关键词'))}" placeholder="${esc(t('关键词'))}" value="${esc(row.trigger)}" required><span class="lake-sound-arrow" aria-hidden="true">→</span><select data-key="to" aria-label="${esc(t('音效'))}" required>${option('', t('选择音效'), row.asset_id)}${snapshot.assets.map(asset => option(asset.id, asset.name, row.asset_id)).join('')}</select>${iconButton('play', t('试听音效'), 'lake.sound.audition', row.asset_id)}${iconButton('close', t('删除这条'), 'dictionary.remove')}</div>`).join('')}</div>${button(t('添加关键词'), 'lake.sound.add', { class: 'quiet small', icon: 'plus' })}${autoStatus()}</form><div class="lake-sound-library"><p>${esc(t('用过的音效'))}</p>${snapshot.assets.map(asset => `<div><span>${esc(asset.name)}</span>${iconButton('play', t('试听音效'), 'lake.sound.audition', asset.id)}</div>`).join('')}${button(t('从电脑选择音频'), 'lake.sound.pick', { class: 'quiet small', icon: 'folder' })}</div>`;
 }
 
-// ---------- OBS overlay (experimental) ----------
+function renderLakeGeneral() {
+  const language = snapshot.preferences?.language || 'zh-CN';
+  return `<div class="lake-settings-page lake-general"><form data-form="language" class="s-row"><span>${esc(t('语言'))}</span><div class="lake-language">${[['zh-CN', '简体中文'], ['en', 'English']].map(([id, label]) => `<label><input type="radio" name="language" value="${id}"${id === language ? ' checked' : ''}><span>${label}</span></label>`).join('')}</div></form><form data-form="startup">${sSwitch('enabled', t('开机时启动'), snapshot.startup_enabled)}${autoStatus()}</form><section class="lake-backups"><h3>${esc(t('备份与迁移'))}</h3><p class="lake-note">${esc(t('登录和密钥不会导出。音效文件需要另行保留。'))}</p><div class="actions">${button(t('导出备份'), 'lake.backup.export', { class: 'small' })}${button(t('从备份恢复'), 'lake.backup.import', { class: 'small' })}</div><div id="operation-result" class="form-result" role="status"></div></section><footer class="lake-settings-footer lake-general-version">${lakeVersionRow(true)}</footer></div>`;
+}
+
+function collectLakeSettingsAutosave(form) {
+  if (!['lake-thresholds', 'lake-templates'].includes(form.dataset.form)) return null;
+  const data = new FormData(form);
+  const rules = structuredClone(snapshot.rules);
+  rules.events.filter_bilibili_emoticons = true;
+  if (form.dataset.form === 'lake-thresholds') {
+    for (const key of ['danmaku_on', 'gift_on', 'free_gift_on', 'super_chat_on', 'guard_on']) rules.events[key] = data.has(key);
+    for (const key of ['gift_threshold_yuan', 'super_chat_threshold_yuan']) rules.events[key] = Number(data.get(key));
+  } else for (const key of ['danmaku', 'gift', 'super_chat', 'guard']) rules.templates[key] = String(data.get(`template_${key}`) || '');
+  return { action: 'rules.save', payload: { rules } };
+}
+
+function lakeTemplateText(node) {
+  return [...node.childNodes].map((child, index) => {
+    if (child.nodeType === Node.TEXT_NODE) return child.textContent;
+    if (child.dataset?.token) return `{${child.dataset.token}}`;
+    if (child.tagName === 'BR') return '\n';
+    const content = lakeTemplateText(child);
+    return ['DIV', 'P'].includes(child.tagName) ? content === '\n' ? '\n' : `${index ? '\n' : ''}${content}` : content;
+  }).join('');
+}
+
+function syncLakeTemplate(node) {
+  const form = node.closest('form');
+  form.elements[`template_${node.dataset.lakeTemplate}`].value = lakeTemplateText(node);
+  scheduleAutosave(form, false, false, composingInputs.has(node));
+}
+
+async function handleLakeSettingsAction(action, id, target) {
+  if (!action.startsWith('lake.')) return false;
+  if (!['lake.room.relogin', 'lake.room.edit', 'lake.room.save', 'lake.editor.cancel', 'lake.reading.add', 'lake.reading.edit', 'lake.reading.save', 'lake.reading.delete', 'lake.advanced.section', 'lake.advanced.reset', 'lake.template.insert', 'lake.template.reset', 'lake.sound.add', 'lake.sound.pick', 'lake.sound.audition', 'lake.backup.export', 'lake.backup.import'].includes(action)) return false;
+  if (action === 'lake.editor.cancel') { if (!await allowLeaveSettings()) return true; editor = null; renderSettings(); return true; }
+  if (action === 'lake.room.relogin') { await openSettings('room'); await handleAction('bili.begin', '', target); return true; }
+  if (['lake.room.edit', 'lake.reading.add', 'lake.reading.edit'].includes(action)) {
+    if (!await allowLeaveSettings()) return true;
+    editor = action === 'lake.room.edit' ? { type: 'lake-room' } : { type: 'lake-reading', row: action === 'lake.reading.edit' ? lakeReadingRows()[Number(id)] : null };
+    renderSettings();
+    const first = settingsDialog.querySelector('[data-form="lake-reading"] [name="from"], [data-form="lake-room"] input');
+    const target = action === 'lake.reading.edit' ? first?.closest('form')?.querySelector('[name="to"]') : first;
+    target?.focus({ preventScroll: true });
+    return true;
+  }
+  if (action === 'lake.room.save') {
+    const form = target.closest('form');
+    if (!form.reportValidity()) return true;
+    const reconnect = !!snapshot.live?.running;
+    if (reconnect) await command('live.disconnect');
+    await command('live.save', { room_id: numericId(form.elements.room_id.value) });
+    if (reconnect) await command('live.connect');
+    delete form.dataset.dirty; editor = null; renderSettings(); return true;
+  }
+  if (action === 'lake.reading.save') {
+    const form = target.closest('form');
+    if (!form.reportValidity()) return true;
+    if (!await flushAutosaves()) return true;
+    const kind = form.elements.kind.value;
+    const from = form.elements.from.value.trim(), to = form.elements.to.value.trim();
+    const presetId = kind === 'user_words' ? form.elements.preset_id.value : '';
+    if (!from || (!to && !presetId)) throw new Error(t('填写读法，或给这位观众选一个声音。'));
+    const original = editor.row;
+    const rules = structuredClone(snapshot.rules);
+    if (original) rules[original.kind] = (rules[original.kind] || []).filter(row => row.from !== original.from);
+    if (to) rules[kind] = [...(rules[kind] || []).filter(row => row.from !== from), { from, to }];
+    await command('rules.save', { rules });
+    if (presetId) await command('bindings.save', { id: original?.bindingId || '', binding: { platform: 'bilibili', user_id: form.elements.user_id.value ? numericId(form.elements.user_id.value) : null, user_name: form.elements.user_id.value ? null : from, legacy_user_name: null, preset_id: presetId, enabled: true } });
+    else if (original?.bindingId) await command('bindings.delete', { id: original.bindingId, confirmed: true });
+    delete form.dataset.dirty; editor = null; renderSettings(); showToast(t('读法已记住')); return true;
+  }
+  if (action === 'lake.reading.delete') {
+    if (!await flushAutosaves()) return true;
+    const row = lakeReadingRows()[Number(id)]; if (!row) return true;
+    const rules = structuredClone(snapshot.rules);
+    rules[row.kind] = (rules[row.kind] || []).filter(item => item.from !== row.from);
+    await command('rules.save', { rules });
+    if (row.bindingId) await command('bindings.delete', { id: row.bindingId, confirmed: true });
+    renderSettings(); return true;
+  }
+  if (action === 'lake.advanced.section') {
+    if (!await flushAutosaves()) return true;
+    lakeAdvancedSection = lakeAdvancedSection === id ? '' : id; renderSettings(); return true;
+  }
+  if (action === 'lake.advanced.reset') {
+    if (!await flushAutosaves()) return true;
+    if (!await confirmAction(t('恢复高级设置的默认值？'), t('播报消息、模板、关键词音效和礼物合并会恢复默认。声音和记住的读法会保留。'), t('恢复默认'), false)) return true;
+    const rules = structuredClone(snapshot.rules);
+    rules.events = { danmaku_on: true, filter_bilibili_emoticons: true, gift_on: true, free_gift_on: false, super_chat_on: true, guard_on: true, gift_threshold_yuan: 5, super_chat_threshold_yuan: 30 };
+    rules.templates = { ...lakeTemplateDefaults }; rules.sounds = [];
+    await command('rules.save', { rules });
+    await command('live.save', { gift_merge: { enabled: false, initial_seconds: 1.5, increment_seconds: .5, maximum_seconds: 5 } });
+    renderSettings(); return true;
+  }
+  if (action === 'lake.template.reset' || action === 'lake.template.insert') {
+    const node = target.closest('.lake-template-row').querySelector('[data-lake-template]');
+    if (action === 'lake.template.reset') node.innerHTML = lakeTemplateMarkup(lakeTemplateDefaults[id]);
+    else {
+      const token = document.createElement('span'); token.className = 'lake-template-token'; token.contentEditable = 'false'; token.dataset.token = id; token.textContent = t(lakeTokenLabels[id]);
+      const selection = getSelection();
+      const range = lakeTemplateRange && node.contains(lakeTemplateRange.commonAncestorContainer) ? lakeTemplateRange : document.createRange();
+      if (!lakeTemplateRange || !node.contains(range.commonAncestorContainer)) { range.selectNodeContents(node); range.collapse(false); }
+      range.deleteContents(); range.insertNode(token); range.setStartAfter(token); range.collapse(true); selection.removeAllRanges(); selection.addRange(range); lakeTemplateRange = range.cloneRange();
+    }
+    node.focus(); syncLakeTemplate(node); return true;
+  }
+  if (action === 'lake.sound.audition') {
+    const assetId = target.closest('.lake-sound-row')?.querySelector('[data-key="to"]')?.value || id;
+    if (assetId) await command('assets.audition', { id: assetId }, { quiet: true }); return true;
+  }
+  if (action === 'lake.sound.pick') {
+    const pick = window.__TAURI__?.dialog?.open;
+    if (!pick) throw new Error(t('文件选择器不可用，请重新打开应用。'));
+    const path = await pick({ multiple: false, title: t('选择音效'), filters: [{ name: t('音频'), extensions: ['wav', 'mp3', 'flac', 'ogg', 'm4a'] }] });
+    if (typeof path !== 'string') return true;
+    if (!await flushAutosaves()) return true;
+    await command('assets.import', { path, name: path.split(/[\\/]/).pop().replace(/\.[^.]+$/, '') });
+    renderSettings(); return true;
+  }
+  if (action === 'lake.sound.add') {
+    if (!snapshot.assets.length) { await handleLakeSettingsAction('lake.sound.pick', '', target); if (!snapshot.assets.length) return true; }
+    const list = settingsDialog.querySelector('[data-dictionary="sounds"]');
+    list.insertAdjacentHTML('beforeend', `<div class="dict-row lake-sound-row"><span>「</span><input data-key="from" aria-label="${esc(t('关键词'))}" required><span>」→</span><select data-key="to" aria-label="${esc(t('音效'))}">${snapshot.assets.map(asset => option(asset.id, asset.name, snapshot.assets[0]?.id)).join('')}</select>${iconButton('play', t('试听音效'), 'lake.sound.audition')}${iconButton('close', t('删除这条'), 'dictionary.remove')}</div>`);
+    mountSelects(list); list.lastElementChild.querySelector('input').focus(); scheduleAutosave(list.closest('form')); return true;
+  }
+  if (action === 'lake.backup.export' || action === 'lake.backup.import') {
+    if (!await allowLeaveSettings()) return true;
+    const exporting = action.endsWith('.export');
+    const picker = exporting ? window.__TAURI__?.dialog?.save : window.__TAURI__?.dialog?.open;
+    if (!picker) throw new Error(t('文件选择器不可用，请重新打开应用。'));
+    const path = await picker({ title: t(exporting ? '导出备份' : '从备份恢复'), filters: [{ name: 'JSON', extensions: ['json'] }], ...(exporting ? { defaultPath: 'danmakuvoice-backup.json' } : { multiple: false }) });
+    if (typeof path !== 'string') return true;
+    if (!exporting && !await confirmAction(t('从这份备份恢复？'), t('当前接收和播报会停止。会先备份当前数据，再恢复声音、读法和规则；登录和密钥不会被导入。'), t('恢复'), false)) return true;
+    const next = await command(exporting ? 'configuration.export' : 'configuration.import', { path, confirmed: !exporting });
+    renderResult('#operation-result', next.result || t('已完成')); return true;
+  }
+  return false;
+}
+
+function installLakeSettingsEvents() {
+  for (const type of ['lake-thresholds', 'lake-templates']) autoFormTypes.add(type);
+  for (const type of ['lake-reading', 'lake-room']) manualSaveFormTypes.add(type);
+  // Pages slide in sideways; focus landing mid-slide must not leave the page scrolled sideways.
+  settingsDialog.addEventListener('scroll', event => { if (event.target.id === 'settings-content' && event.target.scrollLeft) event.target.scrollLeft = 0; }, true);
+  const scrim = document.createElement('button'); scrim.type = 'button'; scrim.className = 'lake-settings-scrim'; scrim.hidden = true; scrim.tabIndex = -1; scrim.setAttribute('aria-label', t('关闭设置')); document.body.append(scrim);
+  scrim.addEventListener('click', () => { void closeSettings(); });
+  const syncOpen = () => { scrim.hidden = !settingsDialog.open; document.body.classList.toggle('lake-settings-open', settingsDialog.open); };
+  new MutationObserver(syncOpen).observe(settingsDialog, { attributes: true, attributeFilter: ['open'] }); syncOpen();
+  settingsDialog.addEventListener('input', event => {
+    if (event.target.id === 'lake-readings-search') {
+      lakeReadingsSearch = event.target.value;
+      const search = lakeReadingsSearch.toLocaleLowerCase();
+      for (const row of settingsDialog.querySelectorAll('[data-reading-search]')) row.hidden = !row.dataset.readingSearch.includes(search);
+    }
+    const template = event.target.closest('[data-lake-template]');
+    if (template) syncLakeTemplate(template);
+  }, true);
+  settingsDialog.addEventListener('change', event => {
+    if (event.target.name !== 'kind' || !event.target.closest('[data-form="lake-reading"]')) return;
+    settingsDialog.querySelector('[data-reading-voice]').hidden = event.target.value !== 'user_words';
+    settingsDialog.querySelector('[data-reading-emote-note]').hidden = event.target.value !== 'emote_words';
+  });
+  settingsDialog.addEventListener('pointerdown', event => {
+    // Collapsing the focused row's tools on pointerdown would move later
+    // controls before pointerup and swallow their click.
+    if (event.target.closest('button') && document.activeElement?.closest('.lake-template-row')) event.preventDefault();
+  });
+  document.addEventListener('selectionchange', () => {
+    const selection = getSelection();
+    if (selection?.rangeCount && selection.anchorNode?.parentElement?.closest('[data-lake-template]')) lakeTemplateRange = selection.getRangeAt(0).cloneRange();
+  });
+  settingsDialog.addEventListener('paste', event => {
+    const node = event.target.closest('[data-lake-template]'); if (!node) return;
+    event.preventDefault(); const text = event.clipboardData?.getData('text/plain') || '';
+    const selection = getSelection(); if (!selection?.rangeCount) return;
+    const range = selection.getRangeAt(0); range.deleteContents(); const plain = document.createTextNode(text); range.insertNode(plain); range.setStartAfter(plain); range.collapse(true); selection.removeAllRanges(); selection.addRange(range); syncLakeTemplate(node);
+  });
+  settingsDialog.addEventListener('submit', event => {
+    if (!['lake-reading', 'lake-room'].includes(event.target.dataset.form)) return;
+    event.preventDefault(); event.stopImmediatePropagation(); const button = event.target.querySelector('[data-action$=".save"]'); if (button) button.click();
+  }, true);
+  document.addEventListener('keydown', event => {
+    if (!settingsDialog.open || confirmationDialog.open) return;
+    if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); void closeSettings(); }
+    if (event.key !== 'Tab') return;
+    const controls = [...document.querySelectorAll('#titlebar button, #settings button, #settings input, #settings select, #settings textarea, #settings [contenteditable="true"]')].filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+    const index = controls.indexOf(document.activeElement);
+    if (controls.length && (event.shiftKey ? index <= 0 : index < 0 || index === controls.length - 1)) { event.preventDefault(); controls[event.shiftKey ? controls.length - 1 : 0].focus(); }
+  });
+}
+
+
+// ---------- OBS overlay: real feed preview and canvas placement ----------
 const overlayDefaultTagline = "say a word — it'll be read aloud.";
 const overlayWeekdays = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 
@@ -3675,10 +4774,12 @@ function overlayMaskedUrl(url, token) {
   return url.replace(token, `${token.slice(0, 4)}${'•'.repeat(8)}${token.slice(-4)}`);
 }
 
-// The preview uses the canvas OBS reports for its browser source, and 1080p until one connects.
 function overlayPreviewSize() {
+  const status = snapshot.obs?.status || {};
+  const sync = snapshot.obs?.status?.overlay_sync || {};
   const client = (snapshot.overlay?.clients || [])[0];
-  return client ? { width: client.width, height: client.height, note: t('来自 OBS') } : { width: 1920, height: 1080, note: t('连上 OBS 后按实际画布显示') };
+  const known = status.canvas_width > 0 && status.canvas_height > 0 ? { width: status.canvas_width, height: status.canvas_height } : sync.width > 0 && sync.height > 0 ? sync : client;
+  return known ? { width: known.width, height: known.height, note: t('来自 OBS') } : { width: 1920, height: 1080, note: t('连上 OBS 后按实际画布显示') };
 }
 
 function overlayObsClientCount() {
@@ -3686,122 +4787,263 @@ function overlayObsClientCount() {
   return Number.isSafeInteger(view.obs_clients) && view.obs_clients >= 0 ? view.obs_clients : (view.clients || []).length;
 }
 
-function overlayStatus() {
-  const view = snapshot.overlay || {};
-  const clients = view.clients || [];
-  if (!view.settings?.enabled) return { tone: 'idle', text: t('未启用 · 打开右上角的开关后，OBS 才能显示叠加层') };
-  if (view.error) return { tone: 'error', text: errorMessage(view.error) };
-  if (!view.running) return { tone: 'pending', text: t('正在启动…') };
-  if (!overlayObsClientCount()) {
-    const binding = overlayBindingStatus();
-    if (binding) return binding;
-    if (snapshot.obs?.status?.state === 'error') return { tone: 'error', text: errorMessage(snapshot.obs.status.message || '') };
-    return { tone: 'pending', text: t('等待 OBS 连接 · 在 OBS 中添加浏览器来源并粘贴地址') };
-  }
-  const [first] = clients;
-  return { tone: 'ready', text: (first ? ui`OBS 已连接 · ${first.width} × ${first.height}` : t('OBS 已连接')) + (overlayObsClientCount() > 1 ? ui` · ${overlayObsClientCount()} 个画面` : '') };
-}
-
 function overlayBindingStatus() {
-  if (!snapshot.overlay?.settings?.enabled || !snapshot.overlay?.running) return null;
   const sync = snapshot.obs?.status?.overlay_sync || {};
-  if (sync.state === 'syncing') return { tone: 'pending', text: t('正在同步 OBS 来源地址…') };
-  if (sync.state === 'error') return { tone: 'error', text: errorMessage(sync.message || '') };
-  if (sync.state === 'missing') return { tone: 'pending', text: t('OBS 中还没有叠加层来源，请点“添加到 OBS”。') };
-  if (sync.state === 'paused') return { tone: 'pending', text: errorMessage(sync.message || '') };
-  if (sync.state === 'ready' || sync.state === 'updated') return { tone: overlayObsClientCount() ? 'ready' : 'pending', text: overlayObsClientCount() ? t('OBS 来源地址已同步') : t('OBS 来源地址已同步 · 等待画面连接，请确认场景和来源可见。') };
+  if (sync.state === 'syncing') return { tone: 'pending', text: t('正在同步到 OBS…') };
+  if (sync.state === 'error' || sync.state === 'paused') return { tone: 'error', text: errorMessage(sync.message || '') };
+  if (sync.state === 'ready' || sync.state === 'updated') return { tone: 'ready', text: sync.scene ? ui`已放进场景「${sync.scene}」` : t('叠加层已放进场景') };
   return null;
 }
 
-function renderOverlayPanel() {
-  const view = snapshot.overlay;
-  if (!view?.settings) return empty(t('桌面连接不可用。'));
-  const s = view.settings;
-  const radio = (name, value, label, current) => `<label><input type="radio" name="${name}" value="${value}"${current === value ? ' checked' : ''}><span>${esc(label)}</span></label>`;
-  const backdrop = (value, label) => `<button type="button" class="s-ovl-swatch ${value}" data-action="overlay.preview" data-id="backdrop=${value}" aria-pressed="${overlayPreview.backdrop === value}" aria-label="${esc(label)}" title="${esc(label)}"></button>`;
-  const range = (name, label, value, min, max, step, note = '') => {
-    const id = `field-${++fieldSequence}`;
-    return `<div class="s-row"><label class="s-text" for="${id}"><span>${esc(label)}</span>${note ? `<small>${esc(note)}</small>` : ''}</label><input id="${id}" class="s-range" type="range" name="${name}" min="${min}" max="${max}" step="${step}" value="${esc(displayNumber(value))}"><output class="s-num s-range-value" data-overlay-out="${name}"></output></div>`;
-  };
-  const textRow = (name, label, value, attrs, note) => {
-    const id = `field-${++fieldSequence}`;
-    return `<div class="s-row s-wrap"><label class="s-text" for="${id}"><span>${esc(label)}</span><small>${esc(note)}</small></label><input id="${id}" class="s-input s-overlay-text" name="${name}" value="${esc(value)}" ${attrs}></div>`;
-  };
-  const lingerId = `field-${++fieldSequence}`;
-  const styleCard = (value, name, english, note) => ui`<label class="s-ovl-style"><input type="radio" name="style" value="${value}"${s.style === value ? ' checked' : ''}><span class="s-ovl-thumb ${value}" aria-hidden="true"><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i><i class="e"></i><i class="f"></i></span><span class="s-ovl-style-name"><strong>${esc(name)}</strong><em>${english}</em></span><small>${esc(note)}</small></label>`;
-  const preview = ui`<div class="s-ovl-preview">
-<div class="ovp" data-style="${s.style}" data-corner="${s.corner}" data-backdrop="${overlayPreview.backdrop}"><div class="ovp-stage" aria-hidden="true"><div class="ovp-block"><i class="ovp-vig"></i><i class="ovp-card"></i><i class="ovp-spine"></i>
-<div class="ovp-mast"><div class="ovp-kicker"><i class="ovp-dot"></i><span class="ovp-live">LIVE</span><span class="ovp-sep">·</span><span data-ovp-day>SAT</span><span class="ovp-time" data-ovp-time>21:04</span></div><div class="ovp-title" data-ovp-title></div><div class="ovp-tagrow"><i class="ovp-rule"></i><span class="ovp-tagline" data-ovp-tagline></span></div></div>
-<div class="ovp-list"><div class="ovp-item spot"><span class="ovp-av"><i class="ovp-ring"></i><i class="ovp-face"></i></span><span class="ovp-text"><span class="ovp-lit">${esc(t('这一波要是没闪现就寄了，主播反应好快'))}</span></span><span class="ovp-prog"><i class="ovp-fill"></i><i class="ovp-comet"></i></span></div><div class="ovp-item"><span class="ovp-av"><i class="ovp-face two"></i></span><span class="ovp-text">${esc(t('晚上好呀，今天也来听你读弹幕'))}</span></div></div></div></div>
-</div>
-<div class="s-ovl-under"><div class="s-ovl-backdrops" role="group" aria-label="${esc(t('预览背景'))}">${backdrop('dark', t('深色背景'))}${backdrop('light', t('亮色背景'))}${backdrop('clear', t('透明背景'))}</div><span class="s-ovl-size" data-ovp-size></span><span class="s-ovl-tests" title="${esc(t('发一条测试内容到 OBS 里的叠加层'))}">${button(t('测试弹幕'), 'overlay.test', { id: 'danmaku', class: 'small', icon: 'play' })}${button(t('测试醒目留言'), 'overlay.test', { id: 'super_chat', class: 'small' })}</span></div></div>`;
-  const address = ui`<div class="s-card"><div class="s-row s-wrap s-ovl-address"><span class="s-text"><span>叠加层地址</span><small class="s-ovl-url" data-overlay-url></small></span><span class="s-row-actions">${button(t('添加到 OBS'), 'overlay.obs_add', { class: 'small primary', icon: 'plus' })}${button(t('复制地址'), 'overlay.copy', { class: 'small', icon: 'check' })}${button(t('重新生成'), 'overlay.token.reset', { class: 'small quiet', icon: 'refresh' })}</span></div><div class="s-row s-ovl-status" data-overlay-status><span class="service-light idle"></span><span class="s-text"><span data-overlay-status-text></span><small data-overlay-binding-detail hidden></small></span></div><div class="s-row"><span class="s-text"><small>会在 OBS 当前场景放一个“弹幕姬叠加层”浏览器来源，再点一次只更新它。手动添加时，宽高填画布分辨率。</small></span></div></div>`;
-  const look = ui`<div class="s-ovl-styles" role="radiogroup" aria-label="${esc(t('样式'))}">${styleCard('card', t('一体卡'), 'one card', t('刊头和弹幕收进一张玻璃卡片，读完的弹幕变成小行。'))}${styleCard('spine', t('光脊'), 'spine', t('一条发光的竖线串起刊头和弹幕，没有底板，最轻。'))}</div><div class="s-card"><div class="s-row s-wrap"><span class="s-text"><span id="overlay-corner-label">位置</span></span><div class="s-seg" role="radiogroup" aria-labelledby="overlay-corner-label">${radio('corner', 'top_left', t('左上'), s.corner)}${radio('corner', 'top_right', t('右上'), s.corner)}${radio('corner', 'bottom_left', t('左下'), s.corner)}${radio('corner', 'bottom_right', t('右下'), s.corner)}</div></div>${range('scale', t('大小'), s.scale, .5, 2, .05)}${range('vignette', t('暗角深浅'), s.vignette, 0, 1, .05, t('在亮的游戏画面上调深一些，文字更清楚。'))}</div>`;
-  const masthead = ui`<div class="s-card">${textRow('tagline', t('副标题'), s.tagline, `maxlength="48" placeholder="${esc(overlayDefaultTagline)}"`, t('冷场时显示。建议写英文，留空用默认的一句。'))}</div>`;
-  const content = ui`<div class="s-card">${sSwitch('show_danmaku', t('弹幕'), s.show_danmaku)}${sSwitch('show_gift', t('礼物'), s.show_gift)}${sSwitch('show_super_chat', t('醒目留言'), s.show_super_chat, t('单独显示在画面上方正中。'))}${sSwitch('show_guard', t('大航海'), s.show_guard)}<div class="s-row s-wrap"><span class="s-text"><span id="overlay-names-label">观众名字</span></span><div class="s-seg" role="radiogroup" aria-labelledby="overlay-names-label">${radio('names', 'none', t('不显示'), s.names)}${radio('names', 'special', t('仅礼物与醒目留言'), s.names)}${radio('names', 'all', t('全部'), s.names)}</div></div>${sSwitch('merge_duplicates', t('合并重复弹幕'), s.merge_duplicates, t('同样的话连着出现时显示为“×N”。'))}<div class="s-row"><label class="s-text" for="${lingerId}"><span>停留时间</span><small>没有在朗读的弹幕显示多久后淡出。</small></label><span class="s-amount"><input id="${lingerId}" name="linger_seconds" type="number" min="3" max="120" step="1" required value="${esc(s.linger_seconds)}"><span>秒</span></span></div></div>`;
-  const enabledId = `field-${++fieldSequence}`;
-  return ui`<form data-form="overlay" class="s-live-panel-body s-ovl" novalidate><div class="s-live-head"><div class="s-live-head-text"><h3>叠加层</h3></div><label class="s-ovl-enable" for="${enabledId}"><span>启用</span><input id="${enabledId}" class="s-switch" type="checkbox" role="switch" name="enabled"${s.enabled ? ' checked' : ''}></label></div>${preview}${sSection(t('添加到 OBS'), address, `<span class="s-label-note">${esc(t('地址只在本机可用，重新生成会让旧地址失效'))}</span>`)}${sSection(t('样式'), look)}${sSection(t('刊头文字'), masthead)}${sSection(t('显示内容'), content)}${autoStatus()}</form>`;
+function overlayStatus() {
+  if (snapshot.overlay?.error) return { tone: 'error', text: errorMessage(snapshot.overlay.error) };
+  return overlayBindingStatus() || { tone: 'pending', text: t('叠加层还没放进场景') };
 }
 
-// Connection state changes while the page is open; only the status parts are rewritten.
+function renderOverlayAdvanced() {
+  const s = snapshot.overlay?.settings;
+  if (!s) return '';
+  const choice = (name, value, label, checked, type = 'radio') => `<label class="lake-obs-choice"><input type="${type}" name="${name}" value="${value}"${checked ? ' checked' : ''}><span>${esc(label)}</span></label>`;
+  return `<section class="lake-obs-section"><h3>${esc(t('叠加层显示'))}</h3><form data-form="overlay" novalidate><div class="lake-obs-option-row"><span>${esc(t('显示哪些'))}</span><div class="lake-obs-choices">${[['danmaku', '弹幕'], ['gift', '礼物'], ['super_chat', '醒目留言'], ['guard', '大航海']].map(([kind, label]) => choice(`show_${kind}`, 'on', t(label), s[`show_${kind}`], 'checkbox')).join('')}</div></div><div class="lake-obs-option-row"><span>${esc(t('观众名字'))}</span><div class="lake-obs-choices">${[['none', '不显示'], ['special', '仅礼物'], ['all', '全部']].map(([value, label]) => choice('names', value, t(label), s.names === value)).join('')}</div></div>${sSwitch('merge_duplicates', t('重复的话合成一条'), s.merge_duplicates)}${autoStatus()}</form></section>`;
+}
+
+function renderOverlayPanel() {
+  const s = snapshot.overlay?.settings;
+  if (!s) return empty(t('桌面连接不可用。'));
+  const hidden = ['corner', 'offset_x', 'offset_y', 'scale', 'title', 'tagline'].map(name => `<input type="hidden" name="${name}" value="${esc(s[name] ?? (name.startsWith('offset_') ? 0 : ''))}">`).join('');
+  const edit = name => `data-ovp-edit="${name}" tabindex="0" role="textbox" aria-label="${esc(t(name === 'title' ? '双击编辑主标题' : '双击编辑副标题'))}" aria-readonly="true" spellcheck="false" title="${esc(t('双击文字编辑，回车保存'))}"`;
+  return `<form data-form="overlay" class="lake-obs-preview" novalidate>${hidden}<div class="lake-obs-binding"><span class="lake-obs-link" aria-hidden="true"><i></i><b></b><i></i></span><span data-overlay-status-text></span><small data-overlay-binding-detail></small>${button(t('添加到 OBS'), 'overlay.obs_add', { class: 'primary', icon: 'plus' })}${button(t('打开 OBS'), 'lake.obs.launch', { class: 'primary', icon: 'play' })}${button(t('重新连接'), 'lake.obs.connect', { class: 'quiet' })}</div><div class="lake-obs-preview-frame"><div class="ovp lake-obs-canvas" data-style="spine" data-corner="${esc(s.corner)}" data-backdrop="dark"><div class="ovp-stage"><svg class="lake-obs-scene" viewBox="0 0 640 360" preserveAspectRatio="none" aria-hidden="true"><path d="M0 360V250C60 236 110 214 170 222C230 230 260 200 320 196C380 192 420 222 480 226C540 230 590 208 640 214V360Z" fill="#151326"></path><path d="M0 360V292C80 280 150 300 230 290C320 278 380 262 460 272C540 282 600 290 640 284V360Z" fill="#0c0b15"></path></svg><i class="lake-obs-guide-x" hidden></i><i class="lake-obs-guide-y" hidden></i><div class="lake-obs-superchat" data-ovp-superchat></div><div class="ovp-block" data-ovp-drag tabindex="0" role="group" aria-label="${esc(t('拖动摆放叠加层，也可用方向键微调'))}"><i class="ovp-vig"></i><i class="ovp-spine"></i><div class="ovp-mast"><div class="ovp-kicker"><i class="ovp-dot"></i><span class="ovp-live">LIVE</span><span class="ovp-sep">·</span><span data-ovp-day></span><span class="ovp-time" data-ovp-time></span></div><div class="ovp-title" data-ovp-title ${edit('title')}></div><div class="ovp-tagrow"><i class="ovp-rule"></i><span class="ovp-tagline" data-ovp-tagline ${edit('tagline')}></span></div></div><div class="ovp-list" data-ovp-items></div><button type="button" class="lake-obs-resize" data-ovp-resize tabindex="0" aria-label="${esc(t('拖动缩放，也可用方向键调整大小'))}"></button></div></div></div></div><div class="lake-obs-preview-foot"><span>${esc(t('拖动摆放，拖右下角缩放，靠近四角会自动贴合'))}</span><span class="lake-obs-canvas-size">${esc(t('OBS 画布'))} <em data-ovp-size></em></span><i aria-hidden="true"></i><button type="button" data-action="lake.obs.advanced">${esc(t('高级'))}${icon('arrow')}</button></div>${autoStatus()}</form>`;
+}
+
 function updateOverlayStatus() {
-  const page = settingsDialog.querySelector?.('form[data-form="overlay"]');
-  if (!page || !snapshot.overlay) return;
-  const view = snapshot.overlay;
+  if (!settingsDialog.open) return;
+  const root = settingsDialog.querySelector?.('[data-obs-root]');
+  if (!root) return;
+  // Only a transition between connection, preview and advanced replaces DOM.
+  updateObsSettings();
+  if (!root.isConnected || !snapshot.overlay) return;
+  const offline = root.dataset.obsView === 'offline';
+  const local = snapshot.obs?.local !== false;
   const status = overlayStatus();
-  const light = page.querySelector('[data-overlay-status] .service-light');
-  const lightClass = `service-light ${status.tone}`;
-  if (light && light.className !== lightClass) light.className = lightClass;
-  const text = page.querySelector('[data-overlay-status-text]');
-  if (text && text.textContent !== status.text) text.textContent = status.text;
-  const detail = page.querySelector('[data-overlay-binding-detail]');
+  const sync = snapshot.obs?.status?.overlay_sync || {};
+  const bound = ['ready', 'updated'].includes(sync.state);
+  // Until the first check answers, the stage says it is looking. After that, periodic
+  // checks keep the closed state steady; only an explicit launch or connect wakes the link.
+  const unknown = offline && !obsBusy && !['error', 'ok'].includes(snapshot.obs?.status?.state);
+  const waking = offline && (!!obsBusy || unknown);
+  const bar = root.querySelector('.lake-obs-binding');
+  if (bar) bar.dataset.link = offline ? waking ? 'waking' : 'off' : 'on';
+  const text = root.querySelector('[data-overlay-status-text]');
+  const title = offline ? waking ? obsBusy === 'launch' ? t('正在打开 OBS…') : obsBusy ? t('正在连接 OBS…') : t('正在检测 OBS…') : t('OBS 还没打开') : bound ? status.text : t('已连接 OBS');
+  if (text && text.textContent !== title) text.textContent = title;
+  const detail = root.querySelector('[data-overlay-binding-detail]');
   if (detail) {
-    const binding = overlayBindingStatus();
-    detail.hidden = !binding || binding.text === status.text;
-    detail.classList.toggle('field-error', binding?.tone === 'error');
-    if (detail.textContent !== (binding?.text || '')) detail.textContent = binding?.text || '';
+    detail.textContent = offline ? unknown ? '' : local ? t('打开后会自动连上，在这里摆好的位置会同步过去') : t('OBS 在另一台电脑上，它开着就会自动连上') : bound ? t('之后的改动会自动同步到 OBS') : status.text;
+    detail.classList.toggle('field-error', !offline && status.tone === 'error');
   }
-  const url = page.querySelector('[data-overlay-url]');
-  const masked = view.settings?.enabled ? overlayMaskedUrl(view.url, view.settings?.token) : t('启用后生成本机地址');
-  if (url && url.textContent !== masked) url.textContent = masked;
-  for (const node of page.querySelectorAll('[data-action="overlay.copy"]')) node.disabled = !view.settings?.enabled || !view.settings?.token;
-  for (const node of page.querySelectorAll('[data-action="overlay.test"], [data-action="overlay.obs_add"]')) node.disabled = !view.running || (node.dataset.action === 'overlay.obs_add' && obsBusy);
-  updateLiveTabs();
+  const add = root.querySelector('[data-action="overlay.obs_add"]');
+  if (add) { add.hidden = offline || bound; add.disabled = !!obsBusy; }
+  const launch = root.querySelector('.lake-obs-binding [data-action="lake.obs.launch"]');
+  if (launch) { launch.hidden = !offline || !local; launch.disabled = !!obsBusy; }
+  const reconnect = root.querySelector('.lake-obs-binding [data-action="lake.obs.connect"]');
+  if (reconnect) { reconnect.hidden = !offline || local; reconnect.disabled = !!obsBusy; }
   updateOverlayPreview();
 }
 
+function lakeOverlayItems() {
+  const feed = snapshot.overlay?.preview || {};
+  const source = feed.items || [];
+  const settings = snapshot.overlay?.settings || {};
+  const items = [];
+  for (const item of source) {
+    if (settings[`show_${item.kind}`] === false) continue;
+    const previous = items.at(-1);
+    if (settings.merge_duplicates && previous && previous.kind === item.kind && previous.message === item.message && previous.name === item.name && previous.gift === item.gift && item.kind === 'danmaku') {
+      previous.count = (previous.count || 1) + 1; previous.job_id = item.job_id ?? previous.job_id;
+    } else items.push({ ...item });
+  }
+  return { ...feed, items };
+}
+
 function updateOverlayPreview() {
-  const frame = settingsDialog.querySelector?.('.ovp');
+  const frame = settingsDialog.querySelector?.('.lake-obs-canvas');
   const form = frame?.closest('form');
   if (!frame || !form) return;
   const field = name => form.elements[name];
-  const choice = name => form.querySelector(`input[name="${name}"]:checked`)?.value;
   const scale = Math.min(2, Math.max(.5, Number(field('scale')?.value) || 1));
-  const vignette = Math.min(1, Math.max(0, Number(field('vignette')?.value)));
-  frame.dataset.style = choice('style') || 'spine';
-  frame.dataset.corner = choice('corner') || 'top_left';
-  frame.dataset.backdrop = overlayPreview.backdrop;
-  frame.style.setProperty('--ovp-scale', String(scale));
-  frame.style.setProperty('--ovp-vig', String(Number.isFinite(vignette) ? vignette : .6));
+  frame.dataset.style = 'spine'; frame.dataset.corner = field('corner')?.value || 'top_left';
+  frame.style.setProperty('--ovp-scale', String(scale)); frame.style.setProperty('--ovp-vig', '.6');
   const size = overlayPreviewSize();
   frame.style.setProperty('--ovp-ratio', `${size.width} / ${size.height}`);
-  const title = String(field('title')?.value || '').trim() || '今晚的弹幕';
-  const tagline = String(field('tagline')?.value || '').trim() || overlayDefaultTagline;
+  frame.style.setProperty('--ovp-aspect', String(size.width / size.height));
+  for (const [name, dimension] of [['offset_x', size.width], ['offset_y', size.height]]) frame.style.setProperty(`--ovp-${name.replace('_', '-')}`, `${(Number(field(name)?.value) || 0) / dimension * 100}${name === 'offset_x' ? 'cqw' : 'cqh'}`);
   const now = new Date();
-  const values = {
-    '[data-ovp-title]': title, '[data-ovp-tagline]': tagline,
-    '[data-ovp-day]': overlayWeekdays[now.getDay()], '[data-ovp-time]': `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
-    '[data-ovp-size]': `${size.width} × ${size.height} · ${size.note}`,
-    '[data-overlay-out="scale"]': `${Math.round(scale * 100)}%`, '[data-overlay-out="vignette"]': `${Math.round((Number.isFinite(vignette) ? vignette : .6) * 100)}%`,
+  const values = { '[data-ovp-title]': field('title')?.value || t('今晚的弹幕'), '[data-ovp-tagline]': field('tagline')?.value || overlayDefaultTagline, '[data-ovp-day]': overlayWeekdays[now.getDay()], '[data-ovp-time]': `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`, '[data-ovp-size]': `${size.width} × ${size.height}` };
+  for (const [selector, value] of Object.entries(values)) { const node = form.querySelector(selector); if (node && node.contentEditable !== 'true' && node.textContent !== value) node.textContent = value; }
+  if (lakeObsDrag) return;
+  const feed = lakeOverlayItems();
+  const current = feed.reading;
+  const ordinary = feed.items.filter(item => item.kind !== 'super_chat').slice(-5);
+  const renderItem = (item, index) => {
+    const reading = current?.job_id != null && item.job_id === current.job_id;
+    const progress = reading ? Math.min(100, 100 * (Number(current.played_ms) || 0) / Math.max(Number(current.queued_ms) || 0, 500)) : 100;
+    const event = { ...item, gift_name: item.gift, guard_name: item.guard, user_name: item.name, avatar_url: item.avatar, is_bilibili_emoticon: item.sticker };
+    const avatar = safeMediaUrl(item.avatar);
+    return `<div class="ovp-item ${reading || index === ordinary.length - 1 ? 'spot' : index === ordinary.length - 2 ? 'recent' : 'older'}${item.kind !== 'danmaku' ? ' special' : ''}"><span class="ovp-av">${avatar ? `<img src="${esc(avatar)}" alt="" referrerpolicy="no-referrer">` : '<i class="ovp-face"></i>'}</span><span class="ovp-text">${item.name ? `<span class="ovp-name">${esc(item.name)}</span>` : ''}<span class="ovp-live-words${reading ? ' reading' : ''}" style="--read:${progress}%">${renderChatBody(event)}</span>${item.count > 1 ? `<small class="ovp-repeat">×${item.count}</small>` : ''}</span></div>`;
   };
-  for (const [selector, value] of Object.entries(values)) {
-    const node = form.querySelector(selector);
-    if (node && node.textContent !== value) node.textContent = value;
+  const list = form.querySelector('[data-ovp-items]');
+  const markup = ordinary.length ? ordinary.map(renderItem).join('') : `<span class="lake-obs-waiting">waiting for the first word…</span>`;
+  if (list && list.innerHTML !== markup) list.innerHTML = markup;
+  const special = feed.items.filter(item => item.kind === 'super_chat' && Date.now() - Number(item.at) < 14000).at(-1);
+  const sc = form.querySelector('[data-ovp-superchat]');
+  if (sc) { const content = special ? `<span>${esc(special.name || t('醒目留言'))}</span><strong>${esc(special.message || '')}</strong>` : ''; if (sc.innerHTML !== content) sc.innerHTML = content; sc.hidden = !special; }
+}
+
+// Positions and offsets are in OBS source pixels. Artwork margins scale with the
+// design, while offset_x/offset_y deliberately do not (matching overlay.html).
+// Each axis snaps to its own margin line, so sliding along an edge sticks to it and
+// a corner is simply both. With `follow`, the block anchors to the nearer of top and
+// bottom, so new lines grow away from that edge instead of off the canvas. Right-side
+// corners mirror the layout, so left/right only changes when an edge is reached.
+function lakeOverlayPlacement({ x, y, width, height, canvasWidth, canvasHeight, scale, corner, snap = 0, follow = false }) {
+  const unit = Math.min(canvasWidth / 1920, canvasHeight / 1080) * scale;
+  const marginX = 72 * unit, marginY = 48 * unit;
+  const left = marginX, right = canvasWidth - width - marginX, top = marginY, bottom = canvasHeight - height - marginY;
+  let snapX = '', snapY = '';
+  if (snap > 0) {
+    if (Math.abs(x - left) <= snap) { x = left; snapX = 'left'; } else if (Math.abs(x - right) <= snap) { x = right; snapX = 'right'; }
+    if (Math.abs(y - top) <= snap) { y = top; snapY = 'top'; } else if (Math.abs(y - bottom) <= snap) { y = bottom; snapY = 'bottom'; }
   }
-  for (const button of form.querySelectorAll('[data-action="overlay.preview"]')) {
-    const [key, value] = button.dataset.id.split('=');
-    button.setAttribute('aria-pressed', String(overlayPreview[key] === value));
+  const [cornerY = 'top', cornerX = 'left'] = String(corner || '').split('_');
+  if (follow || (snapX && snapY)) corner = `${snapY || (follow ? (y + height / 2 > canvasHeight / 2 ? 'bottom' : 'top') : cornerY)}_${snapX || cornerX}`;
+  const anchors = { top_left: [left, top], top_right: [right, top], bottom_left: [left, bottom], bottom_right: [right, bottom] };
+  const anchor = anchors[corner] || anchors.top_left;
+  return { corner: anchors[corner] ? corner : 'top_left', offset_x: Math.max(-8192, Math.min(8192, Math.round(x - anchor[0]))), offset_y: Math.max(-8192, Math.min(8192, Math.round(y - anchor[1]))), scale, snapX, snapY, snapped: !!(snapX && snapY) };
+}
+
+function lakeOverlayMeasure(frame, block) {
+  const canvas = frame.querySelector('.ovp-stage').getBoundingClientRect(), rect = block.getBoundingClientRect(), size = overlayPreviewSize();
+  const ratio = size.width / canvas.width;
+  return { x: (rect.left - canvas.left) * ratio, y: (rect.top - canvas.top) * ratio, width: rect.width * ratio, height: rect.height * ratio, canvasWidth: size.width, canvasHeight: size.height, ratio, canvas };
+}
+
+function lakeOverlayApply(form, placement, immediate = false) {
+  for (const key of ['corner', 'offset_x', 'offset_y', 'scale']) if (form.elements[key]) form.elements[key].value = String(placement[key]);
+  updateOverlayPreview();
+  const frame = form.querySelector('.lake-obs-canvas'), block = frame?.querySelector('[data-ovp-drag]');
+  if (frame && block) {
+    const guideX = frame.querySelector('.lake-obs-guide-x'), guideY = frame.querySelector('.lake-obs-guide-y');
+    guideX.hidden = !placement.snapX; guideY.hidden = !placement.snapY;
+    if (placement.snapX || placement.snapY) { const a = frame.getBoundingClientRect(), b = block.getBoundingClientRect(); guideX.style.left = `${(placement.snapX === 'right' ? b.right : b.left) - a.left}px`; guideY.style.top = `${(placement.snapY === 'bottom' ? b.bottom : b.top) - a.top}px`; }
   }
+  if (immediate) { clearTimeout(lakeObsSaveTimer); lakeObsSaveTimer = null; scheduleAutosave(form, true); }
+  else if (!lakeObsSaveTimer) lakeObsSaveTimer = setTimeout(() => { lakeObsSaveTimer = null; if (form.isConnected) scheduleAutosave(form, true); }, 120);
+}
+
+async function saveLakeObsPassword(root = settingsDialog) {
+  const input = root.querySelector('[data-obs-secret]');
+  if (!input || !input.dataset.changed) return;
+  const pending = lakeObsPasswordSaves.get(input);
+  if (pending) {
+    await pending;
+    return saveLakeObsPassword(root);
+  }
+  const password = input.value;
+  const saving = (async () => {
+    await command('obs.password', { password }, { quiet: true, silent: true });
+    if (input.value === password) { input.value = ''; delete input.dataset.changed; }
+  })();
+  lakeObsPasswordSaves.set(input, saving);
+  try { await saving; }
+  finally { lakeObsPasswordSaves.delete(input); }
+}
+
+async function handleLakeObsAction(action, id, target) {
+  if (!action.startsWith('lake.obs.')) return false;
+  if (action === 'lake.obs.advanced' || action === 'lake.obs.preview' || action === 'lake.obs.back') {
+    if (!await flushAutosaves()) return true;
+    await saveLakeObsPassword();
+    lakeObsPage = action.endsWith('advanced') ? 'advanced' : 'preview'; renderSettings();
+  } else if (action === 'lake.obs.password.show') {
+    const input = target.closest('.lake-obs-field')?.querySelector('[data-obs-secret]');
+    if (input) { const show = input.type === 'password'; input.type = show ? 'text' : 'password'; target.setAttribute('aria-pressed', String(show)); target.setAttribute('aria-label', t(show ? '隐藏密码' : '显示密码')); }
+  } else if (action === 'lake.obs.connect' || action === 'lake.obs.launch') {
+    await saveLakeObsPassword(); await flushObsForm();
+    if (action.endsWith('launch')) await launchObs(); else await testObs();
+  }
+  return true;
+}
+
+function installLakeObsEvents() {
+  if (lakeObsEventsInstalled) return; lakeObsEventsInstalled = true;
+  settingsDialog.addEventListener('input', event => {
+    if (event.target.matches('[data-obs-secret]')) event.target.dataset.changed = 'true';
+    if (event.target.matches('.lake-obs-program input[name="executable"]')) { const label = event.target.closest('.lake-obs-program').querySelector('[data-lake-obs-program]'); if (label) label.textContent = event.target.value.split(/[\\/]/).at(-1) || t('已自动找到 obs64.exe'); }
+  });
+  settingsDialog.addEventListener('change', event => {
+    if (event.target.matches('[data-obs-secret]')) void saveLakeObsPassword().catch(error => showToast(errorMessage(error), true));
+  });
+  settingsDialog.addEventListener('pointerdown', event => {
+    const block = event.target.closest('[data-ovp-drag]');
+    if (!block || event.button !== 0 || event.target.closest('[contenteditable="true"]')) return;
+    const frame = block.closest('.lake-obs-canvas'), form = block.closest('form');
+    const measure = lakeOverlayMeasure(frame, block);
+    lakeObsDrag = { ...measure, block, frame, form, pointer: event.pointerId, startX: event.clientX, startY: event.clientY, scale: Number(form.elements.scale.value) || 1, corner: form.elements.corner.value, resizing: !!event.target.closest('[data-ovp-resize]'), moved: false };
+    if (!event.target.closest('[data-ovp-edit]')) event.preventDefault();
+  });
+  settingsDialog.addEventListener('pointermove', event => {
+    const d = lakeObsDrag; if (!d || d.pointer !== event.pointerId) return;
+    const dx = (event.clientX - d.startX) * d.ratio, dy = (event.clientY - d.startY) * d.ratio;
+    if (!d.moved && Math.hypot(dx, dy) < 3 * d.ratio) return;
+    if (!d.moved) { d.block.setPointerCapture(event.pointerId); d.block.classList.add('dragging'); }
+    d.moved = true; event.preventDefault();
+    let scale = d.scale, width = d.width, height = d.height, x = d.x + dx, y = d.y + dy;
+    if (d.resizing) { const factor = 1 + (dx * d.width + dy * d.height) / (d.width * d.width + d.height * d.height); scale = Math.max(.5, Math.min(2, Math.round(d.scale * factor * 100) / 100)); width *= scale / d.scale; height *= scale / d.scale; x = d.x; y = d.y; }
+    const inset = 18 * d.ratio;
+    x = Math.max(inset, Math.min(d.canvasWidth - width - inset, x)); y = Math.max(inset, Math.min(d.canvasHeight - height - inset, y));
+    const placement = lakeOverlayPlacement({ ...d, x, y, width, height, scale, snap: d.resizing ? 0 : 12 * d.ratio, follow: !d.resizing });
+    lakeOverlayApply(d.form, placement);
+  });
+  const finish = event => {
+    const d = lakeObsDrag; if (!d || d.pointer !== event.pointerId) return;
+    lakeObsDrag = null; d.block.classList.remove('dragging');
+    for (const guide of d.frame.querySelectorAll('.lake-obs-guide-x, .lake-obs-guide-y')) guide.hidden = true;
+    if (d.block.hasPointerCapture(event.pointerId)) d.block.releasePointerCapture(event.pointerId);
+    if (d.moved) { clearTimeout(lakeObsSaveTimer); lakeObsSaveTimer = null; scheduleAutosave(d.form, true); }
+  };
+  settingsDialog.addEventListener('pointerup', finish); settingsDialog.addEventListener('pointercancel', finish);
+  const beginEdit = node => {
+    if (node.contentEditable === 'true') return;
+    node.dataset.original = node.textContent; node.contentEditable = 'true'; node.setAttribute('aria-readonly', 'false'); node.focus();
+    const range = document.createRange(); range.selectNodeContents(node); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  };
+  settingsDialog.addEventListener('dblclick', event => { const node = event.target.closest('[data-ovp-edit]'); if (node) { event.preventDefault(); beginEdit(node); } });
+  settingsDialog.addEventListener('focusout', event => {
+    const node = event.target.closest('[data-ovp-edit]'); if (!node || node.contentEditable !== 'true') return;
+    const name = node.dataset.ovpEdit, form = node.closest('form'), value = String(node.textContent || '').trim();
+    const limit = name === 'title' ? 24 : 64;
+    if (node.dataset.cancelled) { node.textContent = node.dataset.original; delete node.dataset.cancelled; }
+    else if ((name === 'title' && !value) || [...value].length > limit || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) { node.textContent = node.dataset.original; showToast(t(name === 'title' ? '请填写 1 到 24 字的叠加层主标题' : '副标题最多 64 个字'), true); }
+    else { form.elements[name].value = value; scheduleAutosave(form, true); }
+    node.contentEditable = 'false'; node.setAttribute('aria-readonly', 'true'); delete node.dataset.original; updateOverlayPreview();
+  });
+  settingsDialog.addEventListener('keydown', event => {
+    const node = event.target.closest('[data-ovp-edit]');
+    if (node && ['Enter', 'Escape'].includes(event.key) && !event.isComposing) { event.preventDefault(); if (node.contentEditable !== 'true') { if (event.key === 'Enter') beginEdit(node); } else { if (event.key === 'Escape') node.dataset.cancelled = 'true'; node.blur(); } return; }
+    if (event.target.closest('[contenteditable="true"]')) return;
+    const block = event.target.closest('[data-ovp-drag]'); if (!block || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '+', '-', '='].includes(event.key)) return;
+    event.preventDefault(); const form = block.closest('form'), frame = block.closest('.lake-obs-canvas'); const m = lakeOverlayMeasure(frame, block);
+    let scale = Number(form.elements.scale.value) || 1;
+    const oldScale = scale, resizing = event.target.matches('[data-ovp-resize]') || ['+', '-', '='].includes(event.key);
+    if (resizing) scale = Math.max(.5, Math.min(2, Math.round((scale + (['ArrowLeft', 'ArrowDown', '-'].includes(event.key) ? -.05 : .05)) * 100) / 100));
+    else {
+      const amount = event.shiftKey ? 10 : 1;
+      // Exact pixel nudges must not round-trip through subpixel CSS layout.
+      lakeOverlayApply(form, { corner: form.elements.corner.value, scale, offset_x: (Number(form.elements.offset_x.value) || 0) + (event.key === 'ArrowLeft' ? -amount : event.key === 'ArrowRight' ? amount : 0), offset_y: (Number(form.elements.offset_y.value) || 0) + (event.key === 'ArrowUp' ? -amount : event.key === 'ArrowDown' ? amount : 0) }, true);
+      return;
+    }
+    lakeOverlayApply(form, lakeOverlayPlacement({ ...m, width: m.width * scale / oldScale, height: m.height * scale / oldScale, scale, corner: form.elements.corner.value }), true);
+  });
 }
 
 async function copyText(text) {
@@ -3907,10 +5149,30 @@ async function closeSettings() {
   if (editor?.type === 'qr') await cancelQr();
   if (editor?.type === 'qr') editor = null;
   tabEditors.set(settingsTab, editor);
-  settingsDirty = false; leaveGhost(settingsDialog, 260); settingsDialog.close();
-  if (step === 'main') updateLive();
-  if (step === 'login' && !qrProvider) void startQr('bilibili');
-  if (step === 'doubaoQr' && !qrProvider) void startQr('doubao');
+  settingsDirty = false;
+  closeSettingsDialog(() => {
+    if (step === 'main') updateLive();
+    if (step === 'login' && !qrProvider) void startQr('bilibili');
+    if (step === 'doubaoQr' && !qrProvider) void startQr('doubao');
+  });
+}
+
+// The drawer and its veil slide back out before the dialog closes. Opening again
+// mid-way finishes the close first, so the drawer always enters from the side.
+let settingsLeaving = null;
+function finishSettingsLeave() {
+  const leaving = settingsLeaving;
+  if (!leaving) return;
+  settingsLeaving = null; clearTimeout(leaving.timer);
+  settingsDialog.classList.remove('lake-leaving'); document.querySelector('.lake-settings-scrim')?.classList.remove('lake-leaving');
+  if (settingsDialog.open) settingsDialog.close();
+  leaving.after?.();
+}
+function closeSettingsDialog(after) {
+  if (settingsLeaving) return;
+  if (!settingsDialog.open || !motionAllowed() || !settingsDialog.classList.contains('lake-settings')) { if (settingsDialog.open) settingsDialog.close(); after?.(); return; }
+  settingsDialog.classList.add('lake-leaving'); document.querySelector('.lake-settings-scrim')?.classList.add('lake-leaving');
+  settingsLeaving = { after, timer: setTimeout(finishSettingsLeave, 220) };
 }
 
 async function refreshLocalServices(force = false) {
@@ -3932,11 +5194,14 @@ async function refreshLocalServices(force = false) {
 }
 
 async function openSettings(tab) {
+  finishSettingsLeave();
+  if (settingsDialog.open && !await allowLeaveSettings()) return;
   if (qrProvider) await cancelQr();
+  if (!tab && !settingsDialog.open) { settingsTab = 'home'; editor = null; }
   if (tab) { chooseLivePanel(tab); tab = settingsTabId(tab); }
   if (tab && tab !== settingsTab) { tabEditors.set(settingsTab, editor); settingsTab = tab; editor = tabEditors.get(tab) || null; renderSettings(); }
   else if (!settingsDialog.open || !settingsDialog.querySelector('.settings-shell')) renderSettings();
-  settingsDialog.showModal();
+  if (!settingsDialog.open) settingsDialog.show();
   placeSettingsInk();
   updateObsSettings();
   void refreshLocalServices(true);
@@ -3948,21 +5213,22 @@ function restoreAliasNavigation() {
   aliasReturnContext = null;
   settingsTab = origin.tab; editor = origin.editor;
   settingsDirty = false;
-  closeSelect(); settingsDialog.close();
-  if (step === 'main') updateLive();
+  closeSelect();
+  closeSettingsDialog(() => { if (step === 'main') updateLive(); });
 }
 
 async function openViewerSettings(tab, nextEditor) {
+  finishSettingsLeave();
   if (nextEditor?.type === 'alias' && aliasReturnContext && settingsDialog.open) return;
   if (nextEditor?.type === 'alias' && !settingsDialog.open) {
     aliasReturnContext = { tab: settingsTab, editor };
   }
   if (qrProvider) await cancelQr();
   tabEditors.set(settingsTab, editor);
-  settingsTab = tab;
+  settingsTab = nextEditor?.type === 'alias' || nextEditor?.type === 'binding' ? 'readings' : settingsTabId(tab);
   editor = nextEditor;
   renderSettings();
-  settingsDialog.showModal();
+  if (!settingsDialog.open) settingsDialog.show();
   placeSettingsInk();
 }
 
@@ -3989,6 +5255,10 @@ async function saveLocalDirectory(provider, directory) {
 }
 
 async function handleAction(action, id, target) {
+  if (await handleLakeMainAction(action, id, target)) return;
+  if (await handleLakeSettingsAction(action, id, target)) return;
+  if (typeof handleLakeObsAction === 'function' && await handleLakeObsAction(action, id, target)) return;
+  if (await handleLakeVoiceAction(action, id, target)) return;
   if (action === 'toast.undo') {
     const undo = toastUndo; toastUndo = null; clearTimeout(toastTimer);
     document.querySelector('#toast').hidden = true;
@@ -4019,10 +5289,10 @@ async function handleAction(action, id, target) {
   if (action === 'update.check') {
     if (updateBusy) return;
     updateBusy = true; updateError = ''; updateInfo = null;
-    renderSettings();
+    updateLakeVersionRows();
     try { updateInfo = await invoke('check_update'); }
     catch (error) { updateError = errorMessage(error, 'DV-U01'); }
-    finally { updateBusy = false; if (settingsDialog.open && settingsTab === 'data') renderSettings(); }
+    finally { updateBusy = false; updateLakeVersionRows(); }
     return;
   }
   if (settingsDialog.open && !['settings.close', 'settings.tab', 'editor.cancel', 'autosave.retry', 'autosave.discard', 'draft.discard', 'overlay.preview', 'overlay.copy', 'live.panel', 'obs.auto_detect'].includes(action) && !action.startsWith('dictionary.')) {
@@ -4033,10 +5303,10 @@ async function handleAction(action, id, target) {
   if (['tts.select', 'service.prefer', 'preset.default', 'preset.clear-default', 'voice-audition.add', 'fish.audition', 'settings.tab'].includes(action)) await settleVoiceAuditionChoice();
   if (action === 'tts.open') {
     const menu = document.querySelector('#tts-menu');
-    if (!menu.hidden) { closeVoicePanel(); return; }
+    if (!menu.hidden && !isLeaving(menu)) { closeVoicePanel(); return; }
+    cancelLeave(menu);
     document.querySelector('#queue-panel')?.setAttribute('hidden', '');
     voiceBrowse = snapshot.presets?.find(item => item.id === snapshot.rules?.default_preset_id)?.provider || 'doubao';
-    menu.classList.remove('from-orb');
     renderVoicePanel();
     menu.hidden = false;
     target?.setAttribute('aria-expanded', 'true');
@@ -4050,13 +5320,15 @@ async function handleAction(action, id, target) {
     if (preset.id === snapshot.rules?.default_preset_id) return;
     if (preset.provider === 'doubao' && !doubaoConnection(preset)?.has_credential) { closeVoicePanel(); return guideDoubaoLogin(preset.id); }
     await command('presets.default', { id: preset.id }, { quiet: true });
-    showToast(getLanguage() === 'en' ? `Future chat will use “${presetLabel(preset)}”.` : `之后的弹幕用「${presetLabel(preset)}」朗读`);
+    showToast(getLanguage() === 'en' ? `Future chat will use “${presetLabel(preset)}”.` : `之后的弹幕用「${presetLabel(preset)}」播报`);
     renderVoicePanel();
     return;
   }
   if (action === 'voice.audition') {
     auditionPresetId = id; auditionStartedAt = Date.now(); renderVoicePanel();
-    await command('audition', { preset_id: id, text: voiceAuditionDraft.text || t('你好，欢迎来到直播间。') }, { quiet: true });
+    const preset = snapshot.presets.find(item => item.id === id);
+    if (!preset) return;
+    await command('audition', { preset_id: id, text: await voicePanelAuditionText(preset) }, { quiet: true });
     return;
   }
   if (action === 'queue.toggle') {
@@ -4071,26 +5343,15 @@ async function handleAction(action, id, target) {
   }
   if (action === 'theme.toggle') {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    revealTheme(next, target);
+    await revealTheme(next, target);
     updateThemeControl(); updateLakeClock();
     await command('preferences.save', { preferences: { appearance: next } }, { quiet: true });
     for (const choice of settingsDialog.querySelectorAll('input[name="appearance"]')) choice.checked = choice.value === next;
     return;
   }
   if (action === 'lake.prepare') { lakeEnded = false; lakeTranscriptSignature = ''; onAirSignature = ''; updateLive(); return; }
-  if (action === 'volume.toggle') {
-    const panel = document.querySelector('#tts-menu');
-    if (!panel) return;
-    const open = panel.hidden;
-    closeVoicePanel(); closeQueuePanel();
-    panel.classList.add('from-orb');
-    if (open) renderVoicePanel();
-    panel.hidden = !open;
-    for (const trigger of document.querySelectorAll('[data-action="volume.toggle"]')) { trigger.setAttribute('aria-expanded', String(open)); trigger.setAttribute('aria-controls', 'tts-menu'); }
-    return;
-  }
   if (action === 'history.open') {
-    closeLakeSound(); closeVoicePanel(); closeQueuePanel();
+    closeVoicePanel(); closeQueuePanel();
     const dialog = document.querySelector('#lake-history-dialog');
     if (!dialog.open) dialog.showModal();
     const events = normalizedEvents(snapshot);
@@ -4137,7 +5398,6 @@ async function handleAction(action, id, target) {
     else audienceReturn = false;
     viewerContext = item;
     document.querySelector('#lake-history-dialog')?.close();
-    closeLakeSound();
     viewerOpenIdentity = viewerIdentity(item);
     renderViewerDrawer();
     void refreshViewerModeration().catch(() => updateViewerModeration());
@@ -4173,7 +5433,7 @@ async function handleAction(action, id, target) {
     if (!presetId) throw new Error(t('请先添加一个声音预设'));
     await flushViewerAlias();
     const spoken = viewerAliasValue(event) || event.user_name || t('访客');
-    return command('audition', { preset_id: presetId, text: `${spoken}：${eventText(event) || t('你好，欢迎来到直播间。')}` }, { quiet: true });
+    return command('audition', { preset_id: presetId, text: `${spoken}${t('：')}${eventText(event) || t('你好，欢迎来到直播间。')}` }, { quiet: true });
   }
   if (action === 'viewer.manage') {
     await flushViewerAlias();
@@ -4206,7 +5466,7 @@ async function handleAction(action, id, target) {
     closeVoicePanel();
     const aliasSaved = !viewerContext || await flushViewerAlias();
     if (viewerContext) { viewerContext = null; viewerOpenIdentity = ''; renderViewerDrawer(); }
-    await openSettings(action === 'settings.room' ? 'room' : 'voices');
+    await openSettings(action === 'settings.room' ? 'room' : 'home');
     // The failure toast sits beneath modal settings; repeat it inside them.
     if (!aliasSaved && viewerAliasSave.error) showError(viewerAliasSave.error);
     return;
@@ -4288,19 +5548,6 @@ async function handleAction(action, id, target) {
     showToast(t('地址已复制，粘贴到 OBS 的浏览器来源'));
     return;
   }
-  if (action === 'overlay.token.reset') {
-    if (!await confirmAction(t('重新生成叠加层地址？'), t('旧地址会立即失效，OBS 里的浏览器来源需要换成新地址。'), t('重新生成'))) return;
-    await command('overlay.token.reset', {}, { quiet: true });
-    updateOverlayStatus();
-    // Connection status can be untested after restart; existing-source repair
-    // must not depend on a previous manual Test Connection result.
-    let synced = false;
-    if (snapshot.overlay?.running) {
-      try { synced = !!(await command('obs.overlay.sync', {}, { quiet: true, silent: true }))?.result?.found; } catch { /* The independent source status retains the readable error. */ }
-    }
-    showToast(synced ? t('已生成新地址，OBS 里的叠加层已同步更新') : t('已生成新地址，记得更新 OBS 里的地址'));
-    return;
-  }
   if (action === 'overlay.test') {
     await command('overlay.test', { kind: id === 'super_chat' ? 'super_chat' : 'danmaku' }, { quiet: true });
     return;
@@ -4323,10 +5570,15 @@ async function handleAction(action, id, target) {
     const previous = { connect: 'welcome', login: 'welcome', tts: 'login', doubaoQr: 'tts', ready: 'tts' };
     return setStep(previous[step] || 'welcome');
   }
+  if (action === 'setup.continue') return setStep('tts');
+  if (action === 'setup.rescan') { setupRescan = true; renderApp(); return startQr('bilibili'); }
   if (action === 'setup.doubao') { setStep('doubaoQr'); return startQr('doubao'); }
   if (action === 'setup.silent') { await cancelQr(); setupTts = false; return setStep('ready'); }
-  if (action === 'setup.finish') { await command('onboarding.finish', { tts_enabled: setupTts, connect: true }); return; }
-  if (action === 'qr.retry') return startQr(editor?.provider || (step === 'doubaoQr' ? 'doubao' : 'bilibili'), editor?.id);
+  if (action === 'setup.finish') { await command('onboarding.finish', { tts_enabled: setupTts, connect: true }); replaySetup = false; step = 'main'; renderApp(); return; }
+  if (action === 'qr.retry') {
+    const inSettings = settingsDialog.open && editor?.type === 'qr';
+    return startQr(inSettings ? editor.provider : step === 'doubaoQr' ? 'doubao' : 'bilibili', inSettings ? editor.id : undefined);
+  }
   if (action === 'chat.bottom') { const scroll = document.querySelector('#chat-scroll'); scroll.scrollTop = scroll.scrollHeight; document.querySelector('#new-messages').hidden = true; return; }
   if (action === 'live.toggle') {
     if (snapshot.live?.state === 'session_expired') {
@@ -4374,7 +5626,7 @@ async function handleAction(action, id, target) {
     if (!preset) throw new Error(t('请重新选择 Fish Audio 音色。'));
     if (!snapshot.connections.some(connection => connection.id === preset.connection_id && connection.has_credential)) throw new Error(t('请先连接 Fish Audio 账号。'));
     if (snapshot.rules?.default_preset_id !== preset.id) await command('presets.default', { id: preset.id }, { quiet: true });
-    await command('audition', { preset_id: preset.id, text: '你好，欢迎来到直播间。' }, { success: t('试听已加入播放队列') });
+    await command('audition', { preset_id: preset.id, text: t('你好，欢迎来到直播间。') }, { success: t('试听已加入播放队列') });
     return;
   }
   if (action === 'voice-audition.add') {
@@ -4449,7 +5701,10 @@ async function handleAction(action, id, target) {
     if (typeof directory === 'string') {
       const input = target.closest('form').elements.directory;
       setPickedPath(input, directory);
-      await flushAutosaves();
+      if (await flushAutosaves()) {
+        const connect = settingsDialog.querySelector('[data-action="voice.local.connect"]');
+        if (connect) connect.disabled = !directory.trim();
+      }
     }
     return;
   }
@@ -4697,6 +5952,7 @@ async function handleForm(form, submitter) {
   if (type === 'language') { await changeLanguage(value('language')); return; }
   if (type === 'anonymous' || type === 'room-uid') throw new Error(t('请扫码登录哔哩哔哩后接收弹幕'));
   if (type === 'voice-audition') {
+    if (!await flushAutosaves()) return;
     const preset = snapshot.presets.find(item => item.id === value('preset_id') && item.provider === form.dataset.provider);
     const text = value('text');
     if (!preset) throw new Error(t('请先选择这个服务的音色。'));
@@ -4720,6 +5976,7 @@ async function handleForm(form, submitter) {
     if (!snapshot.network_disabled) await command('local_services.check', { provider }, { quiet: true });
   } else if (type === 'service-fish') {
     await connectFishCredential(value('credential'), form);
+    editor = { type: 'voice-add', provider: 'fish_audio' };
   } else if (type === 'fish-settings') {
     const connectionId = form.dataset.connectionId;
     if (!snapshot.connections.some(connection => connection.id === connectionId && connection.settings.provider === 'fish_audio' && connection.has_credential)) throw new Error(t('请先连接 Fish Audio 账号。'));
@@ -4806,7 +6063,7 @@ async function handleForm(form, submitter) {
     const next = await command('rules.preview', { event });
     const preview = next.result;
     const node = document.querySelector('#preview-result');
-    node.innerHTML = `<div class="notice">${preview.filtered_reason ? ui`已过滤：${esc(preview.filtered_reason)}` : ui`${esc(preview.final_text || t('没有可播报的文字'))}<br>声音：${esc(preview.voice?.name || t('未指定默认声音'))}${preview.pending_legacy_binding ? t('<br>同名旧绑定待确认 UID，尚未应用。') : ''}`}</div><pre class="code-output">${esc(JSON.stringify(preview.parts, null, 2))}</pre>`;
+    node.innerHTML = `<div class="notice">${preview.filtered_reason ? ui`已过滤：${esc(t(preview.filtered_reason))}` : ui`${esc(preview.final_text || t('没有可播报的文字'))}<br>声音：${esc(preview.voice?.name || t('未指定默认声音'))}${preview.pending_legacy_binding ? t('<br>同名旧绑定待确认 UID，尚未应用。') : ''}`}</div><pre class="code-output">${esc(JSON.stringify(preview.parts, null, 2))}</pre>`;
     return;
   } else if (type === 'asset') {
     if (id && !await confirmAction(t('替换这份音效？'), t('今后的播报使用新音频；已经排队的消息仍可能使用旧文件。'), t('替换'))) return;
@@ -4838,17 +6095,16 @@ async function handleForm(form, submitter) {
 }
 
 document.addEventListener('click', async event => {
-  const soundPanel = document.querySelector('#lake-sound-panel');
-  if (soundPanel && !soundPanel.hidden && !soundPanel.contains(event.target) && !event.target.closest('[data-action="volume.toggle"]')) closeLakeSound();
+  if (event.target.id === 'chat-message' && chatEmoticonsOpen) { chatEmoticonsOpen = false; updateChatCompose(); updateLakePopScrim(); }
   const ttsMenu = document.querySelector('#tts-menu');
-  if (ttsMenu && !ttsMenu.hidden && !ttsMenu.contains(event.target) && !event.target.closest('[data-action="tts.open"], [data-action="volume.toggle"]')) closeVoicePanel();
+  if (ttsMenu && !ttsMenu.hidden && !ttsMenu.contains(event.target) && !event.target.closest('[data-action="tts.open"]')) closeVoicePanel();
   const queuePanel = document.querySelector('#queue-panel');
   if (queuePanel && !queuePanel.hidden && !queuePanel.contains(event.target) && !event.target.closest('[data-action="queue.toggle"]')) {
     closeQueuePanel();
   }
   const onAirPanel = document.querySelector('#onair-panel');
   if (onAirPanel && !onAirPanel.hidden && !onAirPanel.contains(event.target) && !event.target.closest('.select-menu, #onair, #lake-title, #confirmation')) {
-    if (onAirPanelMode !== 'details' || !onAirPanel.querySelector('form[data-dirty]')) closeOnAirPanel();
+    if (onAirPanelMode !== 'face' && (onAirPanelMode !== 'details' || !onAirPanel.querySelector('form[data-dirty]'))) closeOnAirPanel();
   }
   const target = event.target.closest('[data-action]');
   if (!target || target.disabled) { updateLakePopScrim(); return; }
@@ -4933,8 +6189,6 @@ document.addEventListener('keydown', event => {
   if (event.key !== 'Escape' || settingsDialog.open || confirmationDialog.open) return;
   if (document.querySelector('#audience-dialog')?.open) { event.preventDefault(); closeAudience(); return; }
   if (chatEmoticonsOpen) { event.preventDefault(); chatEmoticonsOpen = false; updateChatCompose(); updateLakePopScrim(); return; }
-  const soundPanel = document.querySelector('#tts-menu');
-  if (soundPanel && !soundPanel.hidden && soundPanel.classList.contains('from-orb')) { closeLakeSound(); updateLakePopScrim(); document.querySelector('.lake-orb')?.focus(); return; }
   if (viewerContext) { event.preventDefault(); void closeViewerDrawer().catch(showError); return; }
   const ttsMenu = document.querySelector('#tts-menu');
   if (ttsMenu && !ttsMenu.hidden) { closeVoicePanel(); updateLakePopScrim(); document.querySelector('#tts-switch')?.focus(); return; }
@@ -4991,6 +6245,7 @@ settingsDialog.addEventListener('click', event => {
 settingsDialog.addEventListener('compositionend', event => {
   composingInputs.delete(event.target);
   const form = event.target.closest('[data-form]');
+  if (event.target.matches?.('[data-lake-template]')) form.elements[`template_${event.target.dataset.lakeTemplate}`].value = lakeTemplateText(event.target);
   if (form?.dataset.form === 'reference') form.dataset.dirty = 'true';
   if (form?.dataset.form === 'dots-preset') { form.dataset.dirty = 'true'; rememberDotsDraft(form); }
   if (form && manualSaveFormTypes.has(form.dataset.form)) form.dataset.dirty = 'true';
@@ -5115,7 +6370,7 @@ function refreshVisibility() {
     if (qrProvider && !qrBusy && !qrFailure && ['waiting', 'scanned'].includes(snapshot?.qr?.status)) scheduleQrPoll(qrProvider, qrGeneration);
   }
 }
-window.addEventListener('resize', () => { if (document.querySelector('#audience-dialog')?.open) placeAudience(); }, { passive: true });
+window.addEventListener('resize', () => { stopSetupSceneMotion(); if (document.querySelector('#audience-dialog')?.open) placeAudience(); }, { passive: true });
 window.addEventListener('focus', () => { windowFocused = true; refreshVisibility(); });
 window.addEventListener('blur', () => { windowFocused = false; refreshVisibility(); });
 document.addEventListener('visibilitychange', refreshVisibility);
@@ -5149,6 +6404,12 @@ async function pollSnapshot() {
 }
 
 async function boot() {
+  if (!boot.lakeInstalled) {
+    installLakeVoiceEvents();
+    installLakeSettingsEvents();
+    if (typeof installLakeObsEvents === 'function') installLakeObsEvents();
+    boot.lakeInstalled = true;
+  }
   try {
     if (!boot.resourceListener && window.__TAURI__?.event?.listen) {
       boot.resourceListener = await window.__TAURI__.event.listen('resource-mode', event => {

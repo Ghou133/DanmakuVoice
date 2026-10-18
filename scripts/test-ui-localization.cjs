@@ -71,7 +71,10 @@ let failLanguage = false;
     await page.goto(origin);
     await page.locator('#lake-current .lake-message').waitFor();
     await page.locator('[data-action="settings.open"]').click();
-    const tab = id => page.locator(`.settings-nav [data-id="${id}"]`).click();
+    const tab = async id => {
+      if (await page.locator('#settings [data-action="settings.tab"][data-id="home"]').count()) await page.locator('#settings [data-action="settings.tab"][data-id="home"]').click();
+      await page.locator(`#settings [data-action="settings.tab"][data-id="${id}"]`).click();
+    };
     const switchLanguage = async language => {
       await tab('general');
       await page.locator(`input[name="language"][value="${language}"]`).check({force:true});
@@ -80,38 +83,53 @@ let failLanguage = false;
     };
     await switchLanguage('en');
     assert.equal(await page.title(),'DanmakuVoice');
-    assert.match(await page.locator('#settings-content').innerText(),/Interface language/);
+    assert.match(await page.locator('#settings-content').innerText(),/Language/);
     assert.equal(state.rules.templates.danmaku,'{user_name}说：{message}');
     assert.equal(state.presets[0].name,'中文音色设置');
+    assert.equal(await page.locator('#lake-pop-scrim').getAttribute('aria-label'),'Dismiss');
     await page.screenshot({path:path.join(output,'appearance-en-dark.png')});
-    for(const id of ['room','voices','rules','assets','live','general','data']) {
+    const untranslated=[];
+    for(const id of ['room','voices','readings','overlay','general','advanced']) {
       await tab(id);
       assert.ok(await page.locator('#settings-content').innerText(),id);
+      const chinese = await page.locator('#settings-content').evaluate(node => {
+        const walker=document.createTreeWalker(node,NodeFilter.SHOW_TEXT), found=[];
+        while(walker.nextNode()) {
+          const text=walker.currentNode.textContent.trim(),parent=walker.currentNode.parentElement;
+          if (/\p{Script=Han}/u.test(text) && parent.getClientRects().length && getComputedStyle(parent).visibility!=='hidden') found.push(text);
+        }
+        return found;
+      });
+      untranslated.push(...chinese.filter(text=>!['简体中文','中文音色设置','中','你好，欢迎来到直播间。'].includes(text)).map(text=>({page:id,text})));
       const overflow = await page.locator('#settings-content').evaluate(node=>node.scrollWidth>node.clientWidth+2);
       assert.equal(overflow,false,id+' horizontal overflow');
     }
-    await tab('rules');
-    const before = await page.locator('textarea[name="template_danmaku"]').inputValue();
+    await fs.writeFile(path.join(output,'untranslated.json'),JSON.stringify(untranslated,null,2));
+    assert.deepEqual(untranslated,[]);
+    await tab('advanced');
+    await page.locator('[data-action="lake.advanced.section"][data-id="templates"]').click();
+    const before = await page.locator('input[name="template_danmaku"]').inputValue();
     assert.equal(before,'{user_name}说：{message}');
     const draft = '用户填写的未完成草稿 {user_name}';
-    await page.locator('textarea[name="template_danmaku"]').fill(draft);
+    await page.locator('[data-lake-template="danmaku"]').fill(draft);
     // A pending autosave must settle before changing language.
     await switchLanguage('zh-CN');
     await switchLanguage('en');
-    await tab('rules');
-    assert.equal(await page.locator('textarea[name="template_danmaku"]').inputValue(),draft);
+    await tab('advanced');
+    assert.equal(await page.locator('input[name="template_danmaku"]').inputValue(),draft);
     // A locale snapshot must retain incomplete reference voice input too.
     await tab('voices');
-    await page.locator('[data-action="voice-audition.add"]').click();
-    await page.locator('input[name="name"]').fill('未完成中文音色');
+    await page.locator('[data-action="voice.add"]').click();
+    await page.locator('[data-action="voice.provider"][data-id="dots"]').click();
+    await page.locator('[data-voice-draft="name"]').fill('未完成中文音色');
     for(const language of ['zh-CN','en']) {
       state.preferences.language=language; state.config_revision++;
       await page.evaluate(()=>{window.__offlineListeners['resource-mode']({payload:false});window.__offlineListeners['resource-mode']({payload:true});});
       await page.waitForFunction(expected=>document.documentElement.lang===expected,language);
-      assert.equal(await page.locator('input[name="name"]').inputValue(),'未完成中文音色');
+      assert.equal(await page.locator('[data-voice-draft="name"]').inputValue(),'未完成中文音色');
     }
-    assert.equal(await page.locator('input[name="name"]').inputValue(),'未完成中文音色');
-    assert.match(await page.locator('#settings-content').innerText(),/Add dots voice/);
+    assert.equal(await page.locator('[data-voice-draft="name"]').inputValue(),'未完成中文音色');
+    assert.match(await page.locator('#settings-content').innerText(),/Make a voice from a recording/);
     await page.reload();
     await page.locator('#lake-current .lake-message').waitFor();
     await page.locator('[data-action="settings.open"]').click();
@@ -133,10 +151,22 @@ let failLanguage = false;
     await page.setViewportSize({width:780,height:580});
     assert.equal(await page.locator('#settings-content').evaluate(node=>node.scrollWidth>node.clientWidth+2),false);
     await page.screenshot({path:path.join(output,'appearance-en-small.png')});
+    // Every onboarding branch also renders application copy in English.
+    state.onboarding_done=false; state.setup={tts_enabled:false}; state.account=null;
+    const englishSetup = async name => {
+      const text=await page.locator('#setup-shell').innerText();
+      assert.doesNotMatch(text,/\p{Script=Han}/u, name+' onboarding contains untranslated application copy: '+text.split('\n').filter(line=>/\p{Script=Han}/u.test(line)).join(' | '));
+    };
+    await page.reload(); await page.locator('[data-action="setup.start"]').waitFor(); await englishSetup('welcome');
+    await page.locator('[data-action="setup.start"]').click(); await page.locator('.setup-lake-drawer').waitFor(); await englishSetup('login');
+    state.setup={room_id:123,uid:42,tts_enabled:false};state.account={user_id:42,name:'Test broadcaster'};
+    await page.reload();await page.locator('[data-action="setup.silent"]').waitFor();await englishSetup('voice choice');
+    await page.locator('[data-action="setup.silent"]').click();await page.locator('[data-action="setup.finish"]').waitFor();await englishSetup('ready');
+    assert.match(await page.locator('.setup-summary').innerText(),/View messages for now/);
     assert.deepEqual(errors,[]);
     assert.equal(calls.some(call=>call.action.endsWith('qr.begin')),false);
-    await fs.writeFile(path.join(output,'result.json'),JSON.stringify({headless:true,externalNetwork:false,realDesktop:false,passed:true,checks:['switch both directions','saved reload','English layout at 1040 and 780','pending autosave','unfinished voice draft','failed save rollback','Chinese data and XSS preservation'],dispatches:calls.map(call=>call.action)},null,2));
-    console.log('Headless localization UI: PASS (8 scenarios, no foreground window)');
+    await fs.writeFile(path.join(output,'result.json'),JSON.stringify({headless:true,externalNetwork:false,realDesktop:false,passed:true,checks:['switch both directions','saved reload','English layout at 1040 and 780','pending autosave','unfinished voice draft','failed save rollback','Chinese data and XSS preservation','all onboarding branches in English','new settings pages contain no untranslated application copy'],dispatches:calls.map(call=>call.action)},null,2));
+    console.log('Headless localization UI: PASS (10 scenarios, no foreground window)');
   } finally {
     if(browser)await browser.close();
     await new Promise(resolve=>server.close(resolve));

@@ -23,6 +23,7 @@ use crate::{
     bilibili::{BiliError, BiliRoomClient, BiliSession, RoomState},
     diagnostics::{self, DiagnosticCode},
     event_pipeline::EventPipeline,
+    live_history::LiveHistory,
     model::{EventKind, GiftMergeSettings, LiveEvent, Provider},
     playback::PreparedPlayback,
     received_emotes::ReceivedEmoteCatalog,
@@ -157,6 +158,7 @@ struct Running {
 }
 
 struct WorkerContext {
+    history: LiveHistory,
     scheduler: Option<SchedulerHandle>,
     tts_enabled: Arc<Mutex<bool>>,
     playback_changes: watch::Receiver<u64>,
@@ -171,6 +173,7 @@ struct WorkerContext {
 /// A single-room controller. A supplied device stays fixed; otherwise a stored
 /// Doubao identity is loaded lazily only for an event that needs it.
 pub struct LiveController {
+    history: LiveHistory,
     room: BiliRoomClient,
     scheduler: Option<SchedulerHandle>,
     tts_enabled: Arc<Mutex<bool>>,
@@ -208,6 +211,7 @@ impl LiveController {
         let (playback_changes, _) = watch::channel(0);
         let tts_enabled = Arc::new(Mutex::new(scheduler.is_some()));
         Ok(Self {
+            history: LiveHistory::default(),
             room: BiliRoomClient::new()?,
             scheduler,
             tts_enabled,
@@ -224,6 +228,11 @@ impl LiveController {
         self.updates.subscribe()
     }
 
+    pub fn with_history(mut self, history: LiveHistory) -> Self {
+        self.history = history;
+        self
+    }
+
     pub fn snapshot(&self) -> LiveSnapshot {
         self.updates.borrow().clone()
     }
@@ -238,6 +247,8 @@ impl LiveController {
     ) {
         let catalog = Arc::new(ReceivedEmoteCatalog::from_packs(account_id, room_id, packs));
         self.emote_catalog.send_replace(catalog.clone());
+        self.history
+            .set_emote_catalog(catalog.clone(), self.updates.borrow().canonical_room_id());
         self.updates.send_modify(|state| {
             state.emote_lookup_error = None;
             for event in &mut state.recent_events {
@@ -379,6 +390,7 @@ impl LiveController {
         events: mpsc::Receiver<LiveEvent>,
         room_driven: bool,
     ) -> Running {
+        self.history.begin_room(room_id);
         self.updates.send_replace(LiveSnapshot {
             running: true,
             room_id: Some(room_id),
@@ -390,6 +402,7 @@ impl LiveController {
             events,
             self.room.subscribe_state(),
             WorkerContext {
+                history: self.history.clone(),
                 scheduler: self.scheduler.clone(),
                 tts_enabled: self.tts_enabled.clone(),
                 playback_changes: self.playback_changes.subscribe(),
@@ -579,6 +592,7 @@ async fn run_events(
     context: WorkerContext,
 ) {
     let WorkerContext {
+        history,
         scheduler,
         tts_enabled,
         mut playback_changes,
@@ -715,6 +729,7 @@ async fn run_events(
                 } else {
                     emote_catalog.borrow().enrich(&mut event);
                 }
+                history.push(event.clone());
                 updates.send_modify(|snapshot| {
                     snapshot.received = snapshot.received.saturating_add(1);
                     push_bounded(&mut snapshot.recent_events, event.clone());
@@ -1308,6 +1323,15 @@ mod tests {
             assert_eq!(snapshot.room_id, Some(room_id));
             assert_eq!(snapshot.recent_events.len(), LIVE_RECENT_EVENT_LIMIT);
             assert_eq!(snapshot.recent_results.len(), LIVE_RECENT_EVENT_LIMIT);
+            let archived = controller.history.stats();
+            assert_eq!(archived.messages, EVENTS_PER_SESSION);
+            assert_eq!(archived.unique_viewers, 1);
+            let oldest = controller
+                .history
+                .page(&archived.session_id, Some(2), 100, None)
+                .unwrap();
+            assert_eq!(oldest.items.len(), 1);
+            assert_eq!(oldest.items[0].event.message, format!("{cycle}:0"));
             assert_eq!(
                 snapshot.recent_events.last().unwrap().message,
                 format!("{cycle}:255")
@@ -1793,6 +1817,7 @@ mod tests {
                 events_rx,
                 room_rx,
                 WorkerContext {
+                    history: LiveHistory::default(),
                     scheduler: None,
                     tts_enabled: Arc::new(Mutex::new(false)),
                     playback_changes: playback_rx,
@@ -1892,7 +1917,48 @@ mod tests {
         controller.stop().await.unwrap();
     }
     #[tokio::test]
-    async fn standalone_emote_filter_keeps_chat_and_applies_changes_without_reconnect() {
+    async fn emoji_only_danmaku_stays_visible_without_queuing_username_speech() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = configure_store(dir.path());
+        let mut rules = store.load_rules().unwrap();
+        rules.templates.danmaku = "{user_name}说：{message}".into();
+        rules.events.filter_bilibili_emoticons = false;
+        store.save_rules(&rules).unwrap();
+        let (jobs_tx, mut jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: false,
+        }));
+        scheduler.start().await.unwrap();
+        let controller = LiveController::new(dir.path(), scheduler, None).unwrap();
+        let events = controller.start_offline(42).await.unwrap();
+        let emoji = LiveEvent::danmaku(42, Some(7), "Alice", "😀");
+        events.send(emoji.clone()).await.unwrap();
+        wait_for_processed(&controller, 1).await;
+        let state = controller.snapshot();
+        assert_eq!(state.filtered, 1);
+        assert_eq!(state.recent_events, vec![emoji.clone()]);
+        assert_eq!(state.recent_results[0].event, emoji);
+        assert_eq!(state.recent_results[0].outcome, LiveEventOutcome::Filtered);
+        assert_eq!(state.enqueued, 0);
+        assert!(jobs_rx.try_recv().is_err());
+
+        events
+            .send(LiveEvent::danmaku(42, Some(7), "Alice", "你好😀"))
+            .await
+            .unwrap();
+        let job = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.preview.final_text, "Alice说：你好😀");
+        wait_for_processed(&controller, 2).await;
+        assert_eq!(controller.snapshot().enqueued, 1);
+        controller.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn standalone_emote_reading_keeps_chat_and_applies_changes_without_reconnect() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = configure_store(dir.path());
         let mut rules = store.load_rules().unwrap();
@@ -1932,7 +1998,10 @@ mod tests {
             .unwrap();
         assert_eq!(job.preview.event.message, "你好😀[表情]");
         wait_for_processed(&controller, 2).await;
-        rules.events.filter_bilibili_emoticons = false;
+        rules.emote_words.push(crate::rules::Replacement {
+            from: "[表情]".into(),
+            to: "笑哭了".into(),
+        });
         store.save_rules(&rules).unwrap();
         events.send(emote.clone()).await.unwrap();
         let job = timeout(Duration::from_secs(3), jobs_rx.recv())
@@ -1940,8 +2009,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(job.preview.event, emote);
+        assert!(job.preview.final_text.contains("笑哭了"));
         wait_for_processed(&controller, 3).await;
-        rules.events.filter_bilibili_emoticons = true;
+        rules.emote_words.clear();
         store.save_rules(&rules).unwrap();
         events.send(emote).await.unwrap();
         wait_for_processed(&controller, 4).await;
@@ -2013,6 +2083,18 @@ mod tests {
         );
         assert_eq!(after.recent_events[0].emotes[0].url, IMAGE);
         assert_eq!(after.recent_results[0].event.emotes[0].url, IMAGE);
+        let archived = controller.history.stats();
+        let page = controller
+            .history
+            .page(&archived.session_id, None, 100, None)
+            .unwrap();
+        assert_eq!(page.items[0].event.emotes[0].url, IMAGE);
+        assert!(archived.metadata_revision > 0);
+        controller.set_received_emoticons(42, 42, &packs);
+        assert_eq!(
+            controller.history.stats().metadata_revision,
+            archived.metadata_revision
+        );
         assert!(jobs_rx.try_recv().is_err());
 
         events.send(raw(MARKER, 2)).await.unwrap();
@@ -2036,7 +2118,10 @@ mod tests {
         assert!(!job.preview.event.is_bilibili_emoticon);
         wait_for_processed(&controller, 3).await;
 
-        rules.events.filter_bilibili_emoticons = false;
+        rules.emote_words.push(crate::rules::Replacement {
+            from: MARKER.into(),
+            to: "爱你".into(),
+        });
         store.save_rules(&rules).unwrap();
         events.send(raw(MARKER, 4)).await.unwrap();
         let job = timeout(Duration::from_secs(3), jobs_rx.recv())

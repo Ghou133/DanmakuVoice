@@ -11,6 +11,7 @@ pub mod event_pipeline;
 pub mod ffmpeg;
 pub mod legacy;
 pub mod live;
+pub mod live_history;
 pub mod migration;
 pub mod model;
 pub mod moderation;

@@ -142,19 +142,18 @@ async function activity(value) {
 
     state.live.events.push(event(3, '新的弹幕到来')); await push();
     animatedLetters(await phase('new-third-phrase'), 'new phrase after focus return');
-    assert.equal(await page.evaluate(() => document.querySelector('#lake-history').contains(window.__heldMessage)), true);
-    const sunk = await page.evaluate(() => ({ letters: [...window.__heldMessage.querySelectorAll('.lake-letter')].map(node => getComputedStyle(node).animationName), sink: getComputedStyle(window.__heldMessage).animationName }));
-    assert.ok(sunk.letters.every(name => name === 'none')); assert.match(sunk.sink, /lake-sink-[ab]/);
+    assert.equal(await page.evaluate(() => window.__heldMessage.isConnected), false, 'old featured DOM leaves the surface');
+    assert.match(await page.locator('#lake-peek').textContent(), /全新一句仍然逐字浮现/);
     await page.locator('#lake-current .lake-message').evaluate(node => { window.__stableCurrent = node; window.__stableCurrentStart = node.querySelector('.lake-letter').getAnimations()[0]?.startTime; });
     state.live.state = 'reconnecting'; await push(); state.live.state = 'connected'; await push();
     assert.equal(await page.evaluate(() => document.querySelector('#lake-current .lake-message') === window.__stableCurrent && window.__stableCurrent.querySelector('.lake-letter').getAnimations()[0]?.startTime === window.__stableCurrentStart), true);
-    check('new messages sink the original prior node; unrelated connection updates neither reparent nor restart current letters');
+    check('new messages place the previous phrase in the recent-three surface; unrelated connection updates neither reparent nor restart current letters');
 
     await page.evaluate(() => {
       window.__lakeReparentCount = 0;
       window.__lakeReparentObserver = new MutationObserver(records => { window.__lakeReparentCount += records.filter(record => record.type === 'childList').length; });
       window.__lakeReparentObserver.observe(document.querySelector('#lake-current'), { childList: true });
-      window.__lakeReparentObserver.observe(document.querySelector('#lake-history'), { childList: true });
+      window.__lakeReparentObserver.observe(document.querySelector('#lake-peek'), { childList: true });
     });
     state.setup.tts_enabled = true; state.preferences.tts_enabled = true;
     state.queue.current = { id: 'fictional-recovery-reading', origin: 'live', user_name: event(3).user_name, text: event(3, '新的弹幕到来').message };

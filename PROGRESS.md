@@ -927,3 +927,311 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - **6 个已合并工作树和 6 个普通临时分支已移除，额外释放约 26.554 GiB**；原始分支 HEAD 同时保留为 `refs/archive/claude-maintenance-20261014/agent-*`，全部源码提交也仍可从 main 历史访问。原始补丁、前后 bundle、逐项清理回执在 `.git/maintenance-recovery-20261014/`。只移除这些工作树内可再生成的构建缓存及 schema，不删除主工作区缓存、今天的失败/通过证据或独立 release 仓库。
 - 仍需单独决策或实测的 P3 项：下播停止既有 OBS 推流的产品策略、远程 OBS 无密码/明文 WebSocket 策略、WSS 代理与 buvid 的真实平台协议、四声道设备布局、墙钟回拨时的叠加层重放边界、OBS 启动进一步单飞/锁粒度，以及兼顾已排队任务和保留备份的素材回收。现有代码明确保留旧素材供冻结播放计划和备份使用，未将其当作可以直接删除的垃圾。
 - 架构热点不是本轮验收目标：大文件拆分、控制器总体锁粒度、连接复用及代次机制统一留给后续开发。真实账号/直播间、实际 OBS 写入/推流、付费合成、物理音频、签名商店升级与长期性能仍未验收；无需凭据的离线测试不能代替这些验收。
+
+## 2026-10-14 光脊叠加层重做与设置页美化
+
+按用户反馈：光脊为长时间冷场保留历史弹幕的做法“不够好看”，屏上应少一条、呈现三条；主界面与设置页希望更好看。
+
+- **光脊**（`crates/desktop/overlay/overlay.html`）：屏上最多 3 条（含聚光，聚光读完缩成第一条小行）；一体卡仍为 4 条小行，按停留时间消失。竖线改为 1.5 px 发光细线，空闲时有一束慢光沿线流下（仅 CSS transform/opacity）；新弹幕的光点落到新头像并弹出头像。小行改为衬线字、浅色光圈头像，名字后显示英文相对时间（随刊头时钟 10 秒更新，无新增帧循环）。45 秒无新弹幕且无朗读时进入“静息”，列表与竖线变淡、流光放慢，新内容立即唤醒。暗角改为偏向竖线一侧的柔和椭圆。服务端回放缓存（12 条）不变，Rust 未改。
+- **设置页**（`styles.css` 末尾独立一段）：夜间深靛夜空 / 日间晨雾渐变、浅玻璃卡片与顶部高光、分区依次上浮（遵守减少动态效果）、主题色块改为小湖景；OBS 设置页预览同步为 3 条新光脊样式（`app.js` 预览多一行，`i18n-en.mjs` 补译文）。
+- **主界面水月场景未改动**：离线截图确认它与用户提供的 `Lake.dc.html` 原稿一致，且受逐项一致性测试约束；是否要偏离原稿需用户决定。
+- 验证（本机离线）：Node **184/184**；`cargo test -p danmakuvoice overlay` **33 通过**。新光脊、设置页通过本轮临时虚构 IPC/SSE 预览服务器加 headless Edge（CDP）截图检查，覆盖朗读进度、3 条上限、45 秒静息、右侧镜像、深/亮背景及日夜主题；截图和预览脚本在 `target/ui-polish-20261014/`。
+- `scripts/test-overlay-retention.cjs` 已改为 3 条上限、相对时间、静息断言，并把 CSS/DOM 摘要重新固定为本次设计；本机没有 playwright，**这个浏览器测试和其他 playwright UI 脚本本轮都没有运行**。没有运行 fmt/clippy/全量回归（Rust 无改动），也没有在真实 OBS、原生 WebView2 窗口或真实直播间中验收。未提交、未推送。
+- 追加（同日，用户反馈“看不到实际动效、希望有弹幕就往下运动”）：朗读中的一条保持在最上方，朗读期间新到的弹幕插在它下面（原来会插到它上方，把正在读的大字挤下去）；各行下移改为相隔 70 ms 的依次级联，新行从上方落入并与竖线光点同步，最旧一行向下沉出。实测相对时间与名字同行，行高 52/48/48 设计像素，原版同条件为 55/49/49，未增加占用。新增 `scripts/build-overlay-demo.cjs`（模板 `scripts/overlay-demo.template.html`）：把真实 overlay.html 原样放进 iframe，只替换事件来源为场景按钮，静息时间缩短为 10 秒，字体用 Google Fonts 的 Noto Serif SC；仅开发演示，不进产品。生成页已发布为私有 Artifact。Node 184/184、`cargo test -p danmakuvoice overlay` 33 通过；retention 浏览器测试新增“朗读中到达的弹幕在其下方”断言并重新固定摘要，仍因缺少 playwright 未运行。另修正本轮 Python 编辑把 7 个文件写成 CRLF 的问题，已全部恢复 LF。
+- 再追加（同日，用户反馈“多条弹幕会混乱”，并说明想要“像进度条一样一直往前走”的线性引导）：光脊改为进度条式时间线，详见 `docs/UI-DESIGN.md`。要点：时间从上到下、新行接在线末端；暗轨道加亮填充和发光头部，朗读时头部在两位说话人的头像之间移动，排队的行变灰直到被读到；第 4 条到来时最上面一条上移淡出。混乱的原因是 0.3 秒一条的节奏下多段 FLIP、进场、退场动画互相叠加且旧动画没有取消，现改为光脊 0.7 秒一条、待显示普通弹幕最多 3 条、FLIP 先取消旧动画再按当前位置起步、离场行立即脱离文档流。排队超过 30 秒未读的行不再挡住光条（防止跳过或失败的任务卡住进度）。运行中切换样式会按目标样式重排。一体卡行为未变。验证：Node 184/184；`cargo test -p danmakuvoice overlay` 33 通过；headless Edge 对演示页逐帧截图检查三人接连发言、刷屏、右下角亮背景、一体卡和静息。retention 浏览器测试已改为时间顺序、0.7 秒节奏并重新固定摘要，仍因缺少 playwright 未运行。演示 Artifact 已更新到第 2 版。未提交、未推送。
+- 第三次追加（同日，用户反馈演示页“刷屏”场景混乱不可用）：逐帧状态记录确认三处问题：单一光条头部在显示弹幕越过排队弹幕后又随朗读回退；显示弹幕排在朗读之后长期变灰、未点亮就被挤出；每条显示弹幕都抢聚光导致大小反复跳。改为分段进度条（每行拥有头像下方到下一位头像的一段，显示即亮、朗读随声音填满、排队保持暗，只会变亮不会回退，段落随行一起移动）；显示弹幕仅在无排队且聚光静止 2.5 秒后才成为聚光；超过 3 条时移走最旧行（朗读中或待读的聚光除外）；聚光行不再同时带 recent。retention 测试相应放宽刷屏期间的聚光断言并重新固定摘要（仍未运行，缺少 playwright）。Node 184/184、`cargo test -p danmakuvoice overlay` 33 通过；演示 Artifact 更新到第 3 版。未提交、未推送。
+- 第四次追加（同日，用户反馈连点“来一条弹幕”时聚光仍无逻辑、刷屏仍不可用，并同意“屏上慢慢显示”）：光脊去掉全部聚光逻辑，改为三条简单规则：严格按序排队（1.2 秒一条，显示用积压上限 20），大小只由位置决定（最新大、上一条中、最早小），朗读只改变光照（光环、文字点亮、线段填满，行不移动不变大小）。朗读开始时仍在队列中的弹幕连同之前的弹幕立即上屏。一体卡恢复到本轮之前的原逻辑（撤回之前给一体卡加的“插在朗读行下方”）。验证：演示页实时不变量检查（连点 6 次“来一条弹幕”、三人接连发言、刷屏、连点 4 次“来一条并朗读”，548 次采样）——行数不超过 3、时间顺序、最大一行总是最新一行、reading 只在正在朗读的行、光脊无聚光——**0 违例**；逐帧截图确认连点时逐条落下。Node 184/184、`cargo test -p danmakuvoice overlay` 33 通过。retention 浏览器测试改写为新规则（含“刷屏 12 条全部出现过”断言）并重新固定摘要，仍因缺少 playwright 未运行。演示 Artifact 更新到第 4 版。未提交、未推送。
+- 第五次追加（同日，用户反馈“三人接连发言”仍急促混乱、朗读后半段进度卡顿回退，要求“最下面一条完全显示完才显示下一条”并让进度条更精美可用）：
+  - **进度回退的根因（生产问题，早于本轮重做）**：`crates/engine/src/audio.rs` 的输出环容量约 2 秒，`queued_ms` 在播放中基本恒定；旧的 `readingFraction` 每次 150 ms 上报都重算总长，当实际时长超过按字数的估算后，进度在每次上报时向后跳。改为：合成进行中把待播量当作稳定提前量、以字数估算为下限；环开始排空（待播量比峰值少 250 ms 以上且峰值不小于 1.2 秒）后剩余时间精确；显示值按 140 ms 时间常数平滑趋近且不回退。Rust 未改。
+  - **严格轮流**：光脊最新一行在台上时其余排队；朗读行在朗读结束后下台，显示行停留 1.8–3.6 秒；10 秒未开始朗读的行放弃轮次；重复显示弹幕在入队时合并。仅当软件已开始朗读一条仍在排队的弹幕时它立即上台，其前面的显示弹幕被跳过，以保持声音与画面一致。
+  - **进度条视觉**：最新一行的线更亮更宽并延伸到线末端的空心圆环（下一位头像落点），排队时圆环点亮并显示 +N；已完成线段柔和；等待朗读时线段为空、头部呼吸。
+  - 演示页的模拟朗读改为与软件一致的上报方式（150 ms、合成快于实时、约 2 秒输出环）。
+  - 验证：演示页实时检查 1638 次采样（连点 6 次“来一条弹幕”、三人接连发言、刷屏、连点 3 次“来一条并朗读”、重复弹幕）——不超过 3 行、时间顺序、最大一行为最新、同时最多一行在台上且为最新、reading 只在正在朗读的行、光脊无聚光——0 违例；朗读进度回退 **0 次**（修正前每次上报都会回退）。仅有的 2 次“台上未完就出现新行”都是声音已开始朗读排队弹幕的设计情形。Node 184/184、`cargo test -p danmakuvoice overlay` 33 通过。retention 浏览器测试改写为严格轮流并重新固定摘要，仍因缺少 playwright 未运行。演示 Artifact 更新到第 5 版。未提交、未推送。
+- 实装与完整回归（同日，用户确认演示效果并要求实装）：演示页本身就由 `crates/desktop/overlay/overlay.html` 生成，叠加层改动已在项目源码中；本步补上设置页预览并完成全量检查和 release 构建。
+  - 设置页 OBS 叠加层预览改为新光脊：旧在上、最新一行大且在末端、光条延伸到点亮的圆环并显示 +1；右侧位置镜像正确；一体卡预览不变。
+  - 日志在 `target/ui-polish-20261014/`：`cargo fmt --all -- --check` 通过；`cargo clippy --offline --locked --workspace --all-targets -- -D warnings` 通过（零警告）。
+  - Rust 全量：desktop **207 通过 / 0 失败 / 4 忽略**；engine 首次全量运行 **316 通过 / 1 失败**（`diagnostics::tests::rotation_is_bounded_and_only_uses_fixed_fields`，`files <= ROTATED_FILES + 1` 断言，见 `rust.log`）。engine 代码与 HEAD 一致、本轮未改；该用例单独运行 6/6 通过，engine 全量重跑 **317 通过 / 0 失败 / 3 忽略**（`engine-rerun.log`），代理集成 1 通过。判定为并行运行下的间歇失败，未在本轮修改 engine，已另行列为待办（查明轮转是否会残留临时文件）。合计 525 通过、10 忽略，首次运行的 1 次失败如实保留。
+  - Node **184/184**；全部 scripts 及 UI 的 JS 语法检查通过。Python scripts **28 项运行、25 通过、3 跳过**（`test_measure_runtime` 需要 PowerShell 7，本机未安装 pwsh，与本轮改动无关），dots shim **3/3**。
+  - `cargo build --release --offline --locked -p danmakuvoice` 成功（2 分 15 秒）；新 `target/release/danmakuvoice.exe` SHA-256 `3457481eab52731defd2cb66be1f52d6d143bfdfe847a6dc4427e02ca0badb95`，已确认内含新叠加层代码（替换了 10 月 6 日的旧构建 `e3bc4332…`）。
+  - 未做：playwright 浏览器测试（本机未安装）、原生窗口启动、真实 OBS 浏览器来源、真实账号与真实 TTS 朗读下的验收；未打包发行版；未提交、未推送。
+
+
+## 2026-10-14 太阳/月亮切换日夜与底栏声音控制条
+
+用户反馈主界面点太阳/月亮和底栏声音入口打开的是同一个面板（声音列表、朗读开关、音量），功能重复；在四个方案中选择“点太阳/月亮切换日夜”，并要求优化底栏。原稿 README 写的是“右上角切换日夜 · 点月亮调声音”，这是用户授权的偏离。
+
+- **太阳/月亮**（`lake-scene.mjs`、`app.js`、`lake.css`）：点击执行 `theme.toggle`，悬停提示 `入夜 · nightfall`／`黄昏 · dusk`（英文界面只显示英文词）。新主题仍按原稿 0.95 s 圆形扩散，圆心改为太阳/月亮；旧的那颗 0.5 s 下沉淡出，另一颗 0.42 s 后 0.8 s 升起。为此只在由太阳/月亮触发的那次过渡里给它设 `view-transition-name`，结束即清除，所以从设置页切换主题时它不会盖到设置弹窗上。主界面标题栏只保留设置；其他步骤（引导页）和设置页的日夜按钮保留。日间刊头改为“星期 evening”，夜间仍为“night”。减少动态效果时直接切换。
+- **修正原有竞态**：`revealTheme` 原来立即返回，`preferences.save` 的快照可能在过渡截取旧画面之前就把主题改掉，扩散动画被跳过（标题栏按钮同样存在）。现在先等 `updateCallbackDone`（最多 300 ms）再保存。本轮预览中曾稳定复现，修正后逐帧确认扩散和日落月升可见。
+- **底栏**：第一行改为声音控制条：声音名（朗读时均衡条跳动、关闭朗读时变暗）→ 打开只列声音预设的浮层；右侧朗读开关、静音按钮、0–100 主音量滑条（780 px 宽时隐藏数字）。控制条保持原稿声音行的位置和高度。浮层移到控制条上方、右边与底栏对齐，标题右侧加“管理声音”（进入设置），不再包含开关和音量。删除已无入口的 `volume.toggle`、`closeLakeSound`、`from-orb` 和残留的 `#lake-sound-panel` 样式。新增英文词条“朗读 → Read”。
+- **测试**：`test-ui-lake.cjs` 改为断言标题栏只有设置、太阳/月亮的属性与提示、真实过渡（`::view-transition-old(lake-orb)` 出现且结束后名称清空）、设置页切换不命名太阳/月亮、控制条上的音量/静音/朗读开关、浮层里没有这些控件。`test-ui-lake-parity.cjs` 把这次的差异登记为批准例外：声音行只比较 x/y/高度，日间刊头只比较 x/y/高度且文字为 evening，主题扩散比较时序和关键帧（圆心归一化），另加太阳/月亮扩散与日落月升、浮层位于控制条上方两项门。
+- **验证（本机离线）**：本机全局装有 Playwright（`npm root -g`，带 Chromium 1248），用 `NODE_PATH` 指向它、`DV_BROWSER_CHANNEL=chromium` 运行；没有 `pngjs`，用 scratchpad 里的转发模块复用 Playwright 自带的 PNG 编解码，没有往仓库或全局安装任何包。
+  - Node **184/184**；`test-ui-lake` **20/20**（改动后两次）。
+  - `test-ui-lake-parity` **2727/2765**：失败的 38 项全是各场景的 `path motion`。原因是 1ae27e5（0.3.2）把湖面光路动画移到 `.lake-reflection::before`，而比较器跳过伪元素；HEAD 上同样如此，与本轮无关，已另列待办。本轮相关门（声音行几何、主题扩散、太阳/月亮门、浮层位置、场景像素）全部通过。
+  - 通过：chat-send 45、localization 8、broadcast 19、broadcast-focus 5、audience 14、lake-recovery 16、moderation 31、emotes-alias、spotlight-transition 7、settings-stability、obs-recovery 16。
+  - 未通过且与本轮无关：`test-ui-viewer-layout`、`test-ui-serif-fonts`（16/17）只因 Kaspersky 向本地测试页注入 `*.kis.v2.scr.kaspersky-labs.com` 脚本而触发“禁止外部请求/请求错误”断言。`test-ui-received-personal-emotes` 在工作区失败于“overlay standalone sticker changed surrounding text”；在 HEAD 的临时 worktree 中这一项通过（只在末尾被 Kaspersky 请求拦下），所以是上一节未提交的光脊叠加层改动引入的回归，**当时尚未修复**（后续定位与修正见文末“光脊时间线下的个人表情测试回归”一节）。
+  - 截图检查（临时虚构 IPC 预览服务器 + headless Chromium）：日夜各 1040×740、780×580、1600×900，声音浮层、关闭朗读、静音状态；日→夜、夜→日过渡逐帧冻结检查。
+- 未做：Rust 无改动，未运行 fmt/clippy/Rust 全量；未在原生 WebView2 窗口、真实账号和真实朗读下验收；未提交、未推送。
+
+## 2026-10-14 光脊时间线下的个人表情测试回归
+
+- 现象：`scripts/test-ui-received-personal-emotes.cjs` 在工作区失败于 `overlay standalone sticker changed surrounding text`（实际 `直播普通[待办]`，期望空串），HEAD 上这一项通过。
+- 定位：用同一组虚构事件（先一条混合行，再一条单独贴纸，`merge:false`）分别探测工作区和 HEAD 的 `overlay.html`（探测脚本 `target/spine-emotes-20261014/probe.cjs`）。两版贴纸行完全相同：`.lit` 文本为空，只有一个 `.sticker`；混合行在两版里也都保持 `直播普通[待办]`。**贴纸的渲染和保留没有回归**。唯一的差别是 DOM 顺序：HEAD 把新行 `prepend` 到第一行，重做后的光脊是时间线，新行 `append` 到末尾并成为 `.tip`；另外由于严格轮流，贴纸要等混合行停留约 3.6 秒才上屏（HEAD 约 0.6 秒）。测试用 `.item .lit` 的 `.first()` 和 `.item:first-child` 取“最新一行”，所以取到了更早的混合行。
+- 没有改 `overlay.html`：`test-overlay-retention.cjs` 明确固定了时间顺序（`['观众2','观众3','观众4']`、最新行为 `.last()`/`pop()`），也固定了 CSS/DOM 摘要。把最新行改回 DOM 第一行，无论用 `prepend` 还是 `column-reverse`，都会破坏这次评审过的设计和这个测试。`overlay.html` 与本节开始前逐字节一致（SHA-256 `b6b70a89…6a05`）。
+- 修正（只改测试）：overlay 部分改为把 `#list .item:not(.out)` 的最后一行当作最新行，覆盖混合行、贴纸、最长标记三处断言；新增断言：贴纸上屏后两行 `.lit` 依次为 `['直播普通[待办]', '']`，即贴纸自成最新一行，前一行未被改动。
+- 验证（本机离线，全局 Playwright + Chromium，`NODE_PATH="$(npm root -g)"`、`DV_BROWSER_CHANNEL=chromium`；证据在 `target/spine-emotes-20261014/`）：
+  - `test-overlay-retention.cjs` **18/18 通过**，CSS 摘要 `194a61b4…25ce` 与固定值一致。这是这个测试第一次实际运行（前几轮都因缺少 playwright 没有运行）。
+  - `test-ui-received-personal-emotes.cjs` 修正前：12 项 check 通过，第 13 项失败（`emotes-before/`）。修正后：**15/15 项 check 全部通过**（含 3 项 overlay），页面 JS 错误为 0；随后的“unexpected external request”断言失败，原因是只有 Kaspersky 注入的 `gc.kis.v2.scr.kaspersky-labs.com/.../main.js`（`emotes-after/failure.json`），HEAD 上同样如此，属环境问题。
+  - 诊断运行（`run-no-kaspersky.cjs` 在内存中把外部请求断言改为只忽略 `*.kis.v2.scr.kaspersky-labs.com`，仓库文件未改）：全部断言通过，包括夹具调用与生产资产摘要检查，并写出 `results.json`（`emotes-after-nokis/`）。这不能替代在没有 Kaspersky 注入的机器上的正式运行。
+- 未做：Rust 无改动，未运行 fmt/clippy/Rust 全量和 Node 全量；未在原生 WebView2 窗口、真实 OBS 或真实直播间验收；未提交、未推送。
+- 追加（同日，用户问还有哪些可以优化）：用临时预览服务器检查了排队、空房间、重连、登录失效、停止接收、无声音预设、英文和 780 px 长声音名等状态，发现两处实际缺口：画面上已有弹幕时，重连和停止接收在主界面完全看不出来（连接状态点在水月模式被设成 `display:none`，停止后也没有重新连接入口）；待读条数和跳过没有任何入口，尽管后端已有 `queue.skip/jump/clear`。另有左侧装饰涟漪正好套住 “earlier tonight →”，看起来像按钮边框。用户选择实施这三项，未选全局快捷键。
+  - **连接状态**：天空已有弹幕且未连上（非登录失效）时，房间名后显示小圆点和 `liveConnectionView` 的状态文字，重连时金点闪烁；未运行时附“重新连接”（`live.toggle`），湖面波形降到 .12 不透明度。登录失效仍由原错误条提示。
+  - **跳过与待读**：正在朗读时声音名旁显示“跳过”（780 px 宽只留图标）；有待读时显示金色“+N”，点开待读列表（与声音浮层同位置、同遮罩；最多 8 条，点一条立即朗读，标题右侧“清空”经确认）。清空确认按钮原来写着“确认停止”，改为“清空”。原来隐藏的 sr-only 待读按钮和 `#queue-sep` 移除。修正了按 Esc 关闭待读列表后遮罩残留挡住点击的问题（`closeQueuePanel` 现在会更新遮罩）。新增英文词条：跳过、清空、重新连接。
+  - **涟漪**：ripple-one 从原稿 (300, 620) 移到 (470, 560)。“earlier tonight →”的纵向位置随历史条数在约 612–740 px 之间浮动，只往下挪不够（第一次挪到 y=700 时被测试抓到仍会套住）；改为横向离开，最大 240 px 宽的涟漪在 1040、780、1600 宽下都不覆盖它。
+  - 验证：Node **184/184**；`test-ui-lake` **22/22**（新增待读/跳过/清空/Esc 焦点与遮罩，连接状态与重新连接，涟漪位置三种窗口宽度）；localization 8、chat-send 45、lake-recovery 16、audience 14、broadcast 19、broadcast-focus 5、spotlight 7、emotes-alias、moderation 31、obs-recovery 16、settings-stability 通过。`test-ui-lake-parity` **2727/2765**：失败的 38 项仍然只有原有的 `path motion`。场景像素比对时两边都隐藏被移动的那圈涟漪，阈值 0.2% 未放宽，四个场景为 0.1345%–0.1476%。三项改动已写入批准例外。未提交、未推送。
+- **撤回（同日）**：用户看了效果后觉得“太乱了，页面一下子多了好多选项”，并说明主界面是有意做简的，跳过和断线提示都是有意不放的。已撤回本节中加到主界面的全部控件：底栏控制条（朗读开关、静音、音量）、跳过、+N 待读列表、已有弹幕时的断线/重连提示，以及随之加的“管理声音”和清空确认文案。底栏恢复原稿的单行声音署名，声音浮层恢复原内容（朗读开关、声音列表、音量），只能从声音署名打开，并从署名上方弹出。保留的有：太阳/月亮切换日夜（含日落月升、日间 evening、主题保存竞态修正）、左侧涟漪移位。`docs/UI-DESIGN.md` 写明主界面有意不显示跳过、待读、清空和已有弹幕时的断线提示，以免以后被当作缺失补回。
+  - 验证：Node **184/184**；`test-ui-lake` **21/21**（声音浮层从底栏打开且位于其上方、底栏只有一行；太阳/月亮与涟漪检查保留）；localization 8、chat-send 45、lake-recovery 16、audience 14、broadcast 19、spotlight 7 通过；`test-ui-lake-parity` **2727/2765**：失败的仍只有原有的 38 项 `path motion`。声音行几何重新与原稿完全一致；场景像素 0.1345%–0.1476%，阈值 0.2% 未放宽。未提交、未推送。
+
+## 2026-10-17 OBS 位置微调、恢复主标题与纯 emoji 过滤
+
+按用户反馈修复三项；基于当前工作区已有未提交的光脊、湖面和设置页改动增量实现，没有回退已有设计。本轮未提交、推送或发布，也未修改独立 release 仓库及其他 TTS 项目。
+
+- **位置微调**：设置 → OBS 与开播 → 叠加层新增横向/纵向数值输入，步进 1 px，范围 -8192 至 8192。正数始终向右/向下，与四角选择及“大小”缩放无关；偏移整个叠加层（刊头、弹幕与醒目留言）。旧配置默认为 0；自动保存、重启保留，非法值不覆盖旧设置。配置经真实应用接口传到 overlay 页面，预览按来源画布等比例缩小，修正原先大窗口/竖屏预览受 max-height 限制而失真的情况。现有 OBS 同步本来就不写场景变换，本轮未增加 OBS 变换写入。
+- **主标题**：在叠加层“刊头文字”恢复编辑，读取原保存值、自动保存、即时安全文本预览；支持 1–24 个 Unicode 字符，空白/控制字符/超长值拒绝。单独的 title.save 接口与存储层统一为 24 字。主界面仍保持简洁，没有增设标题编辑。中英文文案及使用/IPC 文档同步。
+- **纯 emoji / 空白播报**：先检查经过读音词典及音效规则处理的消息，再拼接用户名和播报模板，避免只念“某某说”。单个/多个 emoji、肤色、ZWJ 家庭、旗帜、键帽、圈字 emoji 和纯空白/标点在无可播放内容时不入 TTS 队列，原消息继续显示。带文字的弹幕、普通数字、明确设置的 emoji 读音替换/音效，以及礼物/上舰/醒目留言播报保持原语义。规则规划和实际播放共享 Unicode 判断；使用锁文件里已有的 regex 依赖，未联网下载新版本。
+
+### 验证与边界
+
+- `cargo fmt --all -- --check`、严格离线 `cargo clippy --offline --locked --workspace --all-targets -- -D warnings`、`git diff --check` 通过。
+- Rust 全工作区 **532 通过、0 失败、10 忽略**（desktop 208、engine 323、代理集成 1），使用本项目嵌入的真实 FFmpeg。日志 `target/overlay-feedback-20261017/rust.log`；忽略项仍为原有在线/账号/helper 项。
+- Node 全量 **187/187**，最终日志 `target/overlay-feedback-20261017/node-final2.log`；首轮 `node-final.log` 因调整说明文字后旧断言匹配短语不一致失败 1 项，恢复原有同义短语后通过，失败日志保留。
+- Headless Chromium：开播/OBS 设置 **21/21**，包含主标题保存/预览/转义、像素偏移自动保存与键盘步进、切页保留，以及 1600×900 / 780×580 下常规/竖屏/超宽来源的比例和位置换算；OBS 恢复 **16/16**，中英文 **8/8**。日志和截图在 `target/overlay-feedback-20261017/`。
+- 真实 overlay HTML 的保留/时序/位移回归 **19/19**，证据在 `target/overlay-position-20261017/browser2/results.json`；新增位移覆盖四角 × 三档缩放 × 两种画布、1 px 增量、醒目留言同步及重置。首次测试共用上下文，resize 触发 SSE 重连干扰原有 idle RAF 断言；改为独立定位测试上下文后通过，原失败保存在 `target/overlay-position-20261017/browser/failed.json`。生产 CSS/DOM 美术摘要未因新定位逻辑改变。
+- 页面测试使用离线虚构 IPC/回环源，不是实际 OBS、原生 WebView2、真实直播间或付费 TTS/物理音频验收。这些在线/设备验收仍待完成。
+- 本地最终 EXE 已构建：`cargo build --release --offline --locked -p danmakuvoice`，静态 CRT；产物 `target/release/danmakuvoice.exe`，仍为 0.3.2，SHA-256 `1d127b5325a309182b10f0c21a504f176d84257ea6e21a4073d9ba69dd0aecca`。最终日志/回执为 `build-final.log`、`build-artifact.json`；构建期间最后加宽位置数值框后再次构建，保证 EXE 包含最终 UI。未替换独立 release 目录的发行包，没有提出线上验收或发布声明。
+
+## 2026-10-17 光脊历史弹幕清晰度与“由线引出”的新弹幕
+
+按用户反馈两项：其用户觉得光脊的历史弹幕“太模糊”（不行就加可选项）；用户本人认为新弹幕直接出现没有利用好线和光，希望用动画从线上引出，并要求做一个与 `光脊动效演示.html` 相同的网页查看效果。基于工作区已有未提交改动增量实现；未提交、推送或发布，未重新构建 EXE。
+
+- **模糊的根因**：光脊弹幕文字用背景裁剪做朗读点亮（`.lit` 透明字色＋`background-clip:text`），继承的 `text-shadow: 0 1px 8px rgba(0,0,0,.85)` 在 Chromium 中画在裁剪背景之上，把白字压成灰并晕开；连最新一行也偏灰，而刊头标题（普通字色）是清晰的白色。离线截图并排对比（去掉阴影即恢复清晰）确认。一体卡本来就关掉了这个阴影，不受影响。
+- **修正（默认生效，未加选项）**：光脊 `.text` 改用相同参数的 `filter: drop-shadow` 画在字形后面，仍能在亮背景上分离文字；单独贴纸行（`.text.solo`）保留原有阴影，不叠加第二层。历史行不透明度 `.46/.72` 提到 `.72/.88`，静息时列表 `.8` 提到 `.9`，保持“最新最大最亮”的层次。设置页 OBS 预览同步。是否仍需要“历史弹幕清晰度”可选项留给用户看效果后决定。
+- **由线引出的新弹幕**（仅光脊，有动态效果时）：线末端的空心圆环隐藏，新头像在圆环处以 0.3 倍白亮光珠出现并弹开成头像，放出一圈扩散光环；0.24 s 起一道光从头像向文字方向展开（`--reveal` 驱动），名字和弹幕跟着光头部的柔和边缘显现，光线随后淡出；显示行的线段计时延后到 0.6 s 开始，光沿线继续向下，圆环 0.7 s 后在新位置重新出现；1.6 s 后移除遮罩和临时类。右侧角落方向镜像；底部角落整列上移时头像从圆环处随之上升。原来的模糊淡入（`item-arrive` 含 `blur(5px)`）去掉。每条停留时长（1.8–3.6 s）和轮流节奏不变；恢复、减少动态效果和一体卡不播放。
+- **检查方法**：临时虚构 SSE 回环服务器＋headless Chromium，Playwright 时钟控制 JS 计时器、逐个暂停并步进所有 CSS/WAAPI 动画，0–2200 ms 共 16 帧；覆盖左上 2 行、左上 3 行（最旧一行离场）、右下 3 行亮背景。截图和脚本在 scratchpad（会话临时目录），未进仓库。
+- **验证（本机离线，全局 Playwright＋Chromium）**：`test-overlay-retention` **19/19**（CSS 摘要重新固定为 `c83078ea…6029`；新增断言：光脊 `.lit` 无 `text-shadow`、`.text` 为 `drop-shadow`、历史行不透明度 `0.72/0.88/1`；正常动态下新弹幕带 `arrive`、圆环隐藏、遮罩存在，1.8 s 后遮罩/内边距/光线全部清除且字号 28 px；减少动态效果下无到场动画）。`test-ui-received-personal-emotes` **15/15**，`test-ui-broadcast` **21/21**，`test-ui-localization` **8/8**，Node **187/187**，`cargo test -p danmakuvoice overlay` **34 通过**。证据在 `target/spine-legibility-20261017/`。
+- `test-ui-settings-overview`（未跟踪、带 DEBUG 输出的脚本）失败于音效触发词输入的 `waitForFunction` 超时；临时撤回本次 `styles.css` 改动后同样失败（`test-ui-settings-overview-baseline.log`），与本次无关。
+- **演示页**：`node scripts/build-overlay-demo.cjs "target/overlay-demo/光脊动效演示.html"`（模板补充“新弹幕”说明）；在内置浏览器中点“来一条弹幕”确认到场动画运行并清理、保持 3 行、无控制台错误。
+- 未做：fmt/clippy/Rust 全量（Rust 未改）、原生 WebView2 窗口、真实 OBS 浏览器来源（CEF 版本差异）、真实直播间与朗读下的验收；未重新构建 EXE。
+- 追加（同日，用户看演示后认为效果不错，但希望“线流下去才显示下一个”、衔接更流畅）：
+  - **流光引出下一条**：有动态效果时，光脊轮与轮之间原来的 0.35 秒空档改为一段流光：光头沿线流到末端圆环，身后的线随之点亮（尾迹与光头同一缓动，顶端固定在起点），落进圆环时闪一下，下一条才在此处长出。起点：上一条刚轮完时从它自己的光头位置接着流（显示行计时走完的末端、朗读行读完后保留在末端的光头）；冷场后从最新头像下方；空线从 LIVE 点。时长按距离 0.22–0.56 秒。原来轮次结束时光头一边淡出一边跳回线段顶端的残影去掉，交接处不再闪回。软件已开始朗读一条仍在排队的弹幕时仍立即上台以保持音画同步（流光取消）。减少动态效果时不变（0.35 秒间隔）。
+  - **离场不再重叠**：屏上已满时，最早一条在光流动期间淡出让位，落地后整列滑入空位。另修两个早已存在的离场问题：底部角落里离场行保留了追加时的滑动动画，会瞬间落到第二行上；离场行冻结宽度时把含内边距的宽度写进内容宽度（右侧角落横移约 20 px），且整数取整会让文字瞬间换行。现在按看到的位置、未取整的边框盒宽度离场。
+  - 清理：`pulse()` 中不可达的旧光脊“落光”分支及其 `drop` 动画删除；新类名/动画（`pour`、`land`、`fading`）不与已有的待机流光 `.flow` 冲突（实现中曾误用 `flow` 同名，导致光头被裁剪且覆盖待机流光动画，已改名并检查 25 个关键帧无重名）。
+  - 验证：逐帧（Playwright 时钟＋暂停步进动画）检查冷场到场、轮次交接（50 ms 步长）、空线首条、左上/右下三行离场；演示页实时采样（25 ms，连点 3 次“来一条弹幕”和“三人接连发言”）：5 次流光、新行全部在流光落地后出现（0 违例）、可见行文字重叠 0 px、无控制台错误。`test-overlay-retention` **19/19**（CSS 摘要重新固定为 `8f84faad…3758`；新增：新行出现前光头先流、满屏时最早一行淡出、+1 仍显示、落地闪光），`test-ui-received-personal-emotes` **15/15**，Node **187/187**，`cargo test -p danmakuvoice overlay` **34 通过**。演示页已按新版重新生成。仍未重新构建 EXE，未在真实 OBS 中验收。
+- 再追加（同日，用户要求出现弹幕时的光线更快）：流光时长由 0.22–0.56 秒改为 0.15–0.32 秒（轮次交接 0.15 秒，冷场后约 0.19 秒，空线从 LIVE 点 0.32 秒），最早一条的让位淡出由 0.22 秒改为 0.15 秒；写字的横向光线和头像绽开未改。演示页实时采样（20 ms，含清空后空线首条）：8 次流光、新行全部在落地后出现（0 违例）、可见行文字重叠 0 px。`test-overlay-retention` **19/19**（CSS 摘要重新固定为 `046b9dc3…0e1e`），`test-ui-received-personal-emotes` **15/15**，`cargo test -p danmakuvoice overlay` **34 通过**。演示页已重新生成；仍未重新构建 EXE。
+- 再追加（同日，用户问最上面那段线上的光是什么）：那是 10-14 加的装饰性待机流光（每 9 秒、静息时每 15 秒沿整条线流下，过半淡出，所以只在上段看到），和弹幕无关；新的流光引出后它容易被误读。按用户选择改为**只在静息时出现**（15 秒一次），有弹幕时不显示，新弹幕唤醒时立即停止。原来静息只由活动触发，空叠加层永不静息；现在连接（hello）时若未计时则开始计时、清空本场时重新计时，空线 45 秒后同样静息。演示页实测（静息 10 秒）：来弹幕时与 4 秒后无流光、安静 12 秒后流光运行、静息中来弹幕立即停止、清空后空线 12 秒后静息并运行。`test-overlay-retention` **19/19**（新增：有弹幕未静息时流光动画为 none，五分钟空闲静息后为 flow；CSS 摘要重新固定为 `c15c0d09…7785`），`test-ui-received-personal-emotes` **15/15**，Node **187/187**，`cargo test -p danmakuvoice overlay` **34 通过**。
+- 顺带发现（未改）：减少动态效果的全局规则 `*{animation:none!important}` 不匹配伪元素，待机流光、刊头短线的高光（`.rule::after`）、一体卡描边扫光、醒目留言纸面高光在减少动态效果下仍会动。本次新增的伪元素动画都只在有动态效果时触发，不受影响。用户认为没有意义，不改。
+- **构建（同日，用户确认演示后要求构建 EXE）**：
+  - 检查（本机离线，日志在 `target/spine-legibility-20261017/`）：`cargo fmt --all -- --check` 通过；`cargo clippy --offline --locked --workspace --all-targets -- -D warnings` 通过；Rust 全工作区 **532 通过、0 失败、10 忽略**（desktop 208、engine 323、代理集成 1；`rust.log`）；Node **187/187**（`node.log`）。
+  - `RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --locked -p danmakuvoice` 成功（2m18s，`build.log`）。产物 `target/release/danmakuvoice.exe`，仍为 0.3.2，19,520,000 字节，SHA-256 `22e6c5f5ba30376fe6a99a59cccc32abd9bdf9aa77515ee59b21e382dcfe67f9`，回执 `build-artifact.json`；已在二进制中确认含本轮叠加层代码（`spineVictim`、`pour-trail`、静息才运行的待机流光规则）。构建前应用未在运行；旧 EXE（`1d127b53…ecca`）备份为同目录 `previous-danmakuvoice.exe`。
+  - 未做：原生 WebView2 窗口、真实 OBS 浏览器来源、真实直播间与朗读下的验收；未打包发行版，未替换独立 release 目录；未提交、未推送。
+- 再追加（同日，用户觉得标题下的短线和竖线“完全不搭边”，只有待机流光时才有一点整体感）：原因是短线从文字列开始，和竖线隔着约 31 px，而且自己每 9 秒闪一次高光，和线上的光无关。改为让短线成为竖线的第一条分支：从竖线以 14 px 圆角弯出（左右角镜像），向左延长 18 px，颜色和光晕与上段点亮的线一致，静息时和竖线一起降到 .72。光脊样式下去掉独立高光；静息时待机流光经过分叉，转角一亮，一部分光沿短线滑出并淡去。分支光的起始时刻由 `traceThread` 按分叉高度、线长和流光的缓动曲线算出，写在短线的 `--fork-at` 上（首版误写在竖线上，短线不继承，测试抓出后改正）。设置页预览画出同样的分叉；一体卡的短线不变。分支光同样是伪元素动画，和待机流光一样不受减少动态效果规则影响（见上条，用户已决定不改）。
+  - 验证（本机离线，全局 Playwright＋Chromium，日志在 `target/spine-fork-20261017/`）：截图逐帧检查左上三行、左下一行、右上、右下：分叉与竖线对齐，光在分叉处一分为二。`test-overlay-retention` **19/19**（CSS 摘要重新固定为 `fa32c10d…e327`，DOM 不变；新增：短线起点距竖线 0 px、圆角 14 px、有弹幕时分支光和转角闪亮动画为 none、静息时为 fork-glint/fork-light；按 `--fork-at` 定位待机流光，光头与分叉相差小于 1.5 px，分支光延迟等于 `--fork-at`）。`test-ui-broadcast` **21/21**（预览截图确认分叉），`test-ui-received-personal-emotes` **15/15**，`test-ui-localization` **8/8**，Node **187/187**，`cargo test -p danmakuvoice overlay` **34 通过**。演示页已重新生成（`target/overlay-demo/光脊动效演示.html`）：有弹幕时短线不亮，冷场后分支光运行，无控制台错误。
+  - 未重新构建 EXE：`target/release/danmakuvoice.exe`（`22e6c5f5…67f9`）还不含这次的分叉。未在真实 OBS 中验收；未提交、未推送。
+
+## 2026-10-17 撤回 10-14 设置总览草稿；水月重设计交接文档
+
+按用户要求删掉 10-14 未提交的设置改版草稿（总览加六个专题页、右侧滑入编辑面板），并保留同一工作区里其他未提交改动。这份草稿此前没有记进本文件。
+
+- **撤回方式**：草稿当时由 `settings_step1.py`、`settings_step2.py` 和约 30 条脚本编辑完成，按会话记录逐条反向撤回：字面替换换回原文；整段重写的函数从 HEAD 恢复。草稿删掉的规则、调用和 i18n 条目放回原位。
+  - 10-14 设置页美化里被草稿删掉的两条侧栏规则，按那次会话的原文放回。
+  - 纯 emoji 说明是 10-17 改的，位于被恢复的函数里，撤回后重新补上。
+  - 删掉未跟踪的 `scripts/test-ui-settings-overview.cjs`。
+- **结果**：
+  - `test-ui-settings-stability`、`test-ui-localization`、`test-ui-moderation`、`test-ui-emotes-alias`、`test-native-performance` 与 HEAD 内容一致。
+  - `app.js`、`styles.css`、`i18n-en.mjs`、`app-flow.test.mjs`、`test-ui-broadcast.cjs` 只剩其他改动：太阳/月亮切日夜、光脊预览、OBS 位置微调与主标题、纯 emoji 不播报、10-14 设置页美化。
+  - 撤回前的文件、撤回脚本和草稿操作记录在 `target/settings-draft-backup-20261017/`。
+- **验证（本机离线，全局 Playwright 加 Chromium）**：
+  - Node **184/184**（草稿的 3 个总览测试随草稿移除）。
+  - `test-ui-settings-stability` 通过；`test-ui-localization` 8 个场景通过；`test-ui-moderation` 31 项通过；`test-ui-emotes-alias` 全部 PASS；`test-ui-broadcast` 21 个场景通过；`test-ui-lake` 21 项通过。
+  - `test-native-performance` 需要原生 exe、UI 目录和输出目录三个参数以及调试端口，本轮未运行（文件已与 HEAD 一致）。
+- **交接**：新增 `docs/LAKE-REDESIGN-HANDOFF.md`，内容是夜间定稿的水月主界面和设置抽屉重设计，供后续实装。画板本地副本在 `target/design-reference/lake-redesign-2026-10/`。尚未实装。
+- 未做：Rust 无改动，未运行 fmt/clippy/Rust 全量；未在原生窗口验收；未提交、未推送。
+
+
+## 2026-10-17 水月重设计实装
+
+依据用户指定的 `docs/LAKE-REDESIGN-HANDOFF.md` 和 `C:/Users/26560/Downloads/design.html` 实装。直接设计文件已解出 45 张画板，前 37 张为采用方案、后 8 张为放弃方案；结合本地 DC 副本逐项读取数值。保留此前未提交的日夜切换、光脊流光/分叉、表情处理与其他工作；没有提交、推送或发布。
+
+- **主画面**：当前字幕/标题倒影共享实际音频播放比例；水面悬停最近三条，下滚进入完整历史；音量水线、声音面板与本地服务唤醒；观众近三句/完整计数及即时管理；标题/分区原地编辑、扫码验证在本次明确开播内有界续开、空场/下播/准备状态。
+- **完整历史**：当前运行期归档与最近100条快照分离，分页游标在新消息到达时稳定；同房重连/切换音频模式保留，换房/账号/退出清空。后补表情使用版本号刷新已加载历史和观众卡片，保持顺序、焦点和滚动锚点。正文不持久化到数据库或导出；上一场摘要的未知人数/时长不补零。
+- **设置**：380px湖面抽屉、首页/直播间/统一读法/通用/高级；OBS已连接908px画布。关键词音效使用真实已有音频管线。表情独立读法 `emote_words`；未设读法的官方表情不当普通文字念，保留原始显示。模板支持token、多行、输入法组字与失败草稿；恢复配置先备份再事务导入，不导入/导出凭据，缺失音效资源拒绝恢复。
+- **声音与引导**：默认试听、所有声音统一列表、原位名称/语速/音量编辑、四服务添加/目录预览；目录试听使用临时预设不改默认。明确删除默认声音不会静默选替代，引用失败事务恢复。已连接服务可修改连接；本地声音可保留ID更换模型/参考音频；试听等待编辑保存成功。欢迎湖景加三步右侧抽屉，`--setup`是隐藏重做入口，缩放/输出跟随Windows。
+- **OBS**：真实preview feed/画布尺寸；拖动、四角吸附、缩放、方向键、双击刊头（用户明确确认）实时同步。保留高级消息/名字/重复/联动和重置凭据。固定光脊/暗角0.6/停留14，迁移保留位置/标题/令牌。移除地址复制、测试、更新、坐标输入及实验标签。密码失焦与连接共用在途保存，避免重复写入。
+- **独立审核修复**：旧账号没有已移除实验开关也能进入开播/管理（仅迁移可达性，不发开播写请求）；目录搜索清空恢复全部行；本地目录保存后连接按钮可用；切默认保持试听DOM/文字/选区/滚动；迟到表情更新保留焦点和动画状态；OBS竖屏/超宽画布比例不压缩。
+- **平台限制**：10分钟禁言保留为禁用项并给出原因，当前B站API仅整小时。1小时/1天调用真实后端；没有用1小时或本机计时器伪装10分钟。白天除三张样例外按配色规范推导，待用户确认观感。
+- **最终离线门禁**：最终源码的 `cargo fmt --all -- --check`、`cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings`、`git diff --check` 通过；Rust全工作区 **544通过、0失败、10忽略**（desktop216、engine327、代理集成1，忽略项为既有在线/账号/helper项目），Node **185/185**，Python **28/28**。日志 `target/lake-redesign/{fmt-final,clippy-final,rust-final,node-final,python-tests}.log`。
+- **浏览器验证**：当前设计对照35项（选定几何/样式与成对截图，并非全图逐像素结论）、主流程21项、新主界面10组（含355条历史、105条新增时保持阅读锚点、后补表情和700×700长文字）、文字恢复16项、观众管理31项；声音/引导10组、OBS交互（含6组画布/窗口比例）、设置/模板IME、settings-stability、别名13组、收到个人表情15组、localization10组、chat-send45组、audience14组、OBS恢复16组、广播焦点5组、overlay-retention19组、overlay-reconnect通过。脚本使用测试专用IPC或回环协议fixture；个人表情图片用既有允许的公开CDN，不是在线账户/TTS/OBS验收。日志主要在 `target/lake-redesign/`，截图/JSON在各脚本报告的target或dist目录。排查过程中的失败记录保留，最终PASS以各目录最新 `results.json`/`result.json`和最终日志为准。
+- **最终构建**：`RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --locked -p danmakuvoice` 成功（2m08s）。产物 `target/release/danmakuvoice.exe`，版本仍为0.3.2，19,743,744字节，SHA-256 `f307b0b83f36702ef119c4b9fff378cf5ac56f4339ecaa3385203f4e03d7c603`。26个嵌入前端文件的摘要、最终构建回执分别在 `target/lake-redesign/final-frontend-assets.json`、`build-artifact-final.json`，构建日志为 `build-final.log`。构建所用app.js与最终设计对照报告摘要一致；四个新增样式表均已登记Tauri打包清单。本轮前的EXE保留在 `target/lake-redesign/pre-redesign-danmakuvoice.exe`，已有 `previous-danmakuvoice.exe` 未覆盖；未替换独立release目录或打包发布。
+- **原生离线启动/关闭**：使用最终EXE、独立临时数据目录和 `--disable-network` 启动真实Tauri/WebView2，通过UIAutomation点击实际标题栏“关闭”；73ms正常退出（exit code 0），主窗口消失，所属WebView2后代无残留，Shell代理窗为0。回执 `target/lake-redesign/native-close-final/results.json` 的EXE摘要与最终构建一致。此项只证明隔离原生启动/关闭，不是页面视觉或在线业务验收。
+- **尚未验收**：真实B站登录/开播/人脸验证/管理、四家实际合成与物理音频、真实OBS/CEF推流；原生性能脚本只按新结构适配，不将浏览器数据作为原生性能结论。完整历史不是B站平台全历史或跨重启正文档案。
+
+## 2026-10-18 实装版首轮反馈修正：提示、设置首页、OBS 未开、更新、图标、衔接动效
+
+用户实际运行 2026-10-17 实装版后的反馈逐条处理。没有提交、推送或发布。
+
+- **多余提示**：主画面 kicker 去掉「点标题可以改」，只留 `TONIGHT’S TITLE — 分区`；标题按钮悬停给「改标题」提示。交接文档同步。
+- **设置首页**：去掉悬停白色底块（用户称“白色遮罩”），改为行底分隔线亮成 lilac→pink 水线、小图形发光、箭头右移；OBS 小图标改成线框。四行按抽屉高度平分（76–116px），通用 / 高级和版本号贴底，不再留下半截空白。抽屉玻璃对背后月亮的透光压暗（`brightness(.7)`）。
+- **版本更新**：上一轮实装把旧「关于」里的检查更新整页删掉、未接回。现按用户说明：微软商店版由商店自动更新，版本号一行只显示版本、悬停提示「由 Microsoft Store 自动更新」、不可点；GitHub 压缩包版保留整行「检查更新」，结果留在该行（正在检查 / 已是最新 / 发现新版本 · 下载新版 / 没查到，再试一次）。
+- **OBS 已配置但没开**：连上过（本机记录）、叠加层已添加或开了开播联动时，OBS 未运行不再显示连接表单，而是正常宽画布：断开连线小图形 +「OBS 还没打开 · 打开后会自动连上」+「打开 OBS」（远程 OBS 为「重新连接」）；首次检测前显示「正在检测 OBS…」；密码错误 / 版本过旧（DV-OB02/03/04）仍回连接表单。首页 OBS 行同样显示「OBS 还没打开」。未配置时连接被拒只显示一行原因，完整错误与代码放在悬停提示。
+- **OBS 拖动吸附**：原实现只有同时靠近某个角的 18px 方块内才吸附，且松手后粉色参考线不消失。改为左右、上下分别吸附到边距线（12px），只显示贴住那条边的参考线，松手隐藏；上下锚点跟随所在半边（下半屏叠加层从下往上长），左右只在贴到边时切换（右侧会镜像内容，避免拖过中线时左右跳）。设置内容容器去掉被聚焦后出现的白色焦点框。
+- **白字按钮**：初次设置「开始」「进入直播间」白底白字。根因是旧样式 `:root[data-theme="dark"] .button.primary{color:#fff}` 优先级高于新规则，已提高新规则优先级。
+- **滚动条**：抽屉等水月区域的系统滚动条（带箭头、占宽）换成 4px 细线，放进抽屉右侧留白，不再挤占内容宽度；试听句去掉缩放拖柄。
+- **任务栏图标模糊**：用独立数据目录离线启动实测，主窗口 `WM_GETICON` 大图标为空、小图标 32×32，任务栏在 200% 缩放下只能放大小图标。改为启动及 DPI 变化时从 EXE 内嵌的多尺寸 ICO 资源按系统尺寸加载大、小图标（`WM_SETICON`）；重建后实测大图标 64×64、小图标 32×32。新增 windows-sys 特性 `Win32_System_LibraryLoader`、`Win32_UI_HiDpi`（仅启用已有依赖的模块，Cargo.lock 无变化）。未截到任务栏实际画面（本机任务栏不在主屏底部截取区域），视觉效果待用户确认。
+- **状态衔接**（按独立只读审查结果，只补跳变明显处）：设置抽屉关闭滑出、遮罩淡入淡出；子页按层级左右推入，OBS 连上等状态变化原地淡入；同页重渲染保持滚动位置（此前声音原位编辑、高级手风琴会跳回顶部）；打开设置时主界面动画改为暂停而非清除（云、鸟、水波不再跳回起点，字照常出现）；潜入 / 浮出历史改为同步切换 + 新层滑入；倒影跟随文字逐字出现；改标题时标题、kicker、倒影一起淡出入；人脸验证卡修正斜飞入场；开播状态与上一场摘要淡入；声音面板、观众卡片、在看的观众、提示条按来路退出；初次设置换步只替换抽屉内容，场景继续动，抽屉首次滑入、之后卡片原地淡入。未做：声音行唤醒到就绪的原地过渡、手风琴高度动画、旧句离场淡出、设置错误条高度动画。
+- **测试更新**（行为按用户要求变化）：`app-flow` 的 OBS 视图测试覆盖未配置→连接表单、配置过且 DV-OB01→画布、DV-OB03→连接表单；吸附测试加单边吸附与上下跟随；`test-ui-lake-redesign-obs` 改为拖动中两条参考线可见、松手后为 0；`test-ui-obs-recovery` 改为配置过的用户打开时在画布上显示「正在检测」、断开后为「OBS 还没打开」+「打开 OBS」，DV-OB01 原文在悬停提示中。
+- **验证**：Node 185/185；浏览器 17 套全部通过（lake-settings、lake-redesign、lake-redesign-obs、lake-voices、lake、lake-parity、lake-recovery、settings-stability、localization、broadcast、chat-send、moderation、emotes-alias、received-personal-emotes、obs-recovery、audience、broadcast-focus）。`test-ui-spotlight-transition` 依赖已被 10-17 重设计移除的 `#lake-history`、`test-ui-viewer-layout` 断言旧声音胶囊宽度，二者属重设计前的旧画面测试，本轮未改。`cargo fmt --check`、`cargo clippy --offline --locked -p danmakuvoice --all-targets -- -D warnings` 通过。release 重建成功：`target/release/danmakuvoice.exe` 19,752,448 字节，SHA-256 `85cffbefb1a63d6043be994f7b75adceec2b0fc05c8a00425486dbcbf8cb81f4`；独立数据目录 `--disable-network` 启动实测窗口大图标 64×64、小图标 32×32。全工作区 Rust 回归本轮未重跑（仅改 desktop 的 main.rs 窗口图标）。
+- **尚未验收**：真实 OBS 未开 / 打开流程、商店版版本行、任务栏图标实际观感、白天模式下的新悬停与版本行，均需用户在实际环境确认。
+
+## 2026-10-18 全面审查与重做（声音、设置控件、主界面审查项）
+
+用户要求「严肃重做并审查所有内容」，并要求核算交互点击次数。审查文档 `docs/LAKE-AUDIT-2026-10-18.md`（根因、逐页问题、点击次数对照、主界面代码审查结论与状态）；交接文档同步更新声音、读法、直播间、声音面板段落。没有提交、推送或发布。
+
+- **审查方法**：离线假数据渲染真实界面，1000×712 下 44 个页面/状态截图（含白天）；一个只读代理完成主界面与初次设置代码审查（另两个代理因账号用量上限中途停止，其范围改为重做时逐段核对）。
+- **根因修复**：`--sans` 字体变量从未定义导致 4 条字体规则整条失效（OBS 高级页大灰标题）；后端保存 OBS 设置时任何字段变化都重置连接状态，造成开关闪烁——改为只有地址或端口变化才重置，开播联动开关只取消在途动作，自动启动与程序路径不影响连接（新增 Rust 测试 `obs_switches_keep_the_connection_status_until_the_address_changes`）；观众卡片按名字的绑定在观众有 UID 时被忽略——改为与播报规则一致（先 UID 后名字）。
+- **控件规范**：小标题、细线开关（无回弹）、单选（下划渐变线）、多选（亮点/空心圈）、次要操作改为带下划线的文字、每页一个主按钮、禁用主按钮为描边、水线滑条（圆点仅指针下出现）、列表悬停亮水线不铺色块、细滚动条不占宽度。
+- **声音重做**：默认声音名单行按长度缩字号不截断、去底色框和页脚操作提示；行内编辑去卡片框，本地声音的参考音频（选完即保存）和参考文本在最前，语速音量降为次要水线，「设为默认 / 删除」为文字操作，默认切换原地更新保留焦点/选区/滚动；添加声音合成一页，顶部四家服务切换，未连接的服务原地连接后原地继续添加：豆包整行试听、右侧一下添加，超过 8 个才有搜索；Fish 贴链接自动查名、可试听；GPT-SoVITS 选模型后原地选参考音频，参考文本从文件名带出，已添加的模型跳到编辑；dots 选录音即可。声音面板底部加「添加声音」，当前声音去掉描边框。
+- **其他设置页**：OBS 高级去掉重复的「返回预览」、「重新生成连接凭据」改为淡色文字；读法原地添加/编辑（单选种类、原文→读法一行、不要 UID 输入）；直播间已登录显示「换一个账号」，失效时金色「重新扫码」；高级页关键词音效一行对齐。
+- **主界面与初次设置**：在看观众卡片关闭计时与悬停计时分开（上一轮关闭动画引入的卡死）；人脸验证中外部点击不再取消；没有弹幕不潜入；浮上的近 3 句不再压住「N 句沉在湖里」；潜入后不画焦点框、历史行悬停不铺色块；发送诊断改为表情按钮金点；夜间错误提示可读、可换行、位于声音行上方；倒影字号与正文一致；声音行名字衬线；初次设置已登录时返回显示「继续 / 换一个账号」、换一张不再沿用设置残留状态、二维码生成提示不重复；「朗读」统一为「播报」。表情面板空状态保持之前约定的纯图形。
+- **点击次数（从主界面）**：添加豆包 6+滚动→3；Fish 6+滚动+粘贴→4+粘贴；GPT-SoVITS 9+两次滚动+打字且同模型走不通→7（含系统对话框 2 下）；dots 约 8→6；更换本地参考音频 7+滚动→5；添加读法 6+2 输入→3+2 输入。
+- **验证**：Node 187/187（新增添加流程与名字绑定 2 条）；浏览器 17 套全部通过（lake-settings、lake-redesign、lake-redesign-obs、lake-voices、lake、lake-parity、lake-recovery、settings-stability、localization、broadcast、chat-send、moderation、emotes-alias、received-personal-emotes、obs-recovery、audience、broadcast-focus），其中多处测试按新界面更新（已登录「换一个账号」、去掉「返回预览」、读法种类改单选、新添加页、默认原地切换）；desktop crate Rust 217 通过 4 忽略；`cargo fmt --check`、`cargo clippy -p danmakuvoice --all-targets -D warnings` 通过。release 重建：`target/release/danmakuvoice.exe` 19,761,152 字节，SHA-256 `60ec1bc47a7304f224b69cdbaf16de3a53e26a689ccdc7ce167329efb5adbcac`。全工作区 Rust 回归本轮未重跑（仅改 desktop crate）。
+- **尚未做 / 待确认**：改标题的下划线与「好了」样式、窄窗口倒影、下播后月光变暗、白天模式若干对比度、键盘调音量、读取开播失败原因显示等审查项（见审查文档第五节）；真实 B站/四家声音/OBS 的在线验收；「重新生成连接凭据」是否保留待用户决定。
+- **交接**：剩余审查项（A8–A22 未完成部分、两个过时的旧画面浏览器测试、全工作区 Rust 回归）整理为任务书 `docs/LAKE-REMAINING-2026-10-18.md`，由用户交给其他代理实现，Claude 对照任务书审查。
+
+
+## 2026-10-18 水月剩余修正第三轮（T1–T11）
+
+按用户指定任务书执行，以开始时约 60 个未提交文件为基线。未 stash/reset/checkout/restore/clean，未提交、推送或发布；其他 TTS 项目仅作只读参考，没有新增依赖、生产 mock、服务回退或凭据迁移。app.js 保持 CRLF（裸 LF 为 0）。本轮前文件及状态保存在 target/lake-round3/baseline/、baseline-status.txt；原 EXE 为 pre-round3-danmakuvoice.exe。
+
+### 逐项状态
+
+| 任务 | 状态 | 实现、理由与证据 |
+|---|---|---|
+| T1 | 已做 | 标题输入下划线/光标为 lilac，「好了」为白色主按钮、白天反色；网格固定 16px 间隔，780/900/1040 日夜六图无重叠。 |
+| T2 | 已做 | 正文/倒影共用 normal/medium/small 三档字号与窄屏缩放；普通与 large 图片表情同为 1.15em、同基线。780×580、1040×740 逐字和图片坐标、换行均一致。 |
+| T3 | 已做 | 准备→下播→准备时夜间月亮和水面月光透明度 1→0.6→1，渐变 0.8s，减少动态时为 0。直接核对设计稿未找到白天下播态，太阳保持原样。 |
+| T4 | 已做 | 白天跳动条、完成勾、已连接绿点、选项波形采用可辨识颜色；夜间配色不变。截图取背景样本并按实际透明度合成后，最低对比度 3.623:1。 |
+| T5 | 已做 | 第一次真实点击输入框即关闭表情面板、获得焦点并可输入，不发送消息。只响应点击，保留原有程序聚焦/填值流程。 |
+| T6 | 已做 | OFF AIR 同行显示「没读到开播状态」，title 保留完整错误，沿用现有重试按钮；中文断言及 780px 英文截图/溢出检查通过。 |
+| T7 | 已做 | 近三句给右下角整区留空；错误条避开主题球；扫码紧凑布局覆盖到 720px 高。三种指定尺寸及 641/680/700/720/721 高度边界的换一张均零滚动完整可见、真实可点击。 |
+| T8 | 已做 | 欢迎及每个设置步骤的主题球可见可点击；细 lilac 焦点、无底齿轮悬停、水月状态点；移除重复二维码按钮。失败只在二维码状态区显示一次，唯一「换一张」失败/恢复时位置不动。 |
+| T9 | 已做 | 滚轮/键盘共用保存逻辑；方向键 ±5、Home/End 0/100，Enter/Space 静音；slider ARIA；浮回水面聚焦可见元素；空的新消息按钮 hidden。实际 fixture preferences.save 已验证。 |
+| T10 | 已做（按 F3 收窄） | 四处头像取消旧 filter；补充审查后恢复历史/近三句整行随层次变淡，昼夜同层次一致，不再强制头像祖先 opacity 为 1。最终合成像素证据见本节末 F3；历史次要链接使用现有变量与下划线，页面底部整体渐隐保留。 |
+| T11 | 已做 | 删操作提示、改禁言原因、统一只看弹幕/OBS 路径/播报；afternoon/evening；设计稿中找到 just now 并按作者旁时间位置显示，新消息 60 秒内使用它。收起可翻译、英文冒号为 ASCII、默认试听随界面语言；明确自定义文字保留，清空后恢复默认。要求待定的三项英文点缀不改。 |
+| T12 | 没做（可选） | 两个旧画面测试未迁移，也未删除/放宽：test-ui-spotlight-transition.cjs 仍依赖旧 #lake-history，test-ui-viewer-layout.cjs 仍断言旧声音胶囊。它们不属于本轮规定的 17 套。 |
+| T13 | 没做（可选） | 本轮未扩展声音行唤醒就绪、手风琴高度、旧句离场、设置错误条高度这四处动效；保留上一轮状态，不把未专门实测的动效写成已验收。 |
+
+### 本轮文件与每处测试改动
+
+生产文件仅 4 个：crates/desktop/ui/app.js（交互、QR 状态、可访问性与文案）、i18n-en.mjs（对应英文和标点）、lake-redesign-main.css（标题/倒影/月光/窄窗/头像/焦点/历史链接）、lake-redesign-voices.css（白天图形、引导主题球/焦点/QR/高度断点）。未修改旧 styles.css、lake-scene.mjs、设置/OBS 样式或 Rust 代码。保留默认声音标题原断言，调整 h2 的属性排列，style/title 内容及显示不变。记录文件为本 PROGRESS.md 与 docs/LAKE-AUDIT-2026-10-18.md 第五节。
+
+| 测试文件 | 修改理由与精确范围 |
+|---|---|
+| crates/desktop/ui/app-flow.test.mjs | T9：原音量断言改为 slider 的数值/静音 aria-valuetext，并保留历史大于 100% 音量的可访问值检查。T11：语言切换仅更新未编辑默认样句，明确自定义稿不改；新增四服务中英试听请求/自定义及空稿、GPT-SoVITS 有效参考配置语言覆盖、just now 的 60 秒与未来/零时间边界三条测试。总数 187→190。 |
+| crates/desktop/ui/i18n.test.mjs | T11：保留英文非空/无汉字检查，额外禁止全角冒号；未删原断言。 |
+| scripts/test-ui-chat-send.cjs | T5：新增真实首击关闭、焦点、输入、无发送断言，再打开面板继续原有测试。T11：精确日间词预期 night 改为 evening；其他原有表情/账号/草稿断言保留。 |
+| scripts/test-ui-lake.cjs | T11：精确预期改为夜间 evening、白天 afternoon；主题球提示也限于 afternoon/evening，保留主题保存与切换断言。 |
+| scripts/test-ui-lake-redesign.cjs | T6：通过真实 refreshBroadcast 路径注入一次读取失败，检查可见短原因、完整 title、单个重试。T9：检查新消息按钮 hidden 的三态、历史清空后浮出的可见焦点，以及全部键盘键、保存 payload、0/100 边界和 Enter/Space。T11：观众卡操作提示消失及 10 分钟禁用原因。测试暴露函数仅在 fixture HTTP 响应中追加，未入生产。 |
+| scripts/test-ui-broadcast.cjs | T11：在已有 OBS 自动推流失败场景增加新路径「设置 → OBS」及旧路径不再出现的断言。 |
+| scripts/test-ui-localization.cjs | T11：增加遮罩 aria-label 为 Dismiss、准备摘要为 View messages for now；原英文扫描保留。 |
+| scripts/test-ui-lake-round3.cjs（新增） | T1–T4/T6–T8/T10/T11：离线 Edge 实际生产资源、独立测试 IPC，46 张图；逐字/图片倒影、主题/字号/几何/点击命中/实际背景对比度、整条祖先透明度与头像像素、月光渐变及减少动态、真实二维码失败和原位恢复、五个高度断点、英文试听与错误状态；冻结资产摘要断言。没有生产 mock。 |
+
+### 最终验证与构建
+
+- Node：在 crates/desktop/ui 运行 node --test，190 通过、0 失败、0 跳过，node-final.log。
+- Rust 全工作区：cargo test --offline --locked --workspace，545 通过、0 失败、10 忽略（desktop 217、engine 327、代理集成 1；忽略项沿用既有在线/账号/helper 检查），rust.log。本轮没有 Rust 代码变更。
+- cargo fmt --all -- --check、cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings、git diff --check 通过；日志 fmt.log、clippy.log、git-diff-check.log。
+- 必须的 17 套 Playwright + 本机 Edge 浏览器回归全部通过：lake-settings、lake-redesign、lake-redesign-obs、lake-voices、lake、lake-parity、lake-recovery、settings-stability、localization、broadcast、chat-send、moderation、emotes-alias、received-personal-emotes、obs-recovery、audience、broadcast-focus。逐套退出码/耗时在 browser-run.json；日志 browser-*.log，截图/JSON 汇集在 browser/<套件名>/。
+- 新增 round3：12 组通过、46 张截图，results.json/round3.log。截图前冻结动画到最终状态；动效时长和减少动态另做计算样式断言。最终测试资源摘要与源码一致；26 个嵌入资源另记 final-frontend-assets.json。
+- T7 另验证 780×641、900×680、900×700、1040×720、780×721：换一张在 scrollTop=0 时完整位于抽屉与视口内，真实命中且 scrollHeight=clientHeight。720 使用 160px QR，721 恢复 184px QR。
+- 构建命令：RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --locked -p danmakuvoice。成功（build.log）；target/release/danmakuvoice.exe 为 19,765,248 字节，SHA-256 f246e031a8296e63592ee2f3078e4cd08e6fa0e6fde62d15c3e492b423cc907e，回执 build-artifact.json。独立 release 目录未替换。
+- 失败证据保留：node.log 的早期断言差异、browser-first-pass.json/旧 daypart 日志、browser-second-pass.json/browser-chat-send-focus-regression.log（发现程序聚焦不应关面板，最终仅响应点击）、二维码重复错误条导致 footer 上移的 failure-*.json/png，以及 boundary-probe/ 的 641–680 高度失败测量。均已修复后重跑；最终结论只取上述最终日志。
+
+### 白天图形对比度
+
+按截图五处实际背景、计算颜色与祖先透明度合成测量，非仅比较 CSS 色值；详细样本与方法在 results.json。
+
+| 图形 | 最低实测对比度 |
+|---|---|
+| voice-panel current voice bars | 3.754:1 |
+| viewer current voice bars | 3.623:1 |
+| add voice connected service dot | 4.741:1 |
+| setup scanned QR status dot | 4.888:1 |
+| setup completed-step tick | 5.020:1 |
+| setup read-aloud waveform | 5.288:1 |
+| setup receive-only flat waveform | 4.325:1 |
+| setup ready-step tick | 5.020:1 |
+
+### 逐张截图对应（target/lake-round3/）
+
+下面 46 张为最终验收图；每张 SHA-256、尺寸、主题、任务号在 results.json。T5/T9 由既有浏览器套件的真实交互/保存断言验收，没有额外截图要求。
+
+| 文件 | 验收项 | 尺寸、主题与内容 |
+|---|---|---|
+| [T1-title-edit-dark-780.png](target/lake-round3/T1-title-edit-dark-780.png) | T1 | 780×580 / 夜间 / 标题原地编辑 |
+| [T1-title-edit-dark-900.png](target/lake-round3/T1-title-edit-dark-900.png) | T1 | 900×640 / 夜间 / 标题原地编辑 |
+| [T1-title-edit-dark-1040.png](target/lake-round3/T1-title-edit-dark-1040.png) | T1 | 1040×740 / 夜间 / 标题原地编辑 |
+| [T1-title-edit-light-780.png](target/lake-round3/T1-title-edit-light-780.png) | T1 | 780×580 / 白天 / 标题原地编辑 |
+| [T1-title-edit-light-900.png](target/lake-round3/T1-title-edit-light-900.png) | T1 | 900×640 / 白天 / 标题原地编辑 |
+| [T1-title-edit-light-1040.png](target/lake-round3/T1-title-edit-light-1040.png) | T1 | 1040×740 / 白天 / 标题原地编辑 |
+| [T2-reflection-short-780x580.png](target/lake-round3/T2-reflection-short-780x580.png) | T2 | 780×580 / 夜间 / 短句倒影 |
+| [T2-reflection-three-line-medium-780x580.png](target/lake-round3/T2-reflection-three-line-medium-780x580.png) | T2 | 780×580 / 夜间 / 中号三行倒影 |
+| [T2-reflection-three-line-long-780x580.png](target/lake-round3/T2-reflection-three-line-long-780x580.png) | T2 | 780×580 / 夜间 / 小号三行倒影 |
+| [T2-reflection-normal-emote-780x580.png](target/lake-round3/T2-reflection-normal-emote-780x580.png) | T2 | 780×580 / 夜间 / 普通图片表情混排倒影 |
+| [T2-reflection-large-emote-780x580.png](target/lake-round3/T2-reflection-large-emote-780x580.png) | T2 | 780×580 / 夜间 / large 图片表情混排倒影 |
+| [T2-reflection-short-1040x740.png](target/lake-round3/T2-reflection-short-1040x740.png) | T2 | 1040×740 / 夜间 / 短句倒影 |
+| [T2-reflection-three-line-medium-1040x740.png](target/lake-round3/T2-reflection-three-line-medium-1040x740.png) | T2 | 1040×740 / 夜间 / 中号三行倒影 |
+| [T2-reflection-three-line-long-1040x740.png](target/lake-round3/T2-reflection-three-line-long-1040x740.png) | T2 | 1040×740 / 夜间 / 小号三行倒影 |
+| [T2-reflection-normal-emote-1040x740.png](target/lake-round3/T2-reflection-normal-emote-1040x740.png) | T2 | 1040×740 / 夜间 / 普通图片表情混排倒影 |
+| [T2-reflection-large-emote-1040x740.png](target/lake-round3/T2-reflection-large-emote-1040x740.png) | T2 | 1040×740 / 夜间 / large 图片表情混排倒影 |
+| [T3-night-01-ready.png](target/lake-round3/T3-night-01-ready.png) | T3 | 1040×740 / 夜间 / 准备月光 |
+| [T3-night-02-ended.png](target/lake-round3/T3-night-02-ended.png) | T3 | 1040×740 / 夜间 / 下播月光降至六成 |
+| [T3-night-03-ready-again.png](target/lake-round3/T3-night-03-ready-again.png) | T3 | 1040×740 / 夜间 / 回到准备恢复月光 |
+| [T4-voice-panel-day.png](target/lake-round3/T4-voice-panel-day.png) | T4 | 1040×740 / 白天 / 声音面板白天对比度 |
+| [T4-viewer-day.png](target/lake-round3/T4-viewer-day.png) | T4 | 1040×740 / 白天 / 观众卡白天对比度 |
+| [T4-add-voice-day.png](target/lake-round3/T4-add-voice-day.png) | T4 | 1040×740 / 白天 / 添加声音白天状态点 |
+| [T7-main-780x580.png](target/lake-round3/T7-main-780x580.png) | T7 | 780×580 / 夜间 / 近三句/右下控件、错误条/主题球分离 |
+| [T7-main-900x640.png](target/lake-round3/T7-main-900x640.png) | T7 | 900×640 / 夜间 / 近三句/右下控件、错误条/主题球分离 |
+| [T7-main-1040x740.png](target/lake-round3/T7-main-1040x740.png) | T7 | 1040×740 / 夜间 / 近三句/右下控件、错误条/主题球分离 |
+| [T10-avatar-surface-night.png](target/lake-round3/T10-avatar-surface-night.png) | T10 | 1040×740 / 夜间 / 水面当前句头像 |
+| [T10-avatar-peek-night.png](target/lake-round3/T10-avatar-peek-night.png) | T10 | 1040×740 / 夜间 / 浮起近三句头像 |
+| [T10-avatar-history-night.png](target/lake-round3/T10-avatar-history-night.png) | T10 | 1040×740 / 夜间 / 水下历史头像 |
+| [T10-avatar-viewer-night.png](target/lake-round3/T10-avatar-viewer-night.png) | T10 | 1040×740 / 夜间 / 观众卡片头像 |
+| [T8-setup-welcome-night.png](target/lake-round3/T8-setup-welcome-night.png) | T8 | 1040×740 / 夜间 / 欢迎主题球 |
+| [T8-setup-welcome-day.png](target/lake-round3/T8-setup-welcome-day.png) | T8 | 1040×740 / 白天 / 欢迎主题球 |
+| [T8-setup-01-login-night.png](target/lake-round3/T8-setup-01-login-night.png) | T4、T8 | 1040×740 / 夜间 / 连接直播间、二维码状态点与主题球 |
+| [T8-setup-01-login-day.png](target/lake-round3/T8-setup-01-login-day.png) | T4、T8 | 1040×740 / 白天 / 连接直播间、二维码状态点与主题球 |
+| [T7-qr-780x580.png](target/lake-round3/T7-qr-780x580.png) | T7 | 780×580 / 白天 / 扫码换一张零滚动可见 |
+| [T7-qr-900x640.png](target/lake-round3/T7-qr-900x640.png) | T7 | 900×640 / 白天 / 扫码换一张零滚动可见 |
+| [T7-qr-1040x740.png](target/lake-round3/T7-qr-1040x740.png) | T7 | 1040×740 / 白天 / 扫码换一张零滚动可见 |
+| [T8-qr-failure-780x580.png](target/lake-round3/T8-qr-failure-780x580.png) | T7、T8 | 780×580 / 白天 / 二维码失败后同位置唯一重试 |
+| [T8-setup-02-voices-night.png](target/lake-round3/T8-setup-02-voices-night.png) | T4、T8 | 1040×740 / 夜间 / 语音选择、完成勾/波形与主题球 |
+| [T8-setup-02-voices-day.png](target/lake-round3/T8-setup-02-voices-day.png) | T4、T8 | 1040×740 / 白天 / 语音选择、完成勾/波形与主题球 |
+| [T8-setup-02-doubao-qr-night.png](target/lake-round3/T8-setup-02-doubao-qr-night.png) | T8 | 1040×740 / 夜间 / 豆包扫码与主题球 |
+| [T8-setup-02-doubao-qr-day.png](target/lake-round3/T8-setup-02-doubao-qr-day.png) | T8 | 1040×740 / 白天 / 豆包扫码与主题球 |
+| [T8-setup-03-ready-night.png](target/lake-round3/T8-setup-03-ready-night.png) | T4、T8 | 1040×740 / 夜间 / 准备好了、完成勾与主题球 |
+| [T8-setup-03-ready-day.png](target/lake-round3/T8-setup-03-ready-day.png) | T4、T8 | 1040×740 / 白天 / 准备好了、完成勾与主题球 |
+| [T8-keyboard-focus-day.png](target/lake-round3/T8-keyboard-focus-day.png) | T8 | 1040×740 / 白天 / Tab 键 lilac 细线焦点 |
+| [T11-english-interface.png](target/lake-round3/T11-english-interface.png) | T11 | 1040×740 / 白天 / 英文界面与英文默认试听 |
+| [T6-broadcast-failure-english-780x580.png](target/lake-round3/T6-broadcast-failure-english-780x580.png) | T6、T11 | 780×580 / 白天 / 英文读取失败短原因、完整 title 与原重试 |
+
+### 待用户决定与证据边界
+
+- 按 F6 用户决定，声音面板底部「＋ 添加声音」和直播间已登录的「换一个账号」保留；OBS 高级的「重新生成连接凭据」已移除。
+- 英文点缀 REPLAY、WATCHING NOW、初次设置 ready 按补充审查结论保留。just now 在设计稿作者旁找到并采用；未找到白天下播方案，因此未改变太阳。
+- 英文默认试听已覆盖豆包/Fish/dots/GPT-SoVITS 的命令文本。GPT-SoVITS 使用模型及匹配参考条目的有效 text_language：auto/en 发英文；强制非英文配置继续中文，不改模型配置。自定义文字原样保留。这里验证的是请求选择，未实测各服务/音色能否正确合成英语；真实声音能力及强制非英文模型是否改配置仍待用户实际选择/验收。
+- 所有新截图均为隔离测试数据与 IPC；既有表情回归可能读取公开图片 CDN。不是原生 WebView2 页面视觉、真实 B站登录/开播/管理、四服务实际合成/物理音频或真实 OBS/CEF 推流验收。本轮未宣称这些在线能力已通过。
+
+**2026-10-18 审查补充 F1–F5：五项均已做。** F1 按词保留拉丁单词、按字素保留中日韩断行，空格实测宽度为 7.984375/10.640625px；逐字延迟、播放高亮与倒影对齐均通过，证据为 `followup/F1-text-{english,mixed-spaces,cjk}-{780x580,1040x740}.png` 六图。F2 月亮与月光跟随抽屉以 700ms 移动，原 opacity/filter 过渡保留；`F2-setup-enter-{start,middle,end}.png` 取真实 CSS 过渡 0/350/700ms，`F2-setup-return-welcome.png` 验证反向返回，中心误差不超过 0.016px；正常运行及暂停取帧两种缩放路径都立即到位，减少动态也直接到位。测试实际发现移除移动类后月光仍沿用旧 left 过渡，已用设置页专属基础 `transition:none` 修复并重验。F3 保留头像 `filter:none`，恢复整行深度透明度，昼夜近三句均为 .62/.44/.29，历史第 1/4/7 条均为 1/.82/.65；16 个样本按实际透明度与背景合成后的最大 RGB 误差 0.86（严格阈值仍为 2），四张 `T10-avatar-*-night.png` 已重拍；第 7 条采样正常滚至既有底部渐隐遮罩的不透明区，遮罩未改。F4 已同步 `docs/UI-DESIGN.md` 的 afternoon/evening，并原位更正上表四张 T10 与一张 T11 的说明。F5 返回按钮与内容同为 46px、焦点框贴合（`F5-back-focus-780x580.png`）；英文 1/2/回1 的单复数及中文标签均实际可见，完整文字、非零尺寸和透明度断言通过（`T11-english-interface.png`）。目视复核发现新增标签被旧 span 隐藏规则命中，已限定恢复标签显示并重验。本次补充仅改三个生产文件 `app.js`、`lake-redesign-main.css`、`lake-redesign-voices.css`，两个测试文件与三份文档（本文件、UI-DESIGN、LAKE-AUDIT），未改 Rust 或依赖；app.js 仍为 CRLF、裸 LF 为 0。测试改动理由：`app-flow.test.mjs` 新增四项覆盖 F1 字素/完整单词/表情/阅读进度及 F5 动态单复数，原断言保留；`test-ui-lake-round3.cjs` 按 F1/F2/F5 增加几何、实际运动和可见性断言，按 F3 明确收窄要求替换旧“祖先 opacity 全为 1”的断言，保留 filter 与严格像素比较、昼夜同深度及逐层递减检查。最终 Node 194/194、Rust 全工作区 545 通过/10 忽略、规定 17 套浏览器回归及 round3 16 组/57 图全部通过，fmt、严格离线 Clippy 与 git diff --check 通过；所有日志、逐张图映射/摘要、逐套退出码在 `target/lake-round3/followup/` 的 `results.json`、`browser-run.json` 及对应日志，26 个嵌入资源摘要见 `final-frontend-assets.json`，其中 12 个截图测试资源与最终源码一致。本轮要求的静态 CRT 构建成功：`target/release/danmakuvoice.exe` 为 19,765,248 字节，SHA-256 `ce9b8bc7e3006a454db11615a7cb59b96134db61dd9cadfecfea9bf6efe32739`（`build-artifact.json`）；独立 release 目录未替换。失败日志/截图、缩放诊断、标签修复前 57 图及中间构建均保留，最终结论只取最终回执。未 stash/reset/checkout、提交或推送；上述均为离线 UI 与本地构建证据，不扩展为原生 WebView2、真实账号、音频或 OBS 在线验收。
+
+**2026-10-18 审查补充 F6–F7：两项均已做。** F6 已删除 OBS 高级页整个 `.lake-obs-advanced-foot`、`overlay.token.reset` 前端处理及确认弹窗，清理两份 CSS 中的三条专属规则和六条无引用英文词条；页面直接结束于开播联动设置，没有空页脚或尾部留白条。后端命令及 Rust 测试保留，启动、启用叠加层、端口回退的原同步路径和断言未改；UI-IPC 已注明“界面不再提供入口（2026-10-18 用户决定）”，BROADCAST 和 UI-DESIGN 同步，另两个入口按决定保留。F7 将所有不含汉字/平假名/片假名/谚文的整词整体保留，涵盖数字、AWSL2333 及其他文字；行数、平衡和字号改用 100/55 整数表示 1/0.55 视觉宽度单位，原 8/16 行数与 16/26 字号阈值不变，CJK、全角标点、表情图片计 1。最终复核补齐“”‘’…—六种中文常用标点为 1，ASCII 引号/点/短横仍为 0.55，无语言推断。英文准确为“Good evening / by the lake”，混排准确为“主播 晚上好 / Hello lake”，两条 10/16 位数字串不拆开；纯中文和标点与本次修改前函数精确比较 804 对、0 差异（`f6-f7/cjk-parity-with-punctuation.json`）。原字素节点顺序、160ms 逐字延迟、阅读进度及倒影逐字对齐保留，两尺寸逐字出现和 25%/75% 阅读位置通过。新增五图在 `target/lake-round3/followup/`：`F6-obs-advanced-night.png` 对应 F6 夜间高级页；`F7-text-english-780x580.png`、`F7-text-english-1040x740.png` 对应 F7 英文两尺寸；`F7-text-mixed-780x580.png`、`F7-text-mixed-1040x740.png` 对应 F7 混排两尺寸。测试改动理由：`app-flow.test.mjs` 仅按 F6 删除已移除的重置处理断言并把入口存在改为入口/页脚不存在，复制和测试弹幕断言保留；按 F7 新增六项覆盖精确两行、非 CJK 整词、宽度阈值、图片、纯中文和中文标点旧输出。`test-ui-obs-recovery.cjs` 将重置点击/确认/提示那一步及专属假数据分支替换为入口/页脚不存在和零重置调用，其他恢复断言保留。`test-ui-lake-round3.cjs` 按 F7 将旧按字数的预期改为宽度预期，增加数字/混合词/其他文字、精确断行与字号检查，并新增 F6 末尾几何与五图；原空格、动画、阅读和倒影断言保留。最终 Node 200/200、Rust 全工作区 545 通过/10 忽略、规定 17 套浏览器及 round3 18 组/62 图通过，fmt、严格离线 Clippy 与 git diff --check 通过；完整回执在 `target/lake-round3/followup/f6-f7/` 的 `node.log`、`rust-gates.json`、`rust.log`、`browser-run.json`、`results.json`、`final-verification.json`。62 张最终图、根目录五张副本的摘要一致，原 followup 根目录 57 张图保留且摘要未变；12 个截图测试资源与最终源码一致，`frontendDist` 的 26 项摘要在 `final-frontend-assets.json`。相对本次 62 文件保护基线，仅改四个生产文件（app.js、i18n-en.mjs、lake-redesign-obs.css、lake-redesign-settings.css）、上述三个测试文件及五份文档（本文件、UI-IPC、BROADCAST、UI-DESIGN、LAKE-AUDIT），详见 `own-changes.json`；14 个既有改动 Rust 文件及 Cargo 文件摘要未变，app.js 保持 CRLF、裸 LF/CR 均为 0。静态 CRT 构建成功：`target/release/danmakuvoice.exe` 为 19,765,248 字节，SHA-256 `2b61092d3554fb434aca383f57e49f94ce32eb8080966c105ccb9f9e286e1693`；独立 release 目录未替换。首次 focused 的旧入口断言失败日志、标点补齐前的完整通过证据和中间构建均保留，最终结论以标点修正后的复跑为准。未 stash/reset/checkout、提交或推送；这些是离线 UI 与本地构建证据，不扩展为原生 WebView2、真实账号、合成音频或真实 OBS 在线验收。
+
+**2026-10-18 审查补充 F8：已做。** 生产修改仅为 `lake-redesign-main.css` 的 `.lake-word` 一行：保持 inline-block，改为 `white-space:normal` 并增加 `max-width:100%`，整词放得下时保持整体，超出正文框时才在内部按原字素换行；JavaScript、分词/字号算法、节点顺序、逐字延迟和阅读逻辑均未改。`docs/UI-IPC.md` 的 `overlay.token.reset` 备注已改为英文，明确界面入口已移除、后端命令保留。先以未修复 CSS 测完两尺寸八例，20 位数字适宽且不拆，另六例真实溢出；例如 40 位数字在 780/1040 宽时原右界为 782.375/1042.75px，超过正文框 535.5/714px，失败日志、截图、几何 JSON 和 focused runner 均保留于 `target/lake-round3/followup/f8/before-fix/`。修复后两尺寸的 20/30/40 位数字与 31 个 h 分别为 [20]、[26,4]、[26,14]、[22,9]；40 位最右字素为 533.21875/710.6875px，全部字素及可见行都在框内。原普通英文、混排、数字及纯中文断行断言继续通过；正文与倒影逐字几何差值不超过原有 0.25px，640ms 动画帧和 25%/75% 阅读进度通过。新增两图 `target/lake-round3/followup/F8-text-digits40-780x580.png`、`F8-text-digits40-1040x740.png` 分别对应两尺寸的 40 位数字换行。唯一测试文件改动是 `scripts/test-ui-lake-round3.cjs`：按 F8 新增八例实际字素盒/逐行左右边界、适宽词完整性、倒影、动画和阅读检查，并给原 F1/F7 适宽词增加真实宽度断言；不靠块边界或裁切判断通过，原断言未删除或放宽，单元测试无需改动。最终 Node 200/200、Rust 全工作区 545 通过/10 忽略、规定 17 套浏览器回归和 round3 19 组/64 图通过，fmt、严格离线 Clippy、git diff --check 通过。最终回执、八例几何、每套退出码与资源摘要见 `target/lake-round3/followup/f8/` 的 `results.json`、`f8-measurements.json`、`browser-run.json`、`final-frontend-assets.json`、`final-verification.json` 及各日志；64 张最终图和根目录两张副本摘要匹配，旧 followup 根目录 62 张图摘要未变，12 个截图测试资源与最终源码一致，26 项 frontendDist 资源均记录摘要。相对 62 文件保护基线，只改上述 CSS、验收脚本、UI-IPC 及本文件和 LAKE-AUDIT 共五文件，详见 `own-changes.json`；app.js、14 个既有改动 Rust 文件和 3 个 Cargo 文件摘要未变，CSS 保持 235 个 CRLF、裸 LF/CR 为 0。静态 CRT 构建成功：`target/release/danmakuvoice.exe` 为 19,765,248 字节，SHA-256 `0ae3259d211ce6680818a0480b419ce02497bd0f8ec9ae4d260c8c71d6ad54d6`；独立 release 目录未替换。未 stash/reset/checkout、提交或推送；上述为离线 UI 与本地构建证据，不表示原生 WebView2、真实账号、合成音频或真实 OBS 在线验收。

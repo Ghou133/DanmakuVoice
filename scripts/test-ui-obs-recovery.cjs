@@ -17,7 +17,7 @@ const state = {
   account: { user_id: 42, name: '虚构主播' }, qr: { status: 'idle' }, status: {},
   broadcast: { room: null, areas: [], busy: false, has_stream_key: false },
   obs: { settings: { host: '127.0.0.1', port: 4455, enabled: false, auto_launch: true }, has_password: false, local: true, status: { state: 'idle' } },
-  overlay: { settings: { enabled: true, port: 47823, token: 'fictional-overlay-token', title: '虚构标题', layout: 'list', corner: 'tl', scale: 1, linger_seconds: 30, max_items: 5, show_gift: true, show_super_chat: true, show_guard: true, spotlight: true, opacity: 1 }, running: true, clients: [], url: 'http://127.0.0.1:47823/overlay?token=fictional-overlay-token' },
+  overlay: { settings: { enabled: true, port: 47823, token: 'fictional-overlay-token', title: '虚构标题', tagline: '', style: 'spine', corner: 'top_left', offset_x: 0, offset_y: 0, scale: 1, vignette: .6, linger_seconds: 14, show_danmaku: true, show_gift: true, show_super_chat: true, show_guard: true, names: 'special', merge_duplicates: true }, running: true, clients: [], url: 'http://127.0.0.1:47823/overlay?token=fictional-overlay-token' },
 };
 const calls = [], errors = [], checks = [];
 let probeError = false, sourceMode = 'ready', holdProbe = false, held;
@@ -33,7 +33,7 @@ const until = async predicate => {
       const file = path.resolve(root, '.' + (pathname === '/' ? '/index.html' : decodeURIComponent(pathname)));
       if (!file.startsWith(root + path.sep)) return response.writeHead(403).end();
       let bytes = await fs.readFile(file).catch(() => fs.readFile(path.join(root, 'fonts', path.basename(file))));
-      if (pathname === '/app.js') bytes = bytes.toString() + '\nwindow.__obsFixture = { accept: acceptSnapshot, update: updateObsSettings, refresh: () => { obsRefreshAt = 0; return refreshObsStatus(); } };';
+      if (pathname === '/app.js') bytes = bytes.toString() + '\nwindow.__obsFixture = { accept: acceptSnapshot, inspect: () => structuredClone(snapshot), browserCount: overlayObsClientCount, update: updateObsSettings, refresh: () => { obsRefreshAt = 0; return refreshObsStatus(); } };';
       response.writeHead(200, { 'Content-Type': ({ '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.woff2': 'font/woff2' })[path.extname(file)] || 'application/octet-stream' }).end(bytes);
     } catch { response.writeHead(404).end(); }
   });
@@ -45,6 +45,7 @@ const until = async predicate => {
     const context = await browser.newContext({ viewport: { width: 1040, height: 740 }, reducedMotion: 'reduce' });
     await context.route('**/*', route => route.request().url().startsWith(origin + '/') ? route.continue() : route.abort());
     const page = await context.newPage();
+    page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
     await page.exposeFunction('__offlineInvoke', async (command, args) => {
       if (command === 'ui_activity') return true;
@@ -60,16 +61,15 @@ const until = async predicate => {
         if (probeError) throw new Error(next.obs.status.message);
         return next;
       } else if (args.action === 'obs.overlay.sync') {
-        state.obs.status.overlay_sync = { state: sourceMode, ...(sourceMode === 'error' ? { message: '同名来源并非弹幕姬的浏览器来源 [DV-OB12]' } : {}) };
+        state.obs.status.overlay_sync = { state: sourceMode, scene: '虚构场景', width: 1920, height: 1080, ...(sourceMode === 'error' ? { message: '同名来源并非弹幕姬的浏览器来源 [DV-OB12]' } : {}) };
         result = { found: sourceMode !== 'missing', created: false, added_to_scene: false, width: 1920, height: 1080, scene: '虚构场景' };
       } else if (args.action === 'obs.save') {
         Object.assign(state.obs.settings, args.payload.settings); state.config_revision++;
         state.obs.status = { state: 'idle' }; state.obs.status.overlay_sync = { state: 'idle' };
-      } else if (args.action === 'overlay.token.reset') {
-        state.overlay.settings.token = 'second-fictional-token'; state.config_revision++;
-        state.overlay.url = 'http://127.0.0.1:47823/overlay?token=second-fictional-token'; state.obs.status.overlay_sync = { state: 'idle' };
       } else if (args.action === 'preferences.save') {
         Object.assign(state.preferences, args.payload.preferences); state.config_revision++;
+      } else if (args.action === 'bili.chat.emoticons.refresh') {
+        state.chat_send = { busy: false, error: null, account_id: state.account.user_id, room_id: 123, message_limit: 20, emoticons: [] };
       } else if (!['bili.qr.cancel', 'doubao.qr.cancel'].includes(args.action)) throw new Error('Unexpected fixture action ' + args.action);
       return { ...structuredClone(state), ...(result ? { result } : {}) };
     });
@@ -84,11 +84,14 @@ const until = async predicate => {
     assert.equal(count('obs.refresh'), 0); checks.push('no OBS polling while main page is shown');
     holdProbe = true;
     await page.locator('[data-action="settings.open"]').click();
-    await page.locator('[data-action="settings.tab"][data-id="live"]').click();
+    if (!await page.locator('[data-action="settings.tab"][data-id="overlay"]').count()) await page.locator('[data-action="settings.tab"][data-id="home"]').click();
+    await page.locator('[data-action="settings.tab"][data-id="overlay"]').click();
     await until(() => held);
-    assert.match(await page.locator('[data-obs-status-text]').textContent(), /正在检测/);
+    // The overlay was added before, so the page opens on the stage while it looks for OBS.
+    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /正在检测/);
     held(); held = null;
-    await page.locator('[data-obs-status-text]').filter({ hasText: '已连接 OBS 31.0.0' }).waitFor();
+    await page.locator('[data-obs-view="preview"]').waitFor();
+    assert.equal(await page.evaluate(() => window.__obsFixture.inspect().obs.status.obs_version), '31.0.0');
     await until(() => count('obs.overlay.sync') === 1);
     assert.equal(count('obs.test'), 0); assert.equal(count('obs.overlay.add'), 0); assert.equal(count('obs.save'), 0);
     assert.equal(calls.find(call => call.action === 'obs.overlay.sync').payload.automatic, true);
@@ -97,68 +100,88 @@ const until = async predicate => {
     await page.evaluate(() => { window.__obsFixture.update(); window.__obsFixture.update(); });
     assert.equal(count('obs.refresh'), firstReads);
     checks.push('repeated snapshots do not bypass the 15 second observation limit');
-    await page.locator('[data-action="live.panel"][data-id="overlay"]').click();
-    await page.locator('[data-overlay-status-text]').filter({ hasText: '确认场景和来源可见' }).waitFor();
-    assert.match(await page.locator('[data-obs-status-text]').textContent(), /已连接/);
-    checks.push('connected WebSocket with no browser client explains source visibility separately');
-    const password = page.locator('form[data-form="obs-password"] input[name="password"]');
+    await page.locator('[data-overlay-status-text]').filter({ hasText: '已放进场景「虚构场景」' }).waitFor();
+    assert.equal(await page.locator('[data-obs-root]').getAttribute('data-tone'), 'ready');
+    assert.doesNotMatch(await page.locator('[data-overlay-status-text]').textContent(), /正在显示/);
+    assert.equal(await page.evaluate(() => window.__obsFixture.inspect().overlay.clients.length), 0);
+    checks.push('connected WebSocket and repaired source do not claim a browser page is displaying');
+    await page.locator('[data-action="lake.obs.advanced"]').click();
+    const password = page.locator('[data-obs-secret]');
     await password.fill('fictional-unsaved-password');
     await password.evaluate(input => { input.focus(); input.setSelectionRange(2, 7); window.__passwordNode = input; });
     const oldSaves = count('obs.save');
     await refresh();
     assert.equal(await password.inputValue(), 'fictional-unsaved-password');
-    assert.equal(await page.evaluate(() => window.__passwordNode === document.querySelector('form[data-form="obs-password"] input') && document.activeElement === window.__passwordNode && window.__passwordNode.selectionStart === 2 && window.__passwordNode.selectionEnd === 7), true);
+    assert.equal(await page.evaluate(() => window.__passwordNode === document.querySelector('[data-obs-secret]') && document.activeElement === window.__passwordNode && window.__passwordNode.selectionStart === 2 && window.__passwordNode.selectionEnd === 7), true);
     assert.equal(count('obs.save'), oldSaves); checks.push('automatic observations retain form node, password draft, focus and selection without saving');
+    assert.equal(count('obs.password'), 0);
     probeError = true;
     await refresh();
-    await page.locator('[data-obs-status-detail]').filter({ hasText: 'DV-OB01' }).waitFor();
+    await page.locator('[data-obs-status-text]').filter({ hasText: 'OBS 没打开' }).waitFor();
+    assert.match(await page.locator('[data-obs-status-text]').getAttribute('title'), /DV-OB01/);
     assert.equal(await page.locator('#settings-error').isHidden(), true);
     assert.equal(await password.inputValue(), 'fictional-unsaved-password');
     checks.push('automatic failure shows the actual reason without modal, toast or draft loss');
+    // Discard this deliberately unsaved fixture draft before changing pages.
+    await password.evaluate(input => { input.value = ''; delete input.dataset.changed; });
     probeError = false; sourceMode = 'error'; state.obs.status.overlay_sync = { state: 'idle' }; await push(); await refresh();
-    await page.locator('[data-overlay-status-text]').filter({ hasText: 'DV-OB12' }).waitFor();
-    assert.match(await page.locator('[data-obs-status-text]').textContent(), /已连接/);
+    await page.locator('.lake-settings-heading [data-action="lake.obs.back"]').click();
+    await page.locator('[data-obs-view="preview"]').waitFor();
+    await page.locator('[data-overlay-binding-detail]').filter({ hasText: 'DV-OB12' }).waitFor();
+    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /已连接 OBS/);
+    assert.equal(await page.locator('[data-obs-root]').getAttribute('data-tone'), 'ready');
     assert.equal(count('obs.overlay.add'), 0); checks.push('conflicting source error stays separate from successful WebSocket connection and never creates a source');
     sourceMode = 'missing'; state.obs.status.overlay_sync = { state: 'idle' }; await push(); await refresh();
-    await page.locator('[data-overlay-status-text]').filter({ hasText: '还没有叠加层来源' }).waitFor();
+    await page.locator('[data-overlay-binding-detail]').filter({ hasText: '叠加层还没放进场景' }).waitFor();
+    assert.equal(await page.locator('[data-action="overlay.obs_add"]').isVisible(), true);
     checks.push('missing source gives the explicit Add to OBS action');
     state.overlay.clients = [{ width: 1920, height: 1080 }]; state.obs.status = { state: 'error', message: '无法连接 OBS [DV-OB01]' }; await push();
-    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /OBS 已连接/);
-    assert.match(await page.locator('[data-obs-status-text]').textContent(), /没能连上/);
-    checks.push('browser rendering and WebSocket reachability remain independent');
+    // A configured OBS that stops answering keeps the stage and says it is not open.
+    await page.locator('[data-obs-view="offline"]').waitFor();
+    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /OBS 还没打开/);
+    assert.equal(await page.locator('.lake-obs-binding [data-action="lake.obs.launch"]').isVisible(), true);
+    assert.equal(await page.evaluate(() => window.__obsFixture.inspect().overlay.clients.length), 1);
+    checks.push('a browser rendering connection cannot mask a failed WebSocket connection');
     state.overlay.obs_clients = 0;
-    state.obs.status = { state: 'ok', overlay_sync: { state: 'ready', page_connected: false } };
+    state.obs.status = { state: 'ok', overlay_sync: { state: 'ready', scene: '虚构场景', page_connected: false } };
     await push();
-    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /等待画面连接/);
-    assert.equal((await page.locator('[data-live-state="overlay"]').textContent()).includes('OBS 正在显示'), false);
+    await page.locator('[data-obs-view="preview"]').waitFor();
+    assert.equal(await page.evaluate(() => window.__obsFixture.browserCount()), 0);
+    assert.doesNotMatch(await page.locator('[data-overlay-status-text]').textContent(), /正在显示/);
+    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /已放进场景/);
     checks.push('a preview browser alone never claims the OBS page is displaying');
     state.overlay.obs_clients = 1;
     state.obs.status.overlay_sync.page_connected = true;
     await push();
-    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /OBS 已连接/);
-    checks.push('the actual OBS page connection marks the overlay ready');
+    assert.equal(await page.evaluate(() => window.__obsFixture.browserCount()), 1);
+    assert.equal(await page.evaluate(() => window.__obsFixture.inspect().obs.status.overlay_sync.page_connected), true);
+    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /已放进场景/);
+    checks.push('the actual OBS page connection is retained separately from source placement');
     delete state.overlay.obs_clients;
     await page.evaluate(() => { window.dispatchEvent(new Event('blur')); window.__offlineListeners['resource-mode']({ payload: false }); });
     const readsBefore = count('obs.refresh'); await refresh(); assert.equal(count('obs.refresh'), readsBefore);
     await page.evaluate(() => { window.dispatchEvent(new Event('focus')); window.__offlineListeners['resource-mode']({ payload: true }); });
     await refresh(); assert.ok(count('obs.refresh') > readsBefore);
     checks.push('OBS checks stop while inactive and recover on focus');
+    await page.locator('[data-action="lake.obs.advanced"]').click();
     state.overlay.clients = []; sourceMode = 'ready'; state.obs.status = { state: 'idle' }; state.obs.status.overlay_sync = { state: 'idle' }; await push();
-    await page.locator('[data-action="overlay.token.reset"]').click();
-    await page.locator('#confirmation button[value="confirm"]').click();
-    await until(() => count('overlay.token.reset') === 1);
-    await page.locator('#toast').filter({ hasText: '已同步更新' }).waitFor();
-    assert.equal(count('obs.overlay.add'), 0); checks.push('regenerating an address repairs the existing source even without a previous manual connection test');
+    await page.locator('[data-obs-view="advanced"]').waitFor();
+    assert.equal(await page.locator('[data-action="overlay.token.reset"]').count(), 0);
+    assert.equal(await page.locator('.lake-obs-advanced-foot').count(), 0);
+    assert.equal(count('overlay.token.reset'), 0);
+    assert.equal(count('obs.overlay.add'), 0); checks.push('OBS advanced has no credential regeneration action or empty footer and never resets credentials');
     holdProbe = true;
     await page.evaluate(() => { void window.__obsFixture.refresh(); });
     await until(() => held);
     state.obs.settings.port = 4456; state.config_revision++; state.obs.status = { state: 'idle' };
     await push(); held(); held = null;
-    await page.locator('[data-obs-status-text]').filter({ hasText: 'new-config' }).waitFor();
+    await page.waitForFunction(() => document.querySelector('[data-obs-status-text]')?.textContent.includes('new-config'));
     assert.match(await page.locator('[data-obs-status-detail]').textContent(), /4456/);
     checks.push('a delayed old-configuration probe cannot replace the new connection status');
     state.preferences.language = 'en'; await push();
-    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /source address is in sync/);
+    await page.locator('.lake-settings-heading [data-action="lake.obs.back"]').click();
+    await page.locator('[data-obs-view="preview"]').waitFor();
+    assert.match(await page.locator('[data-overlay-status-text]').textContent(), /Added to scene/);
     checks.push('new connection/source guidance is translated');
     await page.screenshot({ path: path.join(output, 'obs-recovery-en.png') });
     await page.locator('[data-action="settings.close"]').click();

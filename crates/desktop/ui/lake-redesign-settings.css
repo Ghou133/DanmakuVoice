@@ -1,0 +1,273 @@
+/* Settings stay on the lake. The native title bar remains available above the veil. */
+.lake-settings-scrim{position:fixed;inset:40px 0 0;z-index:60;border:0;border-radius:0;background:rgba(4,4,10,.35);padding:0;cursor:default}
+body.lake-settings-open #titlebar{z-index:65}
+#settings.lake-settings{--lk-ink:#f5f2f8;--lk-muted:rgba(245,242,248,.66);--lk-dim:rgba(245,242,248,.42);--lk-line:rgba(255,255,255,.1);--lk-line2:rgba(255,255,255,.16);--lk-fill:rgba(255,255,255,.06);--lk-pink:#f2a7c3;--lk-lilac:#c8b6f0;--lk-gold:#ebcb93;--lk-glass:rgba(20,19,34,.82);--lv-text:var(--lk-ink);--lv-muted:var(--lk-muted);--lv-dim:var(--lk-dim);--lv-line:var(--lk-line);--lv-line2:var(--lk-line2);--lv-glass:transparent;--lv-glass2:var(--lk-fill);--lv-pop:#201d31;--text:var(--lk-ink);--text-muted:var(--lk-muted);--border:var(--lk-line);--surface:var(--lk-glass);--surface-soft:var(--lk-fill);position:fixed;inset:48px 12px 12px auto;z-index:64;width:min(380px,calc(100vw - 24px));height:calc(100dvh - 60px);max-width:none;max-height:none;margin:0;padding:20px 24px 18px;border:1px solid rgba(255,255,255,.12);border-radius:22px;background:var(--lk-glass);color:var(--lk-ink);box-shadow:0 30px 80px -30px rgba(0,0,0,.9);backdrop-filter:blur(24px) brightness(.7);overflow:hidden;transition:width .28s ease}
+:root[data-theme=light] #settings.lake-settings{--lk-ink:#2a2340;--lk-muted:rgba(42,35,64,.72);--lk-dim:rgba(42,35,64,.52);--lk-line:rgba(42,35,64,.12);--lk-line2:rgba(42,35,64,.2);--lk-fill:rgba(42,35,64,.045);--lk-pink:#b84a7a;--lk-lilac:#6a58b0;--lk-gold:#8a5f1c;--lk-glass:rgba(240,236,248,.86);--lv-pop:#f4eff9;border-color:rgba(255,255,255,.55);box-shadow:0 30px 80px -30px rgba(38,24,61,.35);backdrop-filter:blur(24px) brightness(1.04)}
+#settings.lake-settings-wide{width:min(908px,calc(100vw - 24px))}
+#settings.lake-settings[open]{animation:lake-settings-enter .3s cubic-bezier(.2,.8,.2,1)}
+#settings.lake-settings::backdrop{background:transparent}
+#settings.lake-settings .settings-shell{height:100%;display:flex;flex-direction:column;overflow:hidden;background:transparent}
+#settings.lake-settings .lake-settings-heading{display:flex;align-items:center;gap:6px;height:40px;min-height:40px;margin-bottom:12px}
+#settings.lake-settings .lake-settings-heading h2{display:flex;align-items:baseline;gap:12px;margin:0;min-width:0;flex:1;font-family:var(--serif);font-size:22px;font-weight:900;letter-spacing:.08em;line-height:1.3}
+#settings.lake-settings .lake-settings-heading h2 i{font:italic 16px var(--numeral);letter-spacing:0;color:var(--lk-dim)}
+#settings.lake-settings .lake-settings-heading>.icon-button:first-child:not(:last-child){margin-left:-8px}
+#settings.lake-settings .icon-button{width:28px;height:28px;min-height:28px;padding:6px;color:var(--lk-muted);background:transparent;border:0;border-radius:50%;flex-shrink:0}
+#settings.lake-settings .icon-button:hover{background:var(--lk-fill);color:var(--lk-ink)}
+#settings.lake-settings .icon-button svg{width:15px;height:15px}
+/* The scroller reaches into the drawer's right padding so its hairline never narrows the page. */
+#settings.lake-settings .settings-content{min-width:0;min-height:0;flex:1;display:flex;flex-direction:column;margin-right:-16px;padding:0 12px 0 0;overflow:auto;scrollbar-gutter:stable;container-type:normal}
+#settings.lake-settings .settings-content:focus{outline:none}
+#settings.lake-settings .settings-content>*{max-width:none!important;margin-inline:0!important;width:100%;box-sizing:border-box}
+#settings.lake-settings .settings-status{margin:0 0 10px;padding:10px;border:1px solid var(--lk-gold);color:var(--lk-gold);background:transparent;font-size:12px}
+#settings.lake-settings .lake-settings-page{display:flex;flex:1;flex-direction:column;min-height:100%;gap:0}
+#settings.lake-settings .lake-settings-footer{margin-top:auto;padding-top:22px;flex-shrink:0}
+#settings.lake-settings .lake-note{font-size:12px;line-height:1.7;color:var(--lk-dim)}
+#settings.lake-settings .lake-gold{color:var(--lk-gold)}
+#settings.lake-settings .button{font-size:13px;font-weight:400;border:1px solid var(--lk-line2);background:transparent;color:var(--lk-ink);padding:8px 15px;min-height:34px;border-radius:999px;box-shadow:none}
+#settings.lake-settings .button.primary{background:var(--lk-ink);color:#16131d;border-color:transparent}
+:root[data-theme=light] #settings.lake-settings .button.primary{color:#f5f2f8}
+#settings.lake-settings .button.quiet{border-color:transparent;background:transparent;padding-inline:0;color:var(--lk-muted)}
+#settings.lake-settings .button:hover{background:var(--lk-fill)}
+#settings.lake-settings .button.primary:hover{background:var(--lk-ink);opacity:.88}
+#settings.lake-settings .lake-gold-outline{border-color:var(--lk-gold);color:var(--lk-gold)}
+#settings.lake-settings .field{margin:0 0 18px;gap:6px}
+#settings.lake-settings .field label,#settings.lake-settings .field>span{color:var(--lk-dim);font-size:12px}
+#settings.lake-settings input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=hidden]),#settings.lake-settings textarea,#settings.lake-settings .field input,#settings.lake-settings .field textarea{border:0;border-bottom:1px solid var(--lk-line2);border-radius:0;background:transparent;box-shadow:none;color:var(--lk-ink);padding:8px 0;font-size:14px}
+#settings.lake-settings input::placeholder{color:var(--lk-dim)}
+#settings.lake-settings input:focus,#settings.lake-settings textarea:focus{outline:0;border-bottom-color:var(--lk-lilac)}
+#settings.lake-settings .select-trigger{border:0;border-bottom:1px solid var(--lk-line2);border-radius:0;background:transparent;color:var(--lk-ink);box-shadow:none}
+#settings.lake-settings .select-menu{background:var(--lv-pop);color:var(--lk-ink)}
+#settings.lake-settings .s-card,#settings.lake-settings .s-hero,#settings.lake-settings .editor{background:transparent;border:0;border-radius:0;box-shadow:none;padding:0}
+#settings.lake-settings .s-row{padding:13px 0;min-height:48px;gap:10px;border-color:var(--lk-line)}
+#settings.lake-settings .s-row .s-text{font-size:13px;color:var(--lk-ink)}
+#settings.lake-settings .s-switch{width:34px;height:20px;min-width:34px;background:var(--lk-line2);border:0;border-radius:10px;flex:0 0 34px}
+#settings.lake-settings .s-switch:checked{background:var(--lk-lilac)}
+#settings.lake-settings .s-switch:before,#settings.lake-settings .s-switch:after{width:14px;height:14px;top:3px;left:3px;background:#fff}
+#settings.lake-settings .s-switch:checked:before,#settings.lake-settings .s-switch:checked:after{transform:translateX(14px)}
+#settings.lake-settings .autosave-status{font-size:11px;color:var(--lk-dim);padding:6px 0}
+#settings.lake-settings .s-page .settings-page-title{background:none;color:var(--lk-ink);font-size:20px;letter-spacing:.06em}
+/* Home: the four rows share the drawer's height; 通用 · 高级 and the version rest on its floor.
+   Pointing at a row lights its waterline and the graphic instead of laying a fill over it. */
+.lake-home .lake-home-primary{display:flex;flex-direction:column;flex:1 0 auto}
+.lake-home-row{position:relative;display:grid;grid-template-columns:40px minmax(0,1fr) 15px;align-items:center;gap:16px;width:100%;flex:1 0 76px;min-height:76px;max-height:116px;border:0;border-radius:0;background:transparent;box-shadow:inset 0 -1px var(--lk-line);text-align:left;padding:8px 0;color:var(--lk-ink);cursor:pointer;outline:0}
+.lake-home-row::after,.lake-home-minor::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:linear-gradient(90deg,var(--lk-lilac),var(--lk-pink) 42%,transparent 92%);transform:scaleX(0);transform-origin:left;opacity:.8;transition:transform .5s cubic-bezier(.2,.8,.2,1)}
+.lake-home-row:is(:hover,:focus-visible)::after,.lake-home-minor:is(:hover,:focus-visible)::after{transform:scaleX(1)}
+.lake-home-text{min-width:0}
+.lake-home-row strong{display:block;font-size:14.5px;font-weight:400;transition:letter-spacing .4s ease}
+.lake-home-row small{display:block;margin-top:5px;font-size:12px;color:var(--lk-dim);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;transition:color .3s ease}
+.lake-home-row:is(:hover,:focus-visible) small{color:var(--lk-muted)}
+.lake-home-row>svg{width:14px;color:var(--lk-dim);transition:transform .3s cubic-bezier(.2,.8,.2,1),color .3s ease}
+.lake-home-row:is(:hover,:focus-visible)>svg{transform:translateX(3px);color:var(--lk-lilac)}
+.lake-home-graphic{width:40px;display:grid;place-items:center;color:var(--lk-muted);transition:color .3s ease,filter .4s ease}
+.lake-home-row:is(:hover,:focus-visible) .lake-home-graphic{color:var(--lk-ink);filter:drop-shadow(0 0 7px rgba(200,182,240,.5))}
+.lake-home-graphic .s-avatar{width:40px;height:40px;transition:box-shadow .4s ease}
+.lake-home-row:is(:hover,:focus-visible) .lake-home-graphic .s-avatar{box-shadow:0 0 0 1px rgba(200,182,240,.55)}
+.lake-home-count{font:italic 30px var(--numeral)}
+.lake-mini-wave{width:35px;height:22px;fill:none;stroke:currentColor;stroke-width:1.4}
+/* A line drawing of the overlay: frame, spine and three lines; the spine lights once OBS is connected. */
+.lake-overlay-mini{position:relative;box-sizing:border-box;width:36px;height:26px;border-radius:5px;box-shadow:inset 0 0 0 1px var(--lk-line2);padding:8px 6px 0 13px}
+.lake-overlay-mini i{position:absolute;left:8px;top:6px;bottom:6px;width:1px;background:var(--lk-dim)}
+.lake-overlay-mini b{display:block;height:1px;background:currentColor;opacity:.7;margin-bottom:4px}
+.lake-overlay-mini b:nth-of-type(2){width:70%}
+.lake-overlay-mini.on i{background:var(--lk-lilac);box-shadow:0 0 6px var(--lk-lilac)}
+.lake-home-foot{margin-top:auto;padding-top:18px;display:flex;flex-direction:column}
+.lake-home-secondary{display:flex;flex-direction:column}
+.lake-home-minor{position:relative;display:flex;align-items:center;gap:10px;width:100%;min-height:46px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:inset 0 -1px var(--lk-line);color:var(--lk-muted);font-size:13px;text-align:left;cursor:pointer;outline:0;transition:color .3s ease}
+.lake-home-minor>span{flex:1}
+.lake-home-minor>svg{width:13px;color:var(--lk-lilac);opacity:0;transform:translateX(-4px);transition:opacity .3s ease,transform .3s cubic-bezier(.2,.8,.2,1)}
+.lake-home-minor:is(:hover,:focus-visible){color:var(--lk-ink)}
+.lake-home-minor:is(:hover,:focus-visible)>svg{opacity:1;transform:none}
+.lake-home-foot .lake-settings-footer{margin-top:0;padding-top:4px}
+.lake-settings-warning{display:flex;justify-content:space-between;align-items:center;width:100%;gap:10px;border:0;border-bottom:1px solid var(--lk-line);background:transparent;padding:10px 0 20px;font-size:12px;color:var(--lk-gold)}
+.lake-settings-warning svg{width:14px}
+/* Version line = update check. The hint slides in under the pointer; results stay. */
+.lake-version{display:flex;align-items:center;gap:12px;width:100%;min-height:40px;padding:8px 0 0;border:0;border-radius:0;background:transparent;color:var(--lk-dim);font-size:11px;text-align:left;cursor:pointer;outline:0}
+.lake-version:disabled{cursor:default}
+.lake-version img{opacity:.75;flex:none;border-radius:7px}
+.lake-version-name{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px;white-space:nowrap}
+.lake-version-name i{font:italic 15px var(--numeral);transition:color .3s ease}
+.lake-version-hint{position:relative;font-size:11.5px;color:var(--lk-muted);white-space:nowrap;opacity:0;transform:translateX(6px);transition:opacity .3s ease,transform .35s cubic-bezier(.2,.8,.2,1),color .3s ease}
+.lake-version:is(:hover,:focus-visible):not(:disabled) .lake-version-hint,.lake-version:not([data-state=idle],[data-state=store]) .lake-version-hint{opacity:1;transform:none}
+.lake-version[data-state=store]{cursor:default}
+.lake-version:is(:hover,:focus-visible):not(:disabled) .lake-version-name i{color:var(--lk-ink)}
+.lake-version[data-state=checking] .lake-version-hint{padding-left:16px}
+.lake-version[data-state=checking] .lake-version-hint::before{content:"";position:absolute;left:2px;top:50%;width:7px;height:7px;margin-top:-4.5px;border-radius:50%;border:1px solid var(--lk-lilac);animation:lake-version-ripple 1.4s ease-out infinite}
+.lake-version[data-state=available]{color:var(--lk-muted)}
+.lake-version[data-state=available] .lake-version-hint{color:var(--lk-lilac);padding-left:13px}
+.lake-version[data-state=available] .lake-version-hint::before{content:"";position:absolute;left:0;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:var(--lk-lilac);box-shadow:0 0 8px var(--lk-lilac)}
+.lake-version[data-state=error] .lake-version-hint{color:var(--lk-gold)}
+@keyframes lake-version-ripple{0%{transform:scale(.6);opacity:1}100%{transform:scale(1.8);opacity:0}}
+.lake-room-account{padding:24px 0 34px;display:grid;grid-template-columns:64px minmax(0,1fr);gap:14px;align-items:center}
+.lake-room-account .s-avatar{width:64px;height:64px}
+.lake-room-account .s-account-text{display:flex;flex-direction:column;gap:5px}
+.lake-room-account .s-account-text strong{font:600 19px var(--serif)}
+.lake-room-account .s-account-text span,.lake-room-account .s-account-text small{font-size:12px;color:var(--lk-dim)}
+.lake-room-account .s-hero-actions{grid-column:2}
+.lake-room-number{padding:25px 0;border-top:1px solid var(--lk-line)}
+.lake-room-number>span{font-size:12px;color:var(--lk-dim)}
+.lake-room-number>div{display:flex;align-items:center;justify-content:space-between;margin:10px 0}
+.lake-room-number strong{font:italic 42px var(--numeral)}
+.lake-room-number small{font-size:12px;color:var(--lk-dim)}
+.lake-room-qr{display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;padding:20px 0}
+.lake-room-qr .qr-card{width:190px;height:190px;box-sizing:border-box;background:#fff;box-shadow:none}
+.lake-readings-search{display:flex;gap:10px;align-items:center;min-height:40px;border-bottom:1px solid var(--lk-line2)}
+.lake-readings-search>svg{width:15px;flex-shrink:0;color:var(--lk-dim)}
+#settings.lake-settings .lake-readings-search input{border:0;flex:1;min-width:0;font-size:12.5px}
+.lake-reading-group{margin-top:18px}
+.lake-reading-group h3{display:flex;gap:8px;align-items:baseline;margin:0 0 5px;font-size:11px;font-weight:400;letter-spacing:.2em;color:var(--lk-dim)}
+.lake-reading-group h3 i{font:italic 14px var(--numeral);letter-spacing:0}
+.lake-reading-row{display:flex;align-items:center;min-height:44px;border-top:1px solid var(--lk-line)}
+.lake-reading-row[hidden]{display:none}
+.lake-reading-row>button:first-child{display:grid;grid-template-columns:16px minmax(60px,1fr) 14px minmax(65px,1.2fr);gap:8px;align-items:center;flex:1;min-width:0;padding:10px 0;border:0;background:transparent;color:var(--lk-ink);text-align:left}
+.lake-reading-mark{width:16px;display:grid;place-items:center}
+.lake-reading-mark img{width:16px;height:16px;object-fit:contain}
+.lake-reading-dot{width:8px;height:8px;background:var(--lk-pink);border-radius:50%}
+.lake-reading-dot.color-1,.lake-reading-dot.color-3{background:#a8bff3}.lake-reading-dot.color-2,.lake-reading-dot.color-5{background:var(--lk-gold)}
+.lake-reading-from{font-size:12px;color:var(--lk-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lake-reading-arrow{color:var(--lk-dim);font-size:12px}
+.lake-reading-to{font:500 14px var(--serif);display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;min-width:0;overflow-wrap:anywhere}
+.lake-reading-to small{display:inline-flex;gap:3px;align-items:center;font:11px var(--sans);color:var(--lk-lilac);max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.lake-reading-to .lake-mini-wave{width:14px;height:12px;flex-shrink:0}
+.lake-reading-row>.icon-button{opacity:0}
+.lake-reading-row:hover>.icon-button,.lake-reading-row:focus-within>.icon-button{opacity:1}
+.lake-readings-empty{padding:55px 0 25px}
+.lake-readings-empty h3{font:500 23px var(--serif)}
+.lake-readings-empty p{font-size:12px;line-height:1.7;color:var(--lk-dim)}
+.lake-readings-empty>div{display:grid;grid-template-columns:1fr 25px 1fr;gap:18px 12px;margin:35px 0;opacity:.28;font-size:13px}
+.lake-readings-empty strong{font-family:var(--serif);font-weight:400}
+.lake-reading-editor h3{font:600 19px var(--serif);margin:12px 0 24px}
+.lake-accordion{border-bottom:1px solid var(--lk-line)}
+.lake-accordion-toggle{display:flex;align-items:center;gap:12px;width:100%;min-height:56px;background:transparent;border:0;padding:0;color:var(--lk-ink);text-align:left;font-size:13px}
+.lake-accordion-toggle small{font-size:11px;color:var(--lk-dim);max-width:130px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.lake-accordion-toggle svg{margin-left:auto;width:14px;flex-shrink:0;color:var(--lk-dim)}
+.lake-accordion-body{padding:0 0 12px}
+.lake-accordion-body[hidden]{display:none}
+.lake-amount{display:flex;gap:4px;align-items:center;font-size:10px;color:var(--lk-dim);white-space:nowrap}
+#settings.lake-settings .lake-amount input{width:40px;font:italic 20px var(--numeral);padding:2px 0;text-align:right}
+.lake-indented{padding-left:16px}
+.lake-template-row{border-bottom:1px solid var(--lk-line);padding:12px 0}
+.lake-template-row>label{display:block;font-size:11px;color:var(--lk-dim);margin-bottom:9px}
+.lake-template-edit{font-family:var(--serif);font-size:14px;line-height:2;min-height:40px;outline:none;overflow-wrap:anywhere;white-space:pre-wrap}
+.lake-template-edit:focus{border-bottom:1px solid var(--lk-lilac)}
+.lake-template-token{display:inline-block;font-family:var(--sans);font-size:11px;line-height:1.6;color:var(--lk-lilac);background:color-mix(in srgb,var(--lk-lilac) 12%,transparent);padding:1px 5px;margin:0 2px;border-radius:4px}
+.lake-template-tools{display:none;flex-wrap:wrap;gap:4px 9px;margin-top:12px;font-size:11px;color:var(--lk-dim)}
+.lake-template-row:focus-within .lake-template-tools{display:flex}
+.lake-template-tools button{font-size:11px;border:0;background:transparent;color:var(--lk-lilac);padding:0}
+.lake-template-tools button:last-child{margin-left:auto;color:var(--lk-dim)}
+.lake-merge{border-bottom:1px solid var(--lk-line)}
+.lake-reset-note{display:flex;align-items:center;gap:10px;font-size:11px;line-height:1.7;color:var(--lk-dim)}
+.lake-reset-note .button{flex-shrink:0;text-decoration:underline;text-underline-offset:4px}
+.lake-sound-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1.3fr) auto auto;align-items:center;gap:10px;padding:6px 0;min-width:0;border-bottom:1px solid var(--lk-line)}
+#settings.lake-settings .lake-sound-row input{width:100%;min-width:0;padding:6px 0;font-size:13px;border-bottom-color:transparent}
+#settings.lake-settings .lake-sound-row input:focus{border-bottom-color:var(--lk-lilac)}
+.lake-sound-row>span{font-size:12px;color:var(--lk-dim)}
+.lake-sound-row .select{min-width:0;flex:1}
+.lake-sound-row .select-trigger{font-size:13px;min-width:0;width:100%;padding:6px 0;border-bottom-color:transparent}
+.lake-sound-library{margin-top:18px;padding-top:10px;border-top:1px solid var(--lk-line)}
+.lake-sound-library>p{font-size:11px;color:var(--lk-dim)}
+.lake-sound-library>div{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--lk-muted)}
+.lake-language{display:flex;gap:12px;margin-left:auto;font-size:12px}
+.lake-language label{cursor:pointer;color:var(--lk-dim)}
+.lake-language input{position:absolute;opacity:0;pointer-events:none}
+.lake-language input:checked+span{color:var(--lk-ink);text-decoration:underline;text-underline-offset:5px;text-decoration-color:var(--lk-lilac)}
+.lake-language input:focus-visible+span{outline:2px solid var(--lk-lilac);outline-offset:4px}
+.lake-backups{border-top:1px solid var(--lk-line);margin-top:20px;padding-top:26px}
+.lake-backups h3{font-size:13px;font-weight:400;margin:0 0 10px}
+.lake-backups .actions{margin-top:18px;gap:12px;display:flex;flex-wrap:wrap}
+.lake-general-version .lake-version{font-size:12px}
+.lake-general-version .lake-version-name i{font-size:16px}
+@keyframes lake-settings-enter{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)}}
+/* Leaving mirrors entering; the veil fades with the drawer. */
+#settings.lake-settings.lake-leaving{animation:lake-settings-leave .22s cubic-bezier(.4,0,1,1) both;pointer-events:none}
+@keyframes lake-settings-leave{to{opacity:0;transform:translateX(24px)}}
+.lake-settings-scrim:not([hidden]){animation:lake-scrim-in .3s ease both}
+.lake-settings-scrim.lake-leaving{animation:lake-scrim-out .22s ease both;pointer-events:none}
+@keyframes lake-scrim-in{from{opacity:0}}
+@keyframes lake-scrim-out{to{opacity:0}}
+/* Pages push: deeper from the right, back from the left, a state change only fades. */
+#settings.lake-settings[data-nav] .tab-enter>*:not(.s-page),#settings.lake-settings[data-nav] .tab-enter>.s-page>*{animation:lake-page-fwd .34s cubic-bezier(.2,.8,.2,1) backwards}
+#settings.lake-settings[data-nav=back] .tab-enter>*:not(.s-page),#settings.lake-settings[data-nav=back] .tab-enter>.s-page>*{animation-name:lake-page-back}
+#settings.lake-settings[data-nav=swap] .tab-enter>*:not(.s-page),#settings.lake-settings[data-nav=swap] .tab-enter>.s-page>*{animation:lake-page-swap .42s ease backwards}
+#settings.lake-settings .lake-heading-enter h2{animation:lake-page-fwd .34s cubic-bezier(.2,.8,.2,1) backwards}
+#settings.lake-settings[data-nav=back] .lake-heading-enter h2{animation-name:lake-page-back}
+#settings.lake-settings[data-nav=swap] .lake-heading-enter h2{animation:none}
+@keyframes lake-page-fwd{from{opacity:0;transform:translateX(18px)}}
+@keyframes lake-page-back{from{opacity:0;transform:translateX(-18px)}}
+@keyframes lake-page-swap{from{opacity:0}}
+@media(prefers-reduced-motion:reduce){#settings.lake-settings{transition:none}#settings.lake-settings[open]{animation:none}}
+@media(max-height:600px){#settings.lake-settings{padding-top:12px}.lake-home-row{min-height:64px;flex-basis:64px}.lake-room-account{padding-top:10px}}
+
+/* ===== Lake controls (2026-10-18) =====
+   One set of controls for every drawer page:
+   - section kicker: small dim letter-spaced label;
+   - switch: hairline track, gradient once on, no bounce;
+   - single choice: the chosen word gets a gradient underline;
+   - multiple choice: a lit dot before each chosen word, a hollow ring otherwise;
+   - secondary action: an underlined word, never an outline pill; danger turns pink on hover;
+   - primary action: one ink pill per view;
+   - waterline: a 2px gradient line, the dot appears only under the pointer. */
+:root{--sans:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif}
+#settings.lake-settings :is(.lake-kicker,.lake-obs-section>h3,.lake-obs-connection-heading,.lake-backups>h3){margin:28px 0 4px;font:500 11.5px/1.6 var(--sans);letter-spacing:.14em;color:var(--lk-dim)}
+#settings.lake-settings .lake-obs-advanced>.lake-obs-connection .lake-obs-connection-heading{margin-top:4px}
+
+#settings.lake-settings .s-switch,.lake-setup .setup-lake-drawer .s-switch{appearance:none;-webkit-appearance:none;position:relative;flex:0 0 30px;width:30px;min-width:30px;height:17px;margin:0;padding:0;border:0;border-radius:9px;background:transparent;box-shadow:inset 0 0 0 1px var(--lk-line2,var(--drawer-line));cursor:pointer;transition:background .24s ease,box-shadow .24s ease}
+#settings.lake-settings .s-switch::before{content:none}
+#settings.lake-settings .s-switch::after,.lake-setup .setup-lake-drawer .s-switch::after{content:"";position:absolute;top:3px;left:3px;width:11px;height:11px;border-radius:50%;background:var(--lk-muted,var(--drawer-muted));transform:none;transition:transform .24s cubic-bezier(.2,.8,.2,1),background .24s ease}
+#settings.lake-settings .s-switch:checked,.lake-setup .setup-lake-drawer .s-switch:checked{background:linear-gradient(90deg,var(--lk-pink,var(--drawer-pink)),var(--lk-lilac,var(--drawer-lilac)));box-shadow:none}
+#settings.lake-settings .s-switch:checked::after,.lake-setup .setup-lake-drawer .s-switch:checked::after{transform:translateX(13px);background:#fff}
+#settings.lake-settings .s-switch:active::after{width:11px}
+#settings.lake-settings .s-switch:focus-visible{outline:2px solid var(--lk-lilac);outline-offset:3px}
+#settings.lake-settings .s-row:hover .s-switch:not(:checked){box-shadow:inset 0 0 0 1px var(--lk-muted)}
+#settings.lake-settings .s-row:has(.s-switch){cursor:pointer}
+
+#settings.lake-settings :is(.lake-language,.lake-obs-choices){display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px 16px;margin-left:auto}
+#settings.lake-settings :is(.lake-language,.lake-obs-choices) label{position:relative;display:inline-flex;align-items:center;padding:5px 0;cursor:pointer;font-size:13px;color:var(--lk-dim);white-space:nowrap;transition:color .2s ease}
+#settings.lake-settings :is(.lake-language,.lake-obs-choices) label:hover{color:var(--lk-muted)}
+#settings.lake-settings :is(.lake-language,.lake-obs-choices) label:has(input:checked){color:var(--lk-ink)}
+#settings.lake-settings :is(.lake-language,.lake-obs-choices) input{position:absolute;opacity:0;width:1px;height:1px}
+#settings.lake-settings :is(.lake-language,.lake-obs-choices) label span{color:inherit;text-decoration:none;outline:0}
+#settings.lake-settings :is(.lake-language,.lake-obs-choices) label:has(input[type=radio])::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.5px;border-radius:1px;background:linear-gradient(90deg,var(--lk-pink),var(--lk-lilac));transform:scaleX(0);transform-origin:left;transition:transform .3s cubic-bezier(.2,.8,.2,1)}
+#settings.lake-settings :is(.lake-language,.lake-obs-choices) label:has(input[type=radio]:checked)::after{transform:scaleX(1)}
+#settings.lake-settings .lake-obs-choices label:has(input[type=checkbox]){padding-left:13px}
+#settings.lake-settings .lake-obs-choices label:has(input[type=checkbox])::before{content:"";position:absolute;left:0;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;box-shadow:inset 0 0 0 1px var(--lk-dim);transition:background .2s ease,box-shadow .2s ease}
+#settings.lake-settings .lake-obs-choices label:has(input[type=checkbox]:checked)::before{background:var(--lk-lilac);box-shadow:0 0 7px rgba(200,182,240,.55)}
+#settings.lake-settings :is(.lake-language,.lake-obs-choices) label:has(input:focus-visible){outline:2px solid var(--lk-lilac);outline-offset:3px;border-radius:3px}
+
+#settings.lake-settings .button:not(.primary){display:inline-flex;align-items:center;gap:6px;min-height:0;padding:3px 0;border:0;border-radius:0;background:none;box-shadow:none;color:var(--lk-ink);font-size:13px;font-weight:400;text-decoration:underline;text-decoration-color:var(--lk-line2);text-decoration-thickness:1px;text-underline-offset:6px;transition:color .2s ease,text-decoration-color .2s ease}
+#settings.lake-settings .button:not(.primary):hover:not(:disabled){background:none;text-decoration-color:var(--lk-lilac)}
+#settings.lake-settings .button.quiet{color:var(--lk-muted);text-decoration:none}
+#settings.lake-settings .button.quiet:hover:not(:disabled){color:var(--lk-ink)}
+#settings.lake-settings :is(.button.danger,.lake-danger){color:var(--lk-dim);text-decoration:none}
+#settings.lake-settings :is(.button.danger,.lake-danger):hover:not(:disabled){color:var(--lk-pink)}
+#settings.lake-settings .button:not(.primary) svg{width:13px;height:13px;flex:none}
+#settings.lake-settings .button:disabled{opacity:.35;cursor:default}
+#settings.lake-settings .button.primary:disabled{opacity:1;background:transparent;color:var(--lk-dim);box-shadow:inset 0 0 0 1px var(--lk-line2)}
+#settings.lake-settings .button.primary{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:0 18px;border-radius:16px;font-size:13px;font-weight:500;letter-spacing:.04em;text-decoration:none}
+#settings.lake-settings .button.primary svg{width:13px;height:13px}
+
+#settings.lake-settings input[type=range]{-webkit-appearance:none;appearance:none;min-width:0;height:22px;margin:0;padding:0;border:0!important;border-radius:0;background:linear-gradient(90deg,var(--lk-pink),var(--lk-lilac)) left center/var(--fill,50%) 2px no-repeat,linear-gradient(var(--lk-line2),var(--lk-line2)) left center/100% 1px no-repeat!important;box-shadow:none!important;cursor:pointer}
+#settings.lake-settings input[type=range]::-webkit-slider-runnable-track{height:22px;background:transparent;border:0}
+#settings.lake-settings input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:9px;height:9px;margin-top:6.5px;border:0;border-radius:50%;background:var(--lk-ink);box-shadow:0 0 0 3px rgba(200,182,240,.22),0 0 10px rgba(200,182,240,.55);transform:scale(0);transition:transform .2s cubic-bezier(.2,.8,.2,1)}
+#settings.lake-settings input[type=range]:is(:hover,:focus-visible,:active)::-webkit-slider-thumb{transform:scale(1)}
+#settings.lake-settings input[type=range]:focus-visible{outline:0}
+
+/* Lists: pointing at a row lights its waterline; no fills anywhere. */
+#settings.lake-settings :is(.voice-service-row,.voice-catalog-row,.lake-voice-row){position:relative}
+#settings.lake-settings :is(.voice-service-row,.voice-catalog-row):hover{background:none}
+#settings.lake-settings :is(.voice-service-row,.voice-catalog-row,.lake-voice-row:not(.editing))::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,var(--lk-lilac),var(--lk-pink) 42%,transparent 92%);transform:scaleX(0);transform-origin:left;opacity:.8;transition:transform .5s cubic-bezier(.2,.8,.2,1);pointer-events:none}
+#settings.lake-settings :is(.voice-service-row,.voice-catalog-row,.lake-voice-row:not(.editing)):is(:hover,:focus-within)::after{transform:scaleX(1)}
+/* Readings: the composer opens in the list — kind, original → reading on one line, then the voice for viewers. */
+#settings.lake-settings .lake-reading-composer{display:flex;flex-direction:column;gap:12px;margin:12px 0 4px;padding:6px 0 16px;border-bottom:1px solid var(--lk-line)}
+#settings.lake-settings .lake-reading-kinds{justify-content:flex-start;margin-left:0}
+#settings.lake-settings .lake-reading-pair{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1.2fr);align-items:center;gap:10px}
+#settings.lake-settings .lake-reading-pair>span{color:var(--lk-dim)}
+#settings.lake-settings .lake-reading-pair input{padding:7px 0;font-size:14px}
+#settings.lake-settings .lake-reading-pair input[name=to]{font-family:var(--serif)}
+#settings.lake-settings .lake-reading-composer .field{margin:0}
+#settings.lake-settings .lake-reading-composer .lake-note{margin:0}
+#settings.lake-settings .lake-reading-actions{display:flex;align-items:center;gap:18px}
+#settings.lake-settings .lake-reading-group .lake-reading-composer{margin-top:0}
+#settings.lake-settings .lake-gold-outline{color:var(--lk-gold);text-decoration-color:var(--lk-gold)}
+/* Nothing in a drawer page scrolls sideways; inputs in a row may shrink. */
+#settings.lake-settings .settings-content{overflow-x:hidden}
+#settings.lake-settings .lake-reading-pair input{min-width:0;width:100%}

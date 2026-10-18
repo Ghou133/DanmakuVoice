@@ -1,6 +1,89 @@
 use super::*;
 
 #[tokio::test]
+async fn lake_remove_default_voice_rolls_back_references_and_keeps_other_settings() {
+    let (directory, app) = isolated(true);
+    save_test_voice(&app).await;
+    app.dispatch("bindings.save", json!({"id":"bound","binding":{"platform":"bilibili","user_id":77,"legacy_user_name":null,"preset_id":"voice","enabled":true}})).await.unwrap();
+    let before = app.snapshot().unwrap();
+    assert!(
+        app.dispatch("presets.remove", json!({"id":"voice","confirmed":true}))
+            .await
+            .is_err()
+    );
+    let failed = app.snapshot().unwrap();
+    assert_eq!(failed["rules"], before["rules"]);
+    assert_eq!(failed["presets"], before["presets"]);
+    app.dispatch("bindings.delete", json!({"id":"bound","confirmed":true}))
+        .await
+        .unwrap();
+    assert!(
+        app.dispatch("presets.remove", json!({"id":"voice"}))
+            .await
+            .is_err()
+    );
+    let removed = app
+        .dispatch("presets.remove", json!({"id":"voice","confirmed":true}))
+        .await
+        .unwrap();
+    assert!(removed["presets"].as_array().unwrap().is_empty());
+    assert!(removed["rules"]["default_preset_id"].is_null());
+    assert_eq!(removed["rules"]["default_preset_explicitly_cleared"], true);
+    assert_eq!(removed["connections"], before["connections"]);
+    drop(app);
+    let reopened = Application::new(directory.path().to_owned(), true).unwrap();
+    assert!(reopened.snapshot().unwrap()["rules"]["default_preset_id"].is_null());
+}
+
+#[tokio::test]
+async fn lake_catalog_preview_is_ephemeral_and_validates_the_voice() {
+    let (_directory, app) = isolated(true);
+    save_test_voice(&app).await;
+    let state = app.lock().unwrap();
+    let before = state.store.presets().unwrap();
+    let rules = state.store.load_rules().unwrap();
+    let preview = catalog_audition_preview(
+        &state.store,
+        &json!({"connection_id":"local","voice_id":"new-role","text":"preview only"}),
+    )
+    .unwrap();
+    assert_eq!(preview.final_text, "preview only");
+    assert_eq!(preview.voice.unwrap().voice_id, "new-role");
+    assert_eq!(json!(state.store.presets().unwrap()), json!(before));
+    assert_eq!(json!(state.store.load_rules().unwrap()), json!(rules));
+    assert!(
+        catalog_audition_preview(
+            &state.store,
+            &json!({"connection_id":"missing","voice_id":"new-role","text":"preview"})
+        )
+        .is_err()
+    );
+    assert!(
+        catalog_audition_preview(
+            &state.store,
+            &json!({"connection_id":"local","voice_id":"new-role","text":""})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn lake_setup_flag_is_opt_in_and_preserves_isolated_launch_options() {
+    let normal = LaunchOptions::parse(Vec::<OsString>::new()).unwrap();
+    assert!(!normal.show_setup);
+    let setup = LaunchOptions::parse([
+        OsString::from("--setup"),
+        OsString::from("--disable-network"),
+        OsString::from("--data-dir"),
+        OsString::from("lake-setup-fixture"),
+    ])
+    .unwrap();
+    assert!(setup.show_setup);
+    assert!(setup.disable_network);
+    assert!(setup.data_dir.ends_with("lake-setup-fixture"));
+}
+
+#[tokio::test]
 async fn overlay_title_edit_preserves_options_token_and_live_queue() {
     let (directory, app) = isolated(true);
     let before = app.snapshot().unwrap();
@@ -12,6 +95,8 @@ async fn overlay_title_edit_preserves_options_token_and_live_queue() {
     let mut settings = app.lock().unwrap().overlay_settings.clone();
     settings.enabled = true;
     settings.scale = 1.4;
+    settings.offset_x = 31;
+    settings.offset_y = -17;
     settings.tagline = "keep this line".into();
     settings.show_gift = false;
     app.dispatch("overlay.save", json!({"settings":settings}))
@@ -32,7 +117,7 @@ async fn overlay_title_edit_preserves_options_token_and_live_queue() {
             .is_err()
     );
     assert!(
-        app.dispatch("overlay.title.save", json!({"title":"1234567890123"}))
+        app.dispatch("overlay.title.save", json!({"title":"字".repeat(25)}))
             .await
             .is_err()
     );
@@ -40,12 +125,101 @@ async fn overlay_title_edit_preserves_options_token_and_live_queue() {
         app.snapshot().unwrap()["overlay"]["settings"]["title"],
         "今晚的弹幕"
     );
+    settings.title = "字".repeat(24);
+    let saved = app
+        .dispatch("overlay.title.save", json!({"title":settings.title}))
+        .await
+        .unwrap();
+    assert_eq!(saved["overlay"]["settings"], json!(settings));
     drop(app);
     let reopened = Application::new(directory.path().to_path_buf(), true).unwrap();
     assert_eq!(
         reopened.snapshot().unwrap()["overlay"]["settings"],
         json!(settings)
     );
+}
+
+#[tokio::test]
+async fn overlay_offsets_persist_reach_pages_and_reject_invalid_edits() {
+    let (directory, app) = isolated(true);
+    let before = app.snapshot().unwrap();
+    let mut settings = before["overlay"]["settings"].clone();
+    settings["offset_x"] = json!(-47);
+    settings["offset_y"] = json!(29);
+    let saved = app
+        .dispatch("overlay.save", json!({"settings":settings}))
+        .await
+        .unwrap();
+    assert_eq!(saved["overlay"]["settings"], settings);
+    for key in ["queue", "live", "rules"] {
+        assert_eq!(saved[key], before[key]);
+    }
+    {
+        let state = app.lock().unwrap();
+        let config = overlay_config(&state.overlay_settings);
+        assert_eq!(config["offset_x"], -47);
+        assert_eq!(config["offset_y"], 29);
+        assert!(config.get("token").is_none());
+        assert!(config.get("port").is_none());
+    }
+    for invalid in [json!(-8193), json!(8193), json!(1.5), json!("2")] {
+        for key in ["offset_x", "offset_y"] {
+            let mut edited = settings.clone();
+            edited[key] = invalid.clone();
+            assert!(
+                app.dispatch("overlay.save", json!({"settings":edited}))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(app.snapshot().unwrap()["overlay"]["settings"], settings);
+        }
+    }
+    drop(app);
+    let reopened = Application::new(directory.path().to_path_buf(), true).unwrap();
+    assert_eq!(
+        reopened.snapshot().unwrap()["overlay"]["settings"],
+        settings
+    );
+}
+
+#[tokio::test]
+async fn lake_overlay_migrates_old_style_and_previews_the_obs_feed() {
+    let (directory, app) = isolated(true);
+    let mut legacy = app.snapshot().unwrap()["overlay"]["settings"].clone();
+    legacy["style"] = json!("card");
+    legacy["vignette"] = json!(0.9);
+    legacy["linger_seconds"] = json!(60);
+    legacy["offset_x"] = json!(-49);
+    legacy["offset_y"] = json!(83);
+    legacy["scale"] = json!(1.25);
+    legacy["title"] = json!("保留的刊头");
+    {
+        let mut state = app.lock().unwrap();
+        state
+            .store
+            .save_overlay_settings(&serde_json::from_value(legacy).unwrap())
+            .unwrap();
+    }
+    drop(app);
+    let reopened = Application::new(directory.path().to_path_buf(), true).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    let settings = &snapshot["overlay"]["settings"];
+    assert_eq!(settings["style"], "spine");
+    assert!((settings["vignette"].as_f64().unwrap() - 0.6).abs() < 0.00001);
+    assert_eq!(settings["linger_seconds"], 14);
+    assert_eq!(settings["offset_x"], -49);
+    assert_eq!(settings["offset_y"], 83);
+    assert_eq!(settings["scale"], 1.25);
+    assert_eq!(settings["title"], "保留的刊头");
+    let state = reopened.lock().unwrap();
+    state
+        .overlay_hub
+        .publish_item(json!({"kind":"danmaku","message":"fixture live feed","at":1}));
+    let feed = state.overlay_hub.replay_snapshot();
+    drop(state);
+    assert_eq!(reopened.snapshot().unwrap()["overlay"]["preview"], feed);
+    assert!(feed["config"].get("token").is_none());
+    assert!(feed["config"].get("port").is_none());
 }
 
 #[tokio::test]
@@ -1917,6 +2091,89 @@ async fn exports_and_snapshots_never_contain_protected_credentials() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn configuration_restore_requires_confirmation_and_restores_exported_rules() {
+    let (directory, app) = isolated(true);
+    let export = directory.path().join("restore.json");
+    app.dispatch("configuration.export", json!({"path":export}))
+        .await
+        .unwrap();
+    // Desktop preferences are outside the credential-free configuration format.
+    // A legacy or foreign file cannot restore a hidden output device or UI scale.
+    let mut backup: Value = serde_json::from_slice(&std::fs::read(&export).unwrap()).unwrap();
+    backup["preferences"] = json!({"output":{"named":"Unavailable legacy device"},"scale":1.5});
+    std::fs::write(&export, serde_json::to_vec(&backup).unwrap()).unwrap();
+    {
+        let mut state = app.lock().unwrap();
+        state.live_history.begin_room(999);
+        state.last_live.room_id = Some(999);
+        state.last_live.recent_events =
+            vec![LiveEvent::danmaku(999, Some(77), "Old viewer", "Old room")];
+    }
+    let old_history_session = app.snapshot().unwrap()["live_history"]["session_id"].clone();
+    let mut rules = app.snapshot().unwrap()["rules"].clone();
+    rules["events"]["gift_threshold_yuan"] = json!(17);
+    rules["emote_words"] = json!([{"from":"[doge]","to":"狗头"}]);
+    app.dispatch("rules.save", json!({"rules":rules}))
+        .await
+        .unwrap();
+    assert!(
+        app.dispatch("configuration.import", json!({"path":export}))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        app.snapshot().unwrap()["rules"]["events"]["gift_threshold_yuan"],
+        17.0
+    );
+    let restored = app
+        .dispatch(
+            "configuration.import",
+            json!({"path":export,"confirmed":true}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored["rules"]["events"]["gift_threshold_yuan"], 5.0);
+    assert_eq!(restored["rules"]["emote_words"], json!([]));
+    assert_eq!(restored["preferences"]["scale"], 1.0);
+    assert_eq!(
+        app.lock().unwrap().prefs.output,
+        audio::OutputSelection::Default
+    );
+    assert_eq!(restored["live"]["events"], json!([]));
+    assert_ne!(restored["live_history"]["session_id"], old_history_session);
+    assert!(
+        app.dispatch("live.history", json!({"session_id":old_history_session}))
+            .await
+            .is_err()
+    );
+    assert!(Path::new(restored["result"]["backup_path"].as_str().unwrap()).is_file());
+    let missing = app
+        .dispatch("assets.audition", json!({"id":"missing"}))
+        .await
+        .unwrap_err();
+    assert!(missing.contains("音效素材不存在"), "{missing}");
+}
+
+#[tokio::test]
+async fn gift_merge_can_change_during_connection_without_retargeting_room() {
+    let (_directory, app) = isolated(true);
+    app.lock().unwrap().connecting = true;
+    let merge =
+        json!({"enabled":true,"initial_seconds":1.5,"increment_seconds":0.5,"maximum_seconds":5.0});
+    let saved = app
+        .dispatch("live.save", json!({"gift_merge":merge}))
+        .await
+        .unwrap();
+    assert_eq!(saved["live_settings"]["gift_merge"], merge);
+    assert!(
+        app.dispatch("live.save", json!({"room_id":42}))
+            .await
+            .is_err()
+    );
+    app.lock().unwrap().connecting = false;
 }
 
 #[tokio::test]
@@ -3816,4 +4073,68 @@ async fn failed_default_repair_rolls_back_save_and_import_before_safe_retry() {
             assert!(state.migration.is_none());
         }
     }
+}
+
+#[tokio::test]
+async fn full_live_history_ipc_is_read_only_and_rejects_stale_room_cursors() {
+    let (_directory, app) = isolated(true);
+    app.lock().unwrap().live_history.begin_room(999);
+    let before = app.snapshot().unwrap();
+    let session = before["live_history"]["session_id"].as_str().unwrap();
+    let page = app
+        .dispatch(
+            "live.history",
+            json!({"session_id":session,"limit":3,"viewer":"uid:501"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page["config_revision"], before["config_revision"]);
+    assert_eq!(page["result"]["messages"], 0);
+    assert_eq!(page["result"]["viewer_messages"], 0);
+    assert_eq!(page["result"]["items"], json!([]));
+    assert!(
+        app.dispatch("live.history", json!({"session_id":session,"before":-1}))
+            .await
+            .is_err()
+    );
+    assert!(
+        app.dispatch("live.history", json!({"session_id":session,"before":"2"}))
+            .await
+            .is_err()
+    );
+    app.lock().unwrap().live_history.begin_room(1000);
+    assert!(
+        app.dispatch("live.history", json!({"session_id":session}))
+            .await
+            .is_err()
+    );
+    assert_eq!(app.snapshot().unwrap()["live_history"]["room_id"], 1000);
+}
+
+#[test]
+fn lake_existing_account_migrates_retired_console_switch_without_broadcast_actions() {
+    let (directory, app) = isolated(true);
+    install_profile_session(&app);
+    {
+        let mut state = app.lock().unwrap();
+        state.prefs.broadcast_console = false;
+        state.save_preferences().unwrap();
+    }
+    drop(app);
+    let reopened = Application::new(directory.path().to_owned(), true).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot["preferences"]["broadcast_console"], true);
+    assert_eq!(snapshot["account"]["user_id"], 42);
+    assert!(snapshot["broadcast"]["room"].is_null());
+    assert_eq!(snapshot["broadcast"]["busy"], false);
+    assert_eq!(snapshot["obs"]["settings"]["enabled"], false);
+    assert!(
+        reopened
+            .lock()
+            .unwrap()
+            .store
+            .load_desktop_preferences()
+            .unwrap()
+            .broadcast_console
+    );
 }

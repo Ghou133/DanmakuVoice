@@ -56,7 +56,8 @@ let failChoice = false;
         state.rules.default_preset_id = args.payload.id;
         const preset = state.presets.find(item => item.id === args.payload.id);
         if (preset) state.rules.preferred_presets[preset.provider] = preset.id;
-      } else if (!['bili.qr.cancel', 'doubao.qr.cancel'].includes(args.action)) {
+      } else if (args.action === 'references.list') return {...structuredClone(state), result:[]};
+      else if (!['bili.qr.cancel', 'doubao.qr.cancel'].includes(args.action)) {
         throw new Error('Unexpected action ' + args.action);
       }
       state.config_revision++;
@@ -69,14 +70,15 @@ let failChoice = false;
     });
     await page.goto(origin);
     await page.locator('[data-action="settings.open"]').click();
+    await page.locator('[data-action="settings.tab"][data-id="voices"]').click();
     await page.locator('[data-form="voice-audition"]').waitFor();
     await page.waitForTimeout(500);
     await page.locator('#voice-audition-text').fill('保留试听文字、光标和页面位置');
     const identity = await page.evaluate(() => {
-      window.__retained = Object.fromEntries(['.settings-shell', '.settings-nav', '.s-page', '[data-form="voice-audition"]', '#voice-audition-text', '[data-form="tts-toggle"]'].map(selector => [selector, document.querySelector(selector)]));
+      window.__retained = Object.fromEntries(['.settings-shell', '.lake-voices-page', '[data-form="voice-audition"]', '#voice-audition-text', '#voice-management'].map(selector => [selector, document.querySelector(selector)]));
       window.__entryAnimations = [];
       document.addEventListener('animationstart', event => {
-        if (event.target.matches('.settings-dialog, .s-page')) window.__entryAnimations.push(event.animationName);
+        if (event.target.matches('.settings-dialog, #settings-content')) window.__entryAnimations.push(event.animationName);
       });
       const text = document.querySelector('#voice-audition-text');
       text.focus(); text.setSelectionRange(3, 7);
@@ -93,33 +95,57 @@ let failChoice = false;
     assert.equal(await page.evaluate(() => document.activeElement.selectionStart), 3);
     assert.equal(await page.evaluate(() => document.activeElement.selectionEnd), 7);
     await page.evaluate(() => { document.querySelector('#settings-content').scrollTop = 85; });
-    const scroll = await page.locator('#settings-content').evaluate(node => node.scrollTop);
+    let scroll = await page.locator('#settings-content').evaluate(node => node.scrollTop);
     const assertRetained = async () => {
       assert.equal(await page.evaluate(() => window.__documentIdentity), identity);
       assert.equal(await page.evaluate(() => Object.entries(window.__retained).every(([selector, node]) => document.querySelector(selector) === node && node.isConnected)), true, 'voice selection replaced settings/form DOM');
       assert.equal(await page.locator('#voice-audition-text').inputValue(), '保留试听文字、光标和页面位置');
-      assert.equal(await page.locator('#settings-content').evaluate(node => node.scrollTop), scroll);
+      assert.deepEqual(await page.locator('#voice-audition-text').evaluate(node=>[node.selectionStart,node.selectionEnd]),[3,7]);
+      assert.equal(await page.locator('#settings-content').evaluate(node=>node.scrollTop), scroll);
+    };
+    await assertRetained();
+    const rememberChoice = async id => {
+      await page.locator(`[data-action="voice.edit"][data-id="${id}"]`).click();
+      await page.locator(`[data-action="voice.default"][data-id="${id}"]`).scrollIntoViewIfNeeded();
+      await page.evaluate(() => {
+        window.__retained = Object.fromEntries(['.settings-shell', '.lake-voices-page', '[data-form="voice-audition"]', '#voice-audition-text', '#voice-management', '[data-form="lake-voice-edit"]'].map(selector => [selector, document.querySelector(selector)]));
+        const text = document.querySelector('#voice-audition-text');text.focus({preventScroll:true});text.setSelectionRange(3,7);
+      });
+      scroll = await page.locator('#settings-content').evaluate(node => node.scrollTop);
     };
     for (const provider of providers) {
-      await page.locator(`[data-action="service.prefer"][data-id="${provider}"]`).click();
-      await page.waitForFunction(expected => document.querySelector('[data-form="voice-audition"]').dataset.provider === expected, provider);
-      await assertRetained();
-      await page.locator(`input[name="preset_id"][value="${provider}-2"]`).locator('..').click();
-      await page.waitForFunction(expected => document.querySelector(`input[name="preset_id"][value="${expected}"]`).checked && document.querySelector('#voice-management')?.innerText.includes('正在使用'), `${provider}-2`);
+      await rememberChoice(`${provider}-2`);
+      // Dispatch through the rendered button while separating native pointer
+      // auto-scroll from application-induced DOM/scroll changes.
+      await page.locator(`[data-action="voice.default"][data-id="${provider}-2"]`).evaluate(node=>node.click());
+      await page.waitForFunction(expected => document.querySelector('[data-form="voice-audition"]').dataset.provider === expected && document.querySelector(`[data-action="voice.default"][data-id="${expected}-2"]`).hidden, provider);
       await assertRetained();
       assert.equal(state.rules.default_preset_id, `${provider}-2`);
     }
     failChoice = true;
-    await page.locator('input[name="preset_id"][value="doubao-1"]').locator('..').click();
+    await rememberChoice('doubao-1');
+    await page.locator('[data-action="voice.default"][data-id="doubao-1"]').evaluate(node=>node.click());
     await page.locator('#settings-error').waitFor({ state: 'visible' });
-    assert.equal(await page.locator('input[name="preset_id"][value="doubao-2"]').isChecked(), true);
+    assert.equal(await page.locator('[data-form="voice-audition"] [name="preset_id"]').inputValue(), 'doubao-2');
     await assertRetained();
     assert.deepEqual(errors, []);
     assert.equal(calls.some(call => /local_services.stop|audition|qr.begin/.test(call.action)), false);
     await page.screenshot({ path: path.join(output, 'settings-preserved.png') });
+    failChoice=false;state.rules.default_preset_id=null;state.config_revision++;
+    await page.reload();await page.locator('[data-action="settings.open"]').click();await page.locator('[data-action="settings.tab"][data-id="voices"]').click();
+    assert.equal(await page.locator('[data-form="voice-audition"]').count(),0);
+    await page.locator('[data-action="voice.edit"][data-id="gpt_sovits-1"]').click();
+    await page.locator('[data-form="lake-voice-edit"]').evaluate(node=>{window.__firstDefaultEditor=node;});
+    await page.locator('[data-action="voice.default"][data-id="gpt_sovits-1"]').click();
+    await page.locator('[data-form="voice-audition"]').waitFor();
+    assert.equal(await page.evaluate(()=>window.__firstDefaultEditor===document.querySelector('[data-form="lake-voice-edit"]')),true);
+    assert.equal(await page.locator('[data-form="voice-audition"] [name="preset_id"]').inputValue(),'gpt_sovits-1');
     // An unsubmitted service editor must keep its original input and selection too.
-    await page.locator('[data-action="service.configure"][data-id="fish_audio"]').click();
-    await page.locator('details:has([data-form="service-fish"]) summary').click();
+    state.connections.find(item=>item.id==='fish_audio').has_credential=false;state.config_revision++;
+    await page.evaluate(() => {window.__offlineListeners['resource-mode']({payload:false});window.__offlineListeners['resource-mode']({payload:true});});
+    await page.waitForTimeout(100);
+    await page.locator('[data-action="voice.add"]').click();
+    await page.locator('[data-action="voice.provider"][data-id="fish_audio"]').click();
     await page.locator('input[name="credential"]').fill('fictional-unsaved-editor-value');
     await page.evaluate(() => {
       window.__editorInput = document.querySelector('input[name="credential"]');
@@ -135,8 +161,8 @@ let failChoice = false;
     assert.deepEqual(await page.evaluate(() => [window.__editorInput.selectionStart, window.__editorInput.selectionEnd]), [2, 6]);
     assert.deepEqual(await page.evaluate(() => window.__entryAnimations), []);
     assert.deepEqual(errors, []);
-    await fs.writeFile(path.join(output, 'result.json'), JSON.stringify({ passed: true, headless: true, nativeWebView2: false, realTts: false, focusCycles: 4, providers: providers.length, failedSaveRestored: true, editorDraftRetained: true, calls: calls.map(call => call.action) }, null, 2));
-    console.log('Settings stability browser regression passed: focus x4, 4 services, voices, failed save, retained forms/text/scroll/editor draft.');
+    await fs.writeFile(path.join(output, 'result.json'), JSON.stringify({ passed: true, headless: true, nativeWebView2: false, realTts: false, focusCycles: 4, providers: providers.length, failedSaveRestored: true, firstDefaultRetainsEditor:true, editorDraftRetained: true, calls: calls.map(call => call.action) }, null, 2));
+    console.log('Settings stability browser regression passed: focus x4, 4 services, voices, failed save, first default, retained forms/text/selection/scroll/editor draft.');
   } finally {
     if (browser) await browser.close();
     await new Promise(resolve => server.close(resolve));

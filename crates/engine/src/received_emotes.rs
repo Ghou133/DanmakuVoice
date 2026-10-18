@@ -4,8 +4,8 @@
 //!
 //! Live reception runs this after the dm_type-only packet parser. A danmaku made
 //! only of markers verified by its own packet images or by this catalog is a
-//! standalone emote whatever its dm_type, so "过滤 B站官方表情" skips it as
-//! docs/BROADCAST.md describes. Mixed text, emoji and unknown markers stay speech.
+//! standalone emote whatever its dm_type. Only explicitly remembered emote
+//! readings are spoken; mixed text and unknown markers remain ordinary text.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -20,7 +20,7 @@ const MAX_MARKER_BYTES: usize = 512;
 const MAX_EVENT_EMOTES: usize = 32;
 const MAX_ADDED_BYTES: usize = 8 * 1024;
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub struct ReceivedEmoteCatalog {
     account_id: u64,
     room_id: u64,
@@ -204,6 +204,11 @@ mod tests {
         );
         let mut rules = RuleSet::default();
         rules.events.filter_bilibili_emoticons = false;
+        assert_eq!(rules.filter_reason(&event), Some("B站官方表情已过滤"));
+        rules.emote_words.push(crate::rules::Replacement {
+            from: MARKER.into(),
+            to: "爱你".into(),
+        });
         assert_eq!(rules.filter_reason(&event), None);
     }
     #[test]

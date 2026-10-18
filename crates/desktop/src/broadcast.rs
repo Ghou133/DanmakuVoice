@@ -152,11 +152,22 @@ impl super::Controller {
         status
     }
 
-    pub(super) fn invalidate_obs_activity(&mut self, reset_status: bool) {
+    /// Stops in-flight OBS work without claiming anything new about the connection.
+    /// Only an unfinished source sync is dropped, since nothing will complete it.
+    pub(super) fn cancel_obs_activity(&mut self) {
         self.obs_activity.cancel.cancel();
         self.obs_activity.cancel = CancellationToken::new();
         self.obs_activity.epoch = self.obs_activity.epoch.wrapping_add(1);
         self.obs_activity.recovery = ObsRecovery::default();
+        if self.obs_status["overlay_sync"]["state"] == "syncing"
+            && let Some(status) = self.obs_status.as_object_mut()
+        {
+            status.remove("overlay_sync");
+        }
+    }
+
+    pub(super) fn invalidate_obs_activity(&mut self, reset_status: bool) {
+        self.cancel_obs_activity();
         if reset_status {
             self.obs_status = json!({"state":"idle"});
         } else if let Some(status) = self.obs_status.as_object_mut() {
@@ -508,7 +519,8 @@ impl Application {
         let overlay_sync = state.obs_status.get("overlay_sync").cloned();
         state.obs_status = match result {
             Ok(found) => json!({"state":"ok","streaming":found.streaming,
-                "obs_version":found.obs_version,"websocket_version":found.websocket_version}),
+                "obs_version":found.obs_version,"websocket_version":found.websocket_version,
+                "canvas_width":found.canvas_width,"canvas_height":found.canvas_height}),
             Err(error) => json!({"state":"error","message":error.to_string()}),
         };
         if let Some(sync) = overlay_sync {
@@ -587,7 +599,12 @@ impl Application {
             Ok(streaming) => {
                 let mut status = json!({"state": "ok", "streaming": streaming});
                 if state.obs_status["state"] == "ok" {
-                    for key in ["obs_version", "websocket_version"] {
+                    for key in [
+                        "obs_version",
+                        "websocket_version",
+                        "canvas_width",
+                        "canvas_height",
+                    ] {
                         if let Some(value) = state.obs_status.get(key) {
                             status[key] = value.clone();
                         }
@@ -625,8 +642,13 @@ impl Application {
             ..edited
         };
         state.store.save_obs_settings(&settings).map_err(display)?;
-        if state.obs_settings != settings {
+        // Only the address decides what the connection status describes. Turning
+        // broadcast sync on or off stops its pending work; choosing the program or
+        // auto-launch changes nothing that is running.
+        if state.obs_settings.host != settings.host || state.obs_settings.port != settings.port {
             state.invalidate_obs_activity(true);
+        } else if state.obs_settings.enabled != settings.enabled {
+            state.cancel_obs_activity();
         }
         state.obs_settings = settings;
         drop(state);
@@ -785,6 +807,13 @@ impl Application {
         }
         sync["page_connected"] = json!(state.overlay_hub.obs_health().0 > 0);
         sync["refreshed"] = json!(outcome.as_ref().is_ok_and(|found| found.refreshed));
+        if let Ok(found) = &outcome
+            && found.found
+        {
+            sync["scene"] = json!(found.scene);
+            sync["width"] = json!(found.width);
+            sync["height"] = json!(found.height);
+        }
         state.obs_status["overlay_sync"] = sync;
         outcome.map(|found| json!(found)).map_err(display)
     }
@@ -1329,6 +1358,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn obs_switches_keep_the_connection_status_until_the_address_changes() {
+        let (_directory, app) = isolated(false);
+        let connected = json!({"state":"ok","obs_version":"31.0.0",
+            "overlay_sync":{"state":"ready","scene":"fixture scene"}});
+        app.lock().unwrap().obs_status = connected.clone();
+        // Broadcast sync, auto-launch and the program path do not touch the connection.
+        app.dispatch("obs.save", json!({"settings":{"enabled":true}}))
+            .await
+            .unwrap();
+        app.dispatch("obs.save", json!({"settings":{"auto_launch":false}}))
+            .await
+            .unwrap();
+        assert_eq!(app.lock().unwrap().obs_status, connected);
+        // An unfinished source sync is dropped when broadcast sync stops it.
+        app.lock().unwrap().obs_status["overlay_sync"] = json!({"state":"syncing"});
+        app.dispatch("obs.save", json!({"settings":{"enabled":false}}))
+            .await
+            .unwrap();
+        let status = app.lock().unwrap().obs_status.clone();
+        assert_eq!(status["state"], "ok");
+        assert!(status.get("overlay_sync").is_none());
+        // A new address describes a different OBS.
+        app.dispatch("obs.save", json!({"settings":{"port":4460}}))
+            .await
+            .unwrap();
+        assert_eq!(app.lock().unwrap().obs_status, json!({"state":"idle"}));
+    }
+
+    #[tokio::test]
     async fn obs_link_settings_and_password_stay_out_of_snapshots_exports_and_disk() {
         let (directory, app) = isolated(false);
         let snapshot = app.snapshot().unwrap();
@@ -1433,6 +1491,8 @@ mod tests {
         let found = app.dispatch("obs.refresh", json!({})).await.unwrap();
         assert_eq!(found["obs"]["status"]["state"], "ok");
         assert_eq!(found["obs"]["status"]["obs_version"], "31.0.0");
+        assert_eq!(found["obs"]["status"]["canvas_width"], 1280);
+        assert_eq!(found["obs"]["status"]["canvas_height"], 720);
         assert!(found["obs"]["status"].get("overlay_sync").is_none());
         assert_eq!(found["config_revision"], revision);
         assert_eq!(app.lock().unwrap().status, "unrelated operation result");
@@ -1444,7 +1504,7 @@ mod tests {
                 .iter()
                 .map(|(kind, _)| kind.as_str())
                 .collect::<Vec<_>>(),
-            ["GetVersion", "GetStreamStatus"]
+            ["GetVersion", "GetStreamStatus", "GetVideoSettings"]
         );
         let (_directory, offline) = isolated(true);
         for action in ["obs.refresh", "obs.overlay.sync"] {
@@ -1486,6 +1546,13 @@ mod tests {
                 "source errors cannot imply a disconnected OBS"
             );
             assert_eq!(status["overlay_sync"]["state"], expected);
+            if expected == "updated" {
+                assert_eq!(status["overlay_sync"]["scene"], "fixture scene");
+                assert_eq!(status["overlay_sync"]["width"], 1280);
+                assert_eq!(status["overlay_sync"]["height"], 720);
+            } else {
+                assert!(status["overlay_sync"].get("scene").is_none());
+            }
             assert_eq!(app.lock().unwrap().status, "other result");
             if expected == "error" {
                 assert!(result.unwrap_err().contains("[DV-OB12]"));
@@ -1934,6 +2001,8 @@ mod tests {
                 obs_version: "stale".into(),
                 websocket_version: "stale".into(),
                 streaming: true,
+                canvas_width: Some(1920),
+                canvas_height: Some(1080),
             }),
         )
         .unwrap();

@@ -264,12 +264,12 @@ let deferred = null;
     assert.equal(await missingGraphic.locator('svg').count(), 1);
     const missingBox = await missingGraphic.boundingBox();
     assert.ok(missingBox.width > 0 && missingBox.height > 0, JSON.stringify(missingBox));
-    assert.doesNotMatch(await page.locator('#lake-current, #lake-history').allTextContents().then(items => items.join('')), /\[虚构(?:图片|缺失)表情\]/);
-    assert.equal(await page.locator('#lake-history img.message-emote[title]').count(), 0);
+    assert.doesNotMatch(await page.locator('#lake-current, #lake-peek').allTextContents().then(items => items.join('')), /\[虚构(?:图片|缺失)表情\]/);
+    assert.equal(await page.locator('#lake-peek img.message-emote[title]').count(), 0);
     check('a failed received image becomes a visible graphic fallback with the same accessible name and no marker text, including the sunk history');
 
     await page.locator('.lake-history-open').click();
-    await page.locator('#lake-history-dialog').waitFor();
+    await page.locator('#lake-deep').waitFor();
     const historyImages = page.locator('#chat-feed .message-emote');
     await page.locator('#chat-feed .emote-unavailable').waitFor();
     assert.equal(await historyImages.count(), 2);
@@ -307,7 +307,7 @@ let deferred = null;
     assert.equal(reads().length, 1);
     assert.equal(await page.locator('#masthead-name').textContent(), '虚构主播');
     assert.equal(await page.locator('#masthead-suffix').textContent(), '的直播间');
-    assert.doesNotMatch(await page.locator('#lake-current').textContent(), /tonight[’']s title/i);
+    assert.match(await page.locator('#lake-current').textContent(), /tonight[’']s title/i);
     assert.equal(await page.locator('#lake-current .lake-state-title').textContent(), state.broadcast.room.title);
     state.live.audience = { active: true, loading: false, live_status: 1, rank_count_text: '0', users: [] };
     await push();
@@ -320,7 +320,7 @@ let deferred = null;
     state.live.audience.rank_count_text = '0';
     await push();
     assert.equal(await page.locator('#audience-count').isHidden(), true);
-    assert.match(await page.locator('#lake-daypart').textContent(), /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+night$/);
+    assert.match(await page.locator('#lake-daypart').textContent(), /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+evening$/);
     check('the masthead keeps account name plus room suffix, preparation omits the title label, zero viewers hide the full entry and positive counts remain available');
     state.preferences.broadcast_console = false;
     state.broadcast.room.live_status = 0;
@@ -352,7 +352,7 @@ let deferred = null;
     // A one-message transcript has no history drawer entry point. Its visible
     // current phrase, not a lazily retained hidden list, proves no fake echo.
     assert.equal(await page.locator('#lake-current .lake-message').count(), 1);
-    assert.equal(await page.locator('#lake-history .lake-message').count(), 0);
+    assert.equal(await page.locator('#lake-peek .lake-peek-entry').count(), 0);
     assert.doesNotMatch(await page.locator('#lake-current').textContent(), /虚构测试消息/);
     check('a successful explicit submission sends one trimmed message, clears its draft and does not fabricate a received chat row');
 
@@ -429,6 +429,17 @@ let deferred = null;
     await picker.getByRole('tab').nth(0).click();
     check('explicitly opening the emoji picker refreshes metadata, preserves the draft and safely renders untrusted labels and image URLs');
 
+    // T5: a real first pointer click must both dismiss the picker and focus the input.
+    await input.click();
+    assert.equal(await picker.isHidden(), true);
+    assert.equal(await input.evaluate(node => document.activeElement === node), true);
+    await page.keyboard.type('x');
+    assert.match(await input.inputValue(), /x/);
+    assert.equal(writes().length, beforePickerWrites, 'focusing and typing must not send a message');
+    await input.fill('常规表情测试');
+    await openPicker();
+    check('first composer click closes the emoji picker, focuses the input and accepts typing');
+
     await input.evaluate(node => node.setSelectionRange(2, 4));
     await picker.getByRole('button', { name: '笑哭', exact: true }).click();
     await ready();
@@ -454,7 +465,7 @@ let deferred = null;
     assert.deepEqual(writes().at(-1), { action: 'bili.chat.emoticon.send', payload: { emoticon_unique: 'fixture_live_smile', confirmed: true } });
     assert.equal(await input.inputValue(), '独立表情不清除此草稿');
     assert.equal(await page.locator('#lake-current .lake-message').count(), 1);
-    assert.equal(await page.locator('#lake-history .lake-message').count(), 0);
+    assert.equal(await page.locator('#lake-peek .lake-peek-entry').count(), 0);
     check('an allowed live emoticon sends its unique ID once and preserves the ordinary draft without a fabricated echo');
 
     await openPicker();

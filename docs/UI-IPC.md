@@ -168,7 +168,7 @@ is a test-only process flag: network commands reject with a clear error.
 | `audio.test` | `{}` queues a 600 ms local calibration tone through the bundled FFmpeg and selected output, without a TTS account or network. Uses existing master volume and queue cancellation; muted/zero volume is rejected. Completion or sanitized failure appears in queue history. |
 | `startup.set` | `{enabled:true}` |
 | `overlay.save` | `{settings:OverlaySettings}` validates and saves the experimental OBS overlay, then starts or stops its loopback server to match `enabled`; the app keeps its own `port` and `token`, whatever the payload carries |
-| `overlay.token.reset` | `{}` replaces the overlay token; connected overlay pages receive `reset` and the old address stops working immediately |
+| `overlay.token.reset` | `{}` replaces the overlay token; connected overlay pages receive `reset` and the old address stops working immediately. The UI no longer offers this action (user decision, 2026-10-18); the backend command remains. |
 | `overlay.test` | `{kind:"danmaku"\|"super_chat"}` sends one clearly marked demo item to connected overlay pages only; it never enters the speech queue. Rejected while the overlay is off |
 | `configuration.export` | `{path:"new absolute file path"}` never overwrites |
 | `migration.preview` | `{path:"old config.json"}` result is engine LegacyPreview |
@@ -216,10 +216,12 @@ The frontend applies the saved language immediately; the host also updates the w
 Changing `tts_enabled` keeps live reception/display; a speech-capable live session switches its speech gate without reconnecting. A receive-only session needs playback initialization when speech is first enabled. The visible chat is carried through required session replacement. Legacy FFmpeg path values are ignored and are absent from snapshots/exports.
 `snapshot.overlay` is dynamic: `{settings:OverlaySettings,running,port,url,error,clients:[{width,height}]}`.
 `OverlaySettings` is `{enabled:false,style:"card"|"spine",corner:"top_left"|"top_right"|"bottom_left"|"bottom_right",
-scale:0.5..2,vignette:0..1,title,tagline,show_danmaku,show_gift,show_super_chat,show_guard,
+offset_x:-8192..8192,offset_y:-8192..8192,scale:0.5..2,vignette:0..1,title,tagline,show_danmaku,show_gift,show_super_chat,show_guard,
 names:"none"|"special"|"all",merge_duplicates,linger_seconds:3..120,port,token}`. Defaults: spine, top left,
 scale 1, vignette 0.6, title `今晚的弹幕`, empty tagline (the page then uses its English default), names `special`,
-14 seconds, port 47823. The token is a 32-hex local address secret: it is in the snapshot so the settings page can
+14 seconds, port 47823. Missing offsets default to zero. Offsets are integers in browser-source canvas pixels,
+positive right/down for all corners and independent of overlay scale; they move the whole overlay including Super Chat.
+The heading accepts 1–24 Unicode characters. The token is a 32-hex local address secret: it is in the snapshot so the settings page can
 copy the address (the page shows it masked) and is excluded from configuration export. `clients` are the browser
 sources currently reading the event stream and the canvas size each reported. The overlay page itself is served at
 `http://127.0.0.1:{port}/overlay?token=…`; its event stream `/overlay/events` sends `hello`, `config`, `status`,
@@ -249,7 +251,7 @@ OBS link commands (experimental, part of the broadcast console):
 | `obs.test` | `{}` | Read the connection and return the probe result, then schedule existing managed overlay recovery if its local server is enabled. Offline mode rejects it. |
 | `obs.bitrate.get` | `{}` | Read the Simple output profile's configured video bitrate; return `{bitrate_kbps,output_mode,editable,outputs_active,reason,min_kbps,max_kbps,applies_next_stream}`. Advanced mode explicitly reports unavailable. |
 | `obs.bitrate.set` | `{bitrate_kbps}` | Save an integer 100–100000 Kbps to the current Simple output profile, then verify readback. Allowed during streaming; applies when the encoder starts next time, does not reconfigure the active encoder or stop any output. |
-| `overlay.title.save` | `{title}` | Enabled overlay only: save its 1–12 character heading and update connected overlay pages, preserving all other overlay settings and its token. |
+| `overlay.title.save` | `{title}` | Enabled overlay only: save its 1–24 character heading and update connected overlay pages, preserving all other overlay settings and its token. |
 | `obs.launch` | `{}` | Local OBS only: start `obs64.exe` if no OBS process runs, wait up to 45 s for its WebSocket, then return the test result plus `launched`. |
 | `obs.overlay.add` | `{update_only?:bool}` | Requires the overlay server running. Create or safely update “弹幕姬叠加层” at the OBS base canvas size in the current program scene: `{created,added_to_scene,found,updated,scene,width,height}`. Explicit Add also enables its existing current-scene item. Identical URL/size settings are not written again. `update_only` never creates, adds or enables. |
 | `obs.overlay.sync` | `{automatic?:bool}` | Repair only an existing managed browser source's URL/size, with the same result shape. Automatic calls verify persisted local ownership before writing; a superseded instance pauses. Missing source returns `found:false`. Never creates, changes scenes, enables hidden items, launches OBS, or starts/stops output. Observation-only app dispatch keeps failures out of global status. |
@@ -313,3 +315,28 @@ The transient `chat_send` snapshot is `{busy,account_id,room_id,message_limit,em
 All cards use `bili.chat.emoticon.send` immediately on selection and leave the composer draft and selection intact. Sending and metadata reads require login and network availability, independently of `broadcast_console`. `kind:"text"` sends the exact original `text` as a separate ordinary message; account image entries still display their pictures. Their `account:{package_id}:{emote_id}` identifier selects the current account item and is never a standalone live send token. The backend freshly reads the personal panel and verifies that item before sending. The official comment component renders returned entries without checking `flags.unlocked`; the app likewise does not disable ordinary text sending based on that unrelated flag. `kind:"emoticon"` uses the live standalone command with a refreshed exact token and permission check. Locked live entries remain disabled. Each pack retains its real name and icon in data and nonvisual accessibility labels. The picker displays only cover/item images, without visible labels, counts, tooltips, or pagination; every item in the selected pack is rendered in one continuous scroll area. Missing covers use the first valid item image or a text-free missing-image graphic. A failed source produces a visible `warnings` entry in the composer status and a text-free picker indicator while retaining the successful source; both sources failing returns an error. Any expired session fails the whole read and invalidates the cached account. Warnings share the account context and cannot survive an account switch.
 
 The composer reads its limit and packs once per logged-in account/room context if no metadata is available. Its `maxlength`, visible counter and the avatar card's `@` prefill all count UTF-16 units like the platform; the prefill is cut on whole code points so it never leaves half of a surrogate pair. Background/focus updates preserve its nodes and draft; failed metadata reads require an explicit picker refresh. The send POST signs its WBI query with keys from the authenticated nav response and includes CSRF in the form. No unsigned fallback or automatic write retries. Failed sends retain the draft; accepted sends do not create local feed events. Input composition confirmation does not submit. Account/room changes cancel pending work and invalidate cached permissions; toggling broadcast mode preserves the chat context. Stale UI replies cannot replace current identity or clear another draft. State and credentials never enter configuration exports.
+
+
+## Lake redesign additions (2026-10-17)
+
+These contracts accompany the current drawer UI in `UI-DESIGN.md`; older UI-only controls described above are no longer exposed.
+
+| Command | Payload | Result / behavior |
+|---|---|---|
+| `live.history` | `{session_id,before?,limit?,viewer?}` | Read-only, newest-first page from the complete runtime archive. `limit` is clamped to 1..100; `before` is a positive exclusive sequence cursor; `viewer` is `uid:<id>` or `name:<exact name>`. A stale session is rejected. |
+| `audition.catalog` | `{connection_id,voice_id,text,sovits?}` | Validate an ephemeral voice and queue real provider playback. Does not store a preset or change the default. GPT-SoVITS uses its explicit model/reference settings. Normal network/provider validation still applies. |
+| `presets.remove` | `{id,confirmed:true}` | Transactionally clear this voice as default and remove it. Existing binding/rule references reject deletion and roll back the default change. Does not silently choose a replacement. |
+| `assets.audition` | `{id}` | Play the existing managed sound asset through the actual audio pipeline, without requiring a default speech voice. |
+| `configuration.import` | `{path,confirmed:true}` | Read an absolute-path own-format configuration backup (at most 16 MiB), stop reception/playback, save a rollback backup, and restore validated data transactionally. Returns backup path and imported connection/preset/binding counts. Credentials are neither imported nor exported. |
+
+The snapshot adds `live_history:{session_id,room_id,started_at_ms,messages,unique_viewers,metadata_revision}`. `live.events` stays capped at 100; it is not the complete archive. A history result contains the same stats plus `items:[{sequence,event}]`, `before`, `has_more`, and optional `viewer_messages`. Append-only sequence cursors remain stable while new messages arrive. `metadata_revision` increases when verified emote metadata arrives later; loaded history and viewer pages refresh without changing event order or scroll anchors. The archive survives same-room reception/audio restarts, rotates on an observed new broadcast, and clears on account/room changes or exit. Full text is runtime-only and excluded from backup/export. `broadcast.last_session.unique_viewers` is optional: old or partially observed sessions remain unknown.
+
+`playback` is `null` or `{job_id,played_ms,queued_ms}` from the audio writer. Text and reflection use the same real playback ratio; this is not word-level alignment metadata.
+
+OBS status now supplies `canvas_width`/`canvas_height` from the read-only `GetVideoSettings` probe even before an overlay has been added. `overlay.preview` mirrors the real overlay replay feed; it contains no token. Managed-source sync also reports the verified source scene and dimensions. UI drag/resize edits patch the existing overlay configuration, preserving fields that are not part of that form. The product fixes overlay style to `spine`, vignette to `0.6`, and ordinary linger time to `14`; legacy persisted values normalize at load/restore/save while placement and titles are retained.
+
+Rules add `emote_words:[{from,to}]` for explicit emoticon readings. Official emoticons have no spoken text without a matching reading, even if the retained compatibility field `events.filter_bilibili_emoticons` is false. User names, displayed messages and original event order remain unchanged.
+
+The obsolete UI `broadcast_console` switch is enabled for an existing authenticated account at startup and after successful QR login, so the new interface remains reachable. Backend identity, room, permission, network and confirmation checks remain authoritative. No migration starts or stops a broadcast. The 10-minute mute option is disabled because the current platform API accepts integral hours only.
+
+`--setup` reopens onboarding without clearing stored credentials. UI scale and output follow Windows defaults. No debugging port or test adapter is introduced into the production executable.

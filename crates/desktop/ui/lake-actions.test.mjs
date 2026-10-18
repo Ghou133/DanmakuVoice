@@ -70,7 +70,7 @@ test('selecting a different voice saves only its preset and leaves the current u
   assert.equal(calls.length, 0);
   await vm.runInContext(`handleAction('voice.pick', 'next', null)`, context);
   assert.deepEqual(calls, [{ action: 'presets.default', payload: { id: 'next' } }]);
-  assert.deepEqual(messages, ['之后的弹幕用「新音色」朗读']);
+  assert.deepEqual(messages, ['之后的弹幕用「新音色」播报']);
   assert.equal(vm.runInContext('snapshot.queue.current.preset_id', context), 'saved');
   assert.equal(vm.runInContext('snapshot.local_services.dots.state', context), 'running');
 });
