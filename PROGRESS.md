@@ -1268,3 +1268,8 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - 18 套浏览器原始回归中 17 套通过，包括 round3 的 19 组/64 图；received-personal-emotes 的 15 个功能检查已通过，但隔离网络断言检测到 Kaspersky 注入的 3 个被阻断 GET 而失败。原始日志和图片保留；支持的 Chromium 通道复核另行记录，不放宽断言或关闭安全软件。
 - 本轮证据位于 target/release-0.3.3-20261018/validation/：各命令日志及退出码、browser-suites.json、store-metadata-validation.json、public-source-scan.json。当前源码启发式扫描命中的 12 处同一格式密钥均为测试模块中的显式虚构测试值；私有生成目录、数据库与凭据不纳入发布。
 - 此记录时尚未构建正式包、推送 GitHub 或提交商店。后续必须核对干净提交的 EXE/审计包/完整源码/MSIX 配对、发布源码附件，并从 Partner Center 实际状态区分草稿、送审、认证与上架。商店签名包升级、SAC、真实声卡、账号、TTS 和 OBS 仍未完成验收。
+
+
+**发布准备复核补充：** received-personal-emotes 在未修改脚本、未关闭安全软件的 Chromium 通道上也在完成全部 15 项功能检查后，因 3 个 Kaspersky 注入请求被隔离断言拦截而失败；两个环境均无页面 JavaScript 错误。维持 17/18 套浏览器门槛通过及这一环境限制，不记作全通过。原始记录与复核见 frontend-validation-summary.json 和对应失败材料。
+
+首次正式构建已完成静态 CRT 编译、Windows 系统 DLL 导入检查、325 个 Rust 依赖许可收集且无许可阻塞；随后审计包检查发现 README 新增的 docs/STORE-LISTING.md 链接没有随审计材料复制，因而拒绝打包。已给 package-portable.ps1 增补该文档，保留首次失败日志与 staging；重新构建配对材料并运行原始 CI 后再发布。GitHub main 已同步新版源码及 README，但尚未创建 GitHub Release 或提交商店。仅本轮新建、尚未发布的版本标签将随打包修正提交更新；旧版本标签、历史源码与原始失败保留。

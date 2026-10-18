@@ -463,6 +463,7 @@ try {
     Copy-IntoStage (Join-Path $repoRoot 'crates\desktop\ui\fonts\OFL.txt') 'third-party\Fonts\DanmakuVoiceSerifSC-OFL.txt'
     Copy-IntoStage (Join-Path $repoRoot 'crates\desktop\ui\fonts\OFL-InstrumentSerif.txt') 'third-party\Fonts\InstrumentSerif-OFL.txt'
     Copy-IntoStage (Join-Path $repoRoot 'docs\STORE-PUBLISHING.md') 'docs\STORE-PUBLISHING.md'
+    Copy-IntoStage (Join-Path $repoRoot 'docs\STORE-LISTING.md') 'docs\STORE-LISTING.md'
     Copy-IntoStage (Join-Path $repoRoot 'docs\PRIVACY.md') 'docs\PRIVACY.md'
     Copy-IntoStage (Join-Path $repoRoot 'docs\ERROR-CODES.md') 'docs\ERROR-CODES.md'
     Copy-IntoStage (Join-Path $repoRoot 'docs\RELEASE-LICENSE-AUDIT.md') 'docs\RELEASE-LICENSE-AUDIT.md'
