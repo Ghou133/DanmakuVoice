@@ -1273,3 +1273,13 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 **发布准备复核补充：** received-personal-emotes 在未修改脚本、未关闭安全软件的 Chromium 通道上也在完成全部 15 项功能检查后，因 3 个 Kaspersky 注入请求被隔离断言拦截而失败；两个环境均无页面 JavaScript 错误。维持 17/18 套浏览器门槛通过及这一环境限制，不记作全通过。原始记录与复核见 frontend-validation-summary.json 和对应失败材料。
 
 首次正式构建已完成静态 CRT 编译、Windows 系统 DLL 导入检查、325 个 Rust 依赖许可收集且无许可阻塞；随后审计包检查发现 README 新增的 docs/STORE-LISTING.md 链接没有随审计材料复制，因而拒绝打包。已给 package-portable.ps1 增补该文档，保留首次失败日志与 staging；重新构建配对材料并运行原始 CI 后再发布。GitHub main 已同步新版源码及 README，但尚未创建 GitHub Release 或提交商店。仅本轮新建、尚未发布的版本标签将随打包修正提交更新；旧版本标签、历史源码与原始失败保留。
+
+### 2026-10-18 发布与正式送审回执
+
+- 冻结构建提交为 `ba89d5793b9d64ac2b387e9238998d58b148edb0`；`v0.3.3` 与 `store-v1.3.3.0` 均指向该提交。正式包、完整源码与审计材料重新构建成功，源码配对、原始依赖许可、单 EXE/FFmpeg 启动 smoke、MakeAppx 语义及 MSIX 全部 staged 字节校验通过。完整源码 ZIP SHA-256：`8bdc271bd153191a48a8a2e979aa4240eb5dff6376b0ad20e44aefa093778d68`；提交 MSIX SHA-256：`a7003da15db39250d917efdd288905ead22daa360b875c228a8f8039bfdec5f7`。
+- [Windows CI 39106033309](https://github.com/Ghou133/DanmakuVoice/actions/runs/39106033309) 在上述精确提交成功：原始完整 Rust **545 通过、10 忽略、0 筛除**，本地因 Os 1314 失败的四个符号链接夹具测试在 CI 全部通过；Node 201/201、Python 打包 28/28、fmt、严格 Clippy、空 Cargo 缓存从解压源码离线重建及 MSIX 校验通过。本地浏览器仍准确记录为 17/18 套，Kaspersky 注入请求的隔离断言限制未被隐藏或放宽。
+- GitHub [v0.3.3](https://github.com/Ghou133/DanmakuVoice/releases/tag/v0.3.3) 已正式发布并设为最新版；[Store 1.3.3.0 对应源码](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.3.0) 已公开，两个 release 均仅提供完整源码与 SHA256SUMS，匿名下载地址及资产摘要已核验。README、新文案与六张公开示例图已同步；内部 EXE、审计包和未签名 MSIX 未作为公开下载发布。
+- Microsoft Partner Center 产品 `9P4DFD8HGN03` 的 **Submission 4 / `1152921505702161501` 已正式送审**。实际上传包为 x64 Desktop `1.3.3.0`，上传后状态 Validated；保持固定包身份与 Publisher CN。再次检查实际 MSIX：唯一权限为 `runFullTrust`，没有 `unvirtualizedResources`、文件/注册表虚拟化退出或豁免、`broadFileSystemAccess`，StartupTask 默认禁用，延续已通过 1.3.2.0 的权限修正。
+- 中英文说明、短介绍、更新说明、各 12 项功能、各 9 张 1920×1080 PNG 及九条对应标题、CurePrism 版权与开发者字段已保存并重新加载逐项比对。18 张图片在页面内部计算完整 data URL 长度与 FNV-1a 校验值，按语言及 01–09 顺序全部匹配本地原文件；页面图片均加载完成。初次导出的大 data URL 被工具限长而产生的截断 PNG 保留为失败材料，未用作像素证据。两套既有七个通用搜索词、免费价格与市场保持原配置。
+- 审核说明已保存并重新加载核验，含新的“设置 → 声音”空状态测试音路径、权限复核、精确源码提交/下载链接/摘要；不含开发者登录凭据。后台实际回执为 **正在认证更新：提交完成、预处理进行中，认证与发布未开始**，且显示“产品在通过认证后立即开始发布”。这不表示认证通过或 1.3.3.0 已上架；商店当前线上版本仍是先前 Submission 3。
+- 本轮证据保存在 `target/release-0.3.3-20261018/`：`ci-39106033309-success.log`、`ci-39106033309-summary.json`、`packaging-results.json`、`store-permission-recheck.json`、`github-publication-result.json`、`store-upload-proof-validation.json`、`store-submission4-confirmation.txt` 与 `store-submission4-proof.jpg`。商店签名安装/升级、SAC、真实声卡、直播账号、TTS 与 OBS 在线验收仍未完成，不由构建和送审替代。
