@@ -68,7 +68,7 @@ const waitForHost=async predicate=>{for(let attempt=0;attempt<100;attempt++){if(
     else if(action==='models.scan')result={pairs:[],issues:[]};
     else if(action==='onboarding.finish'){state.onboarding_done=true;state.setup.tts_enabled=payload.tts_enabled;}
     else if(action==='local_services.start')state.local_services[payload.provider].state='starting';
-    else if(!['audition','audition.catalog','bili.qr.cancel','doubao.qr.cancel','local_services.check'].includes(action))throw Error('Unexpected action '+action);
+    else if(!['audio.test','audition','audition.catalog','bili.qr.cancel','doubao.qr.cancel','local_services.check'].includes(action))throw Error('Unexpected action '+action);
     state.config_revision++;return {...structuredClone(state),result};
   });
   await page.addInitScript(()=>{
@@ -169,6 +169,10 @@ const waitForHost=async predicate=>{for(let attempt=0;attempt<100;attempt++){if(
     await page.locator('[data-action="settings.close"]').click();await refresh();await navigate('voices');
     assert.equal(await page.locator('.voice-empty').count(),1);await page.screenshot({path:path.join(output,'voices-empty.png')});
     checks.push('empty voices retains receive-only guidance and add entry');
+    const tone=page.locator('.voice-page-foot [data-action="audio.test"]');
+    assert.equal(await tone.count(),1);await tone.click();await waitForHost(()=>calls.some(call=>call.action==='audio.test'));
+    assert.deepEqual(calls.findLast(call=>call.action==='audio.test').payload,{});
+    checks.push('empty voices offers the local test tone without any voice or account');
     // Fresh onboarding runs through real application branches with no QR network requests.
     state.onboarding_done=false;state.setup={tts_enabled:false};state.account=null;state.preferences.appearance='dark';
     await page.setViewportSize({width:1040,height:740});await page.reload();await page.locator('[data-action="setup.start"]').waitFor();

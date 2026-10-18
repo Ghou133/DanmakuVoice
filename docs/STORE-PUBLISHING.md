@@ -52,6 +52,6 @@
 
 ## 截图维护
 
-截图应反映待提交构建的当前六分类设置、刊头／聚光主界面及深浅主题；旧引导或旧主页图片不能代表新版本。来源、构建及脱敏范围记在唯一的 [PROGRESS.md](../PROGRESS.md)，不把生成目录下的旧素材当成持续有效的证据。
+截图应反映待提交构建的水月主界面、设置抽屉、初次设置及晨雾／夜幕两套主题；旧控制坞、旧设置页或旧引导图片不能代表新版本。商店截图与说明文字不出现豆包、哔哩哔哩（含 B站、Bilibili、Doubao），见 [STORE-LISTING.md](STORE-LISTING.md)。来源、构建及脱敏范围记在唯一的 [PROGRESS.md](../PROGRESS.md)，不把生成目录下的旧素材当成持续有效的证据。
 
-`node scripts/test-ui-emotes-alias.cjs --capture-store --output <临时目录>` 可在装有 Playwright 与 Microsoft Edge 的开发环境生成离线页面对照；需要时设置 `NODE_PATH` 指向开发模块目录。该模式使用虚构用户名、房间及聊天，不登录、不合成、不上传，连接状态为未连接；它不能证明原生 WebView2、真实直播或商店签名包。实际商店截图与动画验收仍需对应构建运行时留存，不能由静态页面图替代。
+`node scripts/render-store-screenshots.cjs`（需要时设置 `NODE_PATH` 指向全局 Playwright）生成商店图和 README 图片，并检查每张图里没有上述名称。`node scripts/test-ui-emotes-alias.cjs --capture-store --output <临时目录>` 可生成另一组离线页面对照。该模式使用虚构用户名、房间及聊天，不登录、不合成、不上传，连接状态为未连接；它不能证明原生 WebView2、真实直播或商店签名包。实际商店截图与动画验收仍需对应构建运行时留存，不能由静态页面图替代。

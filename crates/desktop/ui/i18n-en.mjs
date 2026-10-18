@@ -1041,6 +1041,7 @@ OBS 没开时先自动启动	Launch OBS automatically when needed
 OBS 画布	OBS canvas
 OBS 高级	Advanced OBS settings
 TA 的声音	Their voice
+@ TA	@ Mention
 不读弹幕也能照常显示。	Messages still appear with speech turned off.
 之后的改动会自动同步到 OBS	Changes sync to OBS automatically
 二维码两分钟后会过期	The QR code expires in two minutes

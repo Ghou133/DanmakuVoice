@@ -54,6 +54,7 @@
 .voice-empty h2,.voice-add-intro h2 {font-family:var(--serif);font-weight:700;font-size:24px;letter-spacing:.06em;line-height:1.4;margin:0 0 12px}
 .voice-empty p,.voice-add-intro p {font-size:12.5px;line-height:1.8;color:var(--voice-dim)}
 .voice-page-foot {margin-top:auto;border-top:1px solid var(--voice-line);padding-top:16px;font-size:12px;line-height:1.7;color:var(--voice-dim)}
+.voice-page-foot.with-action {display:flex;align-items:center;justify-content:space-between;gap:12px}
 .voice-add-intro {padding:16px 0}
 .voice-service-row {width:100%;display:grid;grid-template-columns:42px 1fr 16px;gap:14px;align-items:center;text-align:left;background:transparent;border:0;border-bottom:1px solid var(--voice-line);padding:19px 0;color:var(--voice-ink)}
 .voice-service-row:hover {background:var(--drawer-fill)}

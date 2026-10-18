@@ -832,7 +832,11 @@ function lakeObservedStats(events) {
 }
 
 function lakeDuration(seconds) {
-  return seconds == null ? '' : `${Math.floor(seconds / 3600)} ${t('小时')} ${Math.floor(seconds % 3600 / 60)} ${t('分')}`;
+  if (seconds == null) return '';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  if (getLanguage() === 'en') return `${hours} ${hours === 1 ? 'hour' : 'hours'} ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
+  return `${hours} ${t('小时')} ${minutes} ${t('分')}`;
 }
 
 async function requestLakeHistory(archive, payload = {}) {
@@ -1914,7 +1918,7 @@ function renderViewerDrawer() {
   const mentionDisabled = !snapshot.account?.user_id || snapshot.network_disabled || !String(event.user_name || '').trim();
   const saidView = viewerSaidMarkup(event);
   const said = `<section class="viewer-section viewer-said" aria-label="${esc(t('收到的弹幕'))}">${saidView.html}</section>`;
-  layer.innerHTML = `<button type="button" class="viewer-scrim" data-action="viewer.close" aria-label="${esc(t('关闭观众卡片'))}"></button><aside class="viewer-sheet" role="dialog" aria-modal="true" aria-label="${esc(t('观众设置'))}"><header class="viewer-head">${viewerAvatar(event, true)}<div class="viewer-name"${validUid(event.user_id) ? ` title="UID ${esc(event.user_id)}"` : ''}>${esc(event.user_name || t('访客'))}</div><span class="viewer-uid">said ${saidView.count} tonight</span><div class="viewer-quick"><button type="button" class="viewer-quick-button" data-action="viewer.at"${mentionDisabled ? ' disabled' : ''}>@ TA</button></div></header><div class="viewer-body">${said}<section class="viewer-section viewer-voice-settings"><label class="viewer-alias-field" for="viewer-alias"><span>${esc(t('读作'))}</span><input id="viewer-alias" class="viewer-alias" maxlength="40" autocomplete="off" placeholder="${esc(event.user_name || t('访客'))}" value="${esc(alias)}"${String(event.user_name || '').trim() ? '' : ' disabled'}><button type="button" class="viewer-alias-preview" data-action="viewer.audition" aria-label="${esc(t('试听称呼'))}">▷</button></label><span class="viewer-settings-label">${esc(t('TA 的声音'))}</span><div id="viewer-voices" class="voice-chips" role="group" aria-label="${esc(t('观众声音'))}">${voiceMarkup}</div></section><section id="viewer-moderation" class="viewer-section"></section></div></aside>`;
+  layer.innerHTML = `<button type="button" class="viewer-scrim" data-action="viewer.close" aria-label="${esc(t('关闭观众卡片'))}"></button><aside class="viewer-sheet" role="dialog" aria-modal="true" aria-label="${esc(t('观众设置'))}"><header class="viewer-head">${viewerAvatar(event, true)}<div class="viewer-name"${validUid(event.user_id) ? ` title="UID ${esc(event.user_id)}"` : ''}>${esc(event.user_name || t('访客'))}</div><span class="viewer-uid">said ${saidView.count} tonight</span><div class="viewer-quick"><button type="button" class="viewer-quick-button" data-action="viewer.at"${mentionDisabled ? ' disabled' : ''}>${esc(t('@ TA'))}</button></div></header><div class="viewer-body">${said}<section class="viewer-section viewer-voice-settings"><label class="viewer-alias-field" for="viewer-alias"><span>${esc(t('读作'))}</span><input id="viewer-alias" class="viewer-alias" maxlength="40" autocomplete="off" placeholder="${esc(event.user_name || t('访客'))}" value="${esc(alias)}"${String(event.user_name || '').trim() ? '' : ' disabled'}><button type="button" class="viewer-alias-preview" data-action="viewer.audition" aria-label="${esc(t('试听称呼'))}">▷</button></label><span class="viewer-settings-label">${esc(t('TA 的声音'))}</span><div id="viewer-voices" class="voice-chips" role="group" aria-label="${esc(t('观众声音'))}">${voiceMarkup}</div></section><section id="viewer-moderation" class="viewer-section"></section></div></aside>`;
   markupCache.set(layer.querySelector('#viewer-voices'), voiceMarkup);
   markupCache.set(layer.querySelector('.viewer-said'), saidView.html);
   layer.hidden = false;
@@ -3748,7 +3752,7 @@ function renderVoicesSettings() {
   if (editor?.type === 'binding') return renderBindingEditor(editor.id);
   const presets = snapshot.presets || [];
   const preferred = presets.find(item => item.id === snapshot.rules?.default_preset_id);
-  if (!presets.length) return `<div class="lake-voices-page"><section class="voice-empty"><span class="voice-empty-line" aria-hidden="true"></span><h2>${esc(t('还没有声音'))}</h2><p>${esc(t('挑一个你喜欢的声音，让弹幕有声音。'))}</p>${button(t('添加声音'), 'voice.add', { class: 'primary' })}</section><p class="voice-page-foot">${esc(t('不读弹幕也能照常显示。'))}</p></div>`;
+  if (!presets.length) return `<div class="lake-voices-page"><section class="voice-empty"><span class="voice-empty-line" aria-hidden="true"></span><h2>${esc(t('还没有声音'))}</h2><p>${esc(t('挑一个你喜欢的声音，让弹幕有声音。'))}</p>${button(t('添加声音'), 'voice.add', { class: 'primary' })}</section><p class="voice-page-foot with-action"><span>${esc(t('不读弹幕也能照常显示。'))}</span>${button(t('播放测试音'), 'audio.test', { class: 'quiet' })}</p></div>`;
   return `<div class="lake-voices-page">${renderVoiceAudition(presets, preferred)}${renderVoiceManagement(presets, preferred)}</div>`;
 }
 function lakeVoiceCatalog(provider) {

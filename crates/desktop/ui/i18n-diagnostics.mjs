@@ -237,6 +237,7 @@ GPT-SoVITS 音色语言或分句方式无效	Invalid GPT-SoVITS voice language o
 音频管道中断：{0}	Audio pipe interrupted: {0}
 请先取消静音并提高音量，再测试声音	Unmute and increase the volume before testing sound
 请先取消静音或提高音量，再测试声音	Unmute or increase the volume before testing sound
+请先取消静音并调高主音量，再测试声音	Unmute and raise the volume before testing sound
 尚未检查本地服务	Local service not checked yet
 尚未配置本地服务目录	Local service folder not configured
 本应用启动的服务已停止	The service started by this app has stopped

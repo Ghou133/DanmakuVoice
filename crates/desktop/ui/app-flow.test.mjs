@@ -2355,6 +2355,18 @@ test('lake history count changes between English singular and plural on both sur
   assert.ok(nodes.get('#lake-deep-stats').innerHTML.includes('<span>句弹幕沉在湖里</span>'));
 });
 
+test('lake durations use English singular and plural hours and minutes', () => {
+  const duration = vm.runInContext('lakeDuration', appContext());
+  setLanguage('en');
+  assert.equal(duration(3600 + 60), '1 hour 1 minute');
+  assert.equal(duration(3600 + 24 * 60), '1 hour 24 minutes');
+  assert.equal(duration(2 * 3600 + 14 * 60 + 59), '2 hours 14 minutes');
+  assert.equal(duration(5 * 60), '0 hours 5 minutes');
+  assert.equal(duration(null), '');
+  setLanguage('zh-CN');
+  assert.equal(duration(3600 + 24 * 60), '1 小时 24 分');
+});
+
 
 test('lake visual-width table keeps short English and mixed captions on two balanced lines', () => {
   const render = vm.runInContext('lakeLettersHtml', appContext());
