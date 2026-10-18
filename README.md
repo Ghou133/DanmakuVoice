@@ -22,7 +22,7 @@
 
 |            |                                                              |
 | ---------- | ------------------------------------------------------------ |
-| **倒影朗读**   | 正在读的那一句留在地平线上，倒影跟着读到的字一起亮起。鼠标移到水面，刚读过的几句浮上来；往下滚潜进水下，翻看本场全部弹幕。 |
+| **倒影朗读**   | 正在读的那一句留在地平线上，倒影随播放进度逐字亮起。鼠标移到水面，刚读过的几句浮上来；往下滚潜进水下，翻看本场全部弹幕。 |
 | **声音随手换**  | 点右下角的声音名字，切换音色、开关播报，悬停先试听。名字下的水线就是音量，滚轮调节，点一下静音。 |
 | **多种声音**   | 豆包扫码即用；Fish Audio 填写 API Key；也可以连接自己部署的 dots.tts、GPT-SoVITS，服务没开时点一下就启动。 |
 | **观众专属**   | 点一下弹幕，设置这位观众的名字怎么读、用哪个声音，顺便看看 TA 今晚说过的话。 |
@@ -170,7 +170,7 @@ GitHub Actions 会在提交、PR 和版本标签上执行验证，生成商店�
 
 DanmakuVoice (超绝可爱弹幕姬) is a free, open-source Windows app that receives chat messages, gifts, Super Chats and memberships from a Bilibili live room and reads them aloud with the voice you choose. The line being read floats above a moonlit lake with its reflection below; past messages sink into the lake, one scroll away.
 
-- **Reflections** – the reflection lights up as each word is spoken. Hover over the water for the last few lines, or scroll down to browse every message from this session.
+- **Reflections** – the reflection lights up progressively with playback. Hover over the water for the last few lines, or scroll down to browse every message from this session.
 - **A new voice in one click** – click the voice name to switch voices or turn speech on and off. The waterline under it is the volume: scroll to adjust, click to mute.
 - **Many voices** – Doubao (sign in by QR code), Fish Audio (your own API key), or your self-hosted dots.tts and GPT-SoVITS, started with one click when they are off.
 - **Per-viewer voices** – click a message to set how a name is pronounced and which voice that viewer gets.

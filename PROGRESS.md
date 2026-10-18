@@ -1256,3 +1256,15 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
   - 顺带修复：后端静音时的报错“请先取消静音并调高主音量，再测试声音”与英文诊断表措辞不一致，英文界面会显示中文；`i18n-diagnostics.mjs` 补上原句。
   - 记录：`docs/UI-DESIGN.md` 声音一条补充空状态测试音。商店截图重新生成，英文截图检查新增 “@ TA”、“1 hours”、“1 minutes” 不得出现。
   - 验证（本机离线，全局 Playwright + 本机 Edge）：Node UI 单元测试 201/201；浏览器 `test-ui-lake-voices`（11 组）、`test-ui-localization`（10 个场景）、`test-ui-lake-redesign`（13）、`test-ui-moderation`（31）、`test-ui-lake`（21）、`test-ui-lake-settings` 通过。`test-ui-lake-round3` 首次在第 673 行失败：初次设置月亮滑动中途改窗口大小，`moving` 仍为 true，是动画时序检查，与本次改动无关；单独重跑 19/19 通过，记为时序不稳定。商店截图重新生成：20 张截图、24 张排版图通过。未运行 Rust、fmt、clippy 或完整回归；没有原生窗口或真实声卡验收。
+
+
+## 2026-10-18 0.3.3 / Store 1.3.3.0 发布准备
+
+用户明确授权将当前新版提交 Microsoft Store 并同步 GitHub，同时采用 Claude 已完成的中英文说明和展示图片。保留既有产品身份、公开资料与凭据边界，不改动其他项目。
+
+- 同步 Cargo、Tauri 与两个工作区包锁版本为 0.3.3，MSIX 映射为 1.3.3.0。GitHub 当前公开 main 是本分支祖先，发布使用现有历史，不重建或强推。独立 release 目录中的旧 EXE/ZIP 保留。
+- 采用 Claude 的中英文 README、6 张公开展示图和中英文各 9 张私有商店 PNG；公开商店字段继续不包含豆包、哔哩哔哩、B站、Bilibili、Doubao。英文短介绍缩为 166 字符；将逐字高亮准确描述为随播放进度亮起；审核源码链接填写 store-v1.3.3.0。重新生成 20 张原始图、24 张排版图，格式、尺寸、语言、禁用名称、页面错误和公开副本摘要检查通过。素材使用虚构资料与隔离浏览器 IPC，不代表真实账号、TTS 或 OBS 验收。
+- fmt、严格离线 Clippy、Node 201/201、Python 打包 28/28、桌面 Python shim 3/3 通过。Rust 原始桌面及引擎全量回归遇到 4 项 Windows Os 1314：创建符号链接夹具时当前令牌缺少 SeCreateSymbolicLinkPrivilege；未更改测试或系统权限，原始失败保留。仅筛除这 4 个确切测试的工作区回归为 541 通过、10 忽略、4 筛除。正式发布前仍须 GitHub Windows CI 原始不筛选测试通过。
+- 18 套浏览器原始回归中 17 套通过，包括 round3 的 19 组/64 图；received-personal-emotes 的 15 个功能检查已通过，但隔离网络断言检测到 Kaspersky 注入的 3 个被阻断 GET 而失败。原始日志和图片保留；支持的 Chromium 通道复核另行记录，不放宽断言或关闭安全软件。
+- 本轮证据位于 target/release-0.3.3-20261018/validation/：各命令日志及退出码、browser-suites.json、store-metadata-validation.json、public-source-scan.json。当前源码启发式扫描命中的 12 处同一格式密钥均为测试模块中的显式虚构测试值；私有生成目录、数据库与凭据不纳入发布。
+- 此记录时尚未构建正式包、推送 GitHub 或提交商店。后续必须核对干净提交的 EXE/审计包/完整源码/MSIX 配对、发布源码附件，并从 Partner Center 实际状态区分草稿、送审、认证与上架。商店签名包升级、SAC、真实声卡、账号、TTS 和 OBS 仍未完成验收。

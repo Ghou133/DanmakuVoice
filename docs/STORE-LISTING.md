@@ -25,7 +25,7 @@
 超绝可爱弹幕姬是一款免费开源的 Windows 弹幕语音播报工具。它接收受支持直播间的弹幕、礼物、醒目留言和上舰消息，按你定的规则用你选的声音读出来，让主播不用一直盯着屏幕也能接住每一条互动。
 
 【倒影朗读】
-正在读的那一句浮在湖面上，水里是它的倒影；读到哪个字，倒影就亮到哪个字。鼠标移到水面，刚读过的几句会浮上来；往下滚潜进水下，就能翻看本场的全部弹幕，礼物和醒目留言一眼就能找到。
+正在读的那一句浮在湖面上，水里是它的倒影；倒影随播放进度逐字亮起。鼠标移到水面，刚读过的几句会浮上来；往下滚潜进水下，就能翻看本场的全部弹幕，礼物和醒目留言一眼就能找到。
 
 【声音随手换】
 点右下角的声音名字，切换音色、开关播报，鼠标移上去可以先试听。名字下面那条水线就是音量，滚轮调节，点一下静音。
@@ -55,7 +55,7 @@
 ### 产品功能（每行一项）
 
 - 接收受支持直播间的弹幕、礼物、醒目留言和上舰消息
-- 正在读的弹幕倒映在湖面上，逐字点亮
+- 正在读的弹幕倒映在湖面上，随播放进度逐字点亮
 - 往下滚翻看本场全部弹幕
 - 点声音名字切换音色、开关播报，水线调音量
 - 接入支持的云端语音服务或自行部署的本地语音服务
@@ -73,7 +73,7 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 
 ### 版本新增内容
 
-- 全新“水月”界面：正在读的弹幕倒映在湖面上，读到哪个字亮到哪个字；往下滚可以翻看本场全部弹幕
+- 全新“水月”界面：正在读的弹幕倒映在湖面上，随播放进度逐字亮起；往下滚可以翻看本场全部弹幕
 - 点声音名字切换音色、开关播报；名字下的水线就是音量，滚轮调节、点一下静音
 - 设置改为浮在湖面上的抽屉，分为直播间、声音、OBS、记住的读法、通用和高级
 - 添加声音在一页完成；观众名字、正文用词和表情读法合并到“记住的读法”
@@ -82,7 +82,7 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 
 ### 截图说明（与截图依次对应）
 
-1. 把弹幕，读成声音。正在读的那一句浮在湖面上，读到哪个字，倒影就亮到哪个字。
+1. 把弹幕，读成声音。正在读的那一句浮在湖面上，倒影随播放进度逐字亮起。
 2. 换个声音，点一下就好。名字下面那条水线就是音量，滚轮一拨就好。
 3. 熟悉的观众，熟悉的声音。点一下弹幕，设置这位观众的名字怎么读、用哪个声音。
 4. 往下滚，翻看今晚。本场的弹幕都沉在湖里，礼物和醒目留言一眼就能找到。
@@ -108,7 +108,7 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 
 ### Short description
 
-Hear your live chat in the voice you love. The line being read is mirrored in a moonlit lake, regulars get their own pronunciation and voice, and an overlay puts your chat in OBS. Free, open source and ad-free.
+Hear live chat in the voice you love, mirrored in a moonlit lake. Give regulars their own pronunciation and voice, and put chat in OBS. Free, open source and ad-free.
 
 ### Description
 
@@ -117,7 +117,7 @@ Hear your live chat in the voice you love.
 DanmakuVoice (超绝可爱弹幕姬) is an independent, free, open-source text-to-speech companion for supported live rooms on Windows. It receives chat messages, gifts, Super Chats and memberships from a live room and reads them aloud using your rules and your chosen voice, so streamers can keep up with every viewer without watching the screen.
 
 REFLECTIONS
-The line being read floats above a lake, and its reflection lights up as each word is spoken. Hover over the water to bring up the last few lines; scroll down to dive in and browse every message from this session, with gifts and Super Chats easy to spot.
+The line being read floats above a lake, and its reflection lights up progressively with playback. Hover over the water to bring up the last few lines; scroll down to dive in and browse every message from this session, with gifts and Super Chats easy to spot.
 
 A NEW VOICE IN ONE CLICK
 Click the voice name in the corner to switch voices or turn speech on and off, and audition a voice before you pick it. The waterline under the name is the volume: scroll to adjust, click to mute.
@@ -147,7 +147,7 @@ DanmakuVoice is an independent third-party project. See the GitHub documentation
 ### Product features
 
 - Receives live chat, gifts, Super Chats and memberships from supported rooms
-- The line being read is mirrored in the lake and lights up word by word
+- The line being read is mirrored in the lake and lights up progressively with playback
 - Scroll down to browse every message from this session
 - Click the voice name to switch voices or turn speech off; scroll the waterline for volume
 - Supported cloud speech services or self-hosted speech services
@@ -165,7 +165,7 @@ danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 
 ### What's new in this version
 
-- A new lake design: the line being read is mirrored in the water and lights up word by word, and scrolling down browses every message from this session
+- A new lake design: the line being read is mirrored in the water and lights up progressively with playback, and scrolling down browses every message from this session
 - Click the voice name to switch voices or turn speech on and off; the waterline under it is the volume
 - Settings now open as a drawer over the lake: live room, voices, OBS, saved readings, general and advanced
 - Adding a voice takes one page, and viewer names, words and emoticon readings now share Saved readings
@@ -174,7 +174,7 @@ danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 
 ### Screenshot captions
 
-1. Hear your chat, read aloud. The line being read floats above the lake, and its reflection lights up as each word is spoken.
+1. Hear your chat, read aloud. The line being read floats above the lake, and its reflection lights up progressively with playback.
 2. A new voice in one click. The waterline beneath the voice name is the volume: just scroll.
 3. Every regular, their own voice. Click a message to set how a viewer's name is read and which voice reads them.
 4. Scroll down through tonight. Every message from this session rests in the lake; gifts and Super Chats stand out.
@@ -221,7 +221,7 @@ OBS features are optional. Settings > OBS connects to the user's own OBS WebSock
 Only runFullTrust is requested, matching the approved capability set. Windows manages Store app data virtualization. Store and portable builds do not promise a shared physical database or retention after uninstall. Package identity is unchanged. No old database is overwritten and no credentials are automatically imported.
 
 The submission includes FFmpeg (LGPL-2.1-or-later), original third-party license notices, bundled serif fonts with their copyright and SIL OFL 1.1 notices, and a link to the exact complete source archive. The application's own source is AGPL-3.0-only. Source and support: https://github.com/Ghou133/DanmakuVoice
-Corresponding complete source for package {package version} (app {app version}): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v{package version}
+Corresponding complete source for package 1.3.3.0 (app 0.3.3): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.3.0
 The exact source commit is recorded in the submission package's SUBMISSION-README.txt and in the source release. Publish and verify the matching source archive before submitting the package.
 
 This version redesigns the user interface. It does not add support for additional live platforms or speech providers and retains the generic search terms. This file prepares submission text; certification and publication require a separate Microsoft decision.

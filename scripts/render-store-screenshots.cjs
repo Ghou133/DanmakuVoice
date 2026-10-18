@@ -288,8 +288,8 @@ const scenes = [
 // Store order and captions; docs/STORE-LISTING.md repeats these captions.
 const shots = [
   ['01-reflection', {
-    'zh-CN': ['倒影朗读', '把弹幕，\n读成声音', '正在读的那一句浮在湖面上。读到哪个字，水里的倒影就亮到哪个字。'],
-    en: ['Reflections', 'Hear your chat,\nread aloud', 'The line being read floats above the lake, and its reflection lights up as each word is spoken.'] }],
+    'zh-CN': ['倒影朗读', '把弹幕，\n读成声音', '正在读的那一句浮在湖面上。水里的倒影随播放进度逐字亮起。'],
+    en: ['Reflections', 'Hear your chat,\nread aloud', 'The line being read floats above the lake, and its reflection lights up progressively with playback.'] }],
   ['02-voices', {
     'zh-CN': ['声音面板', '换个声音，\n点一下就好', '点右下角的声音名字，切换音色、开关播报。名字下面那条水线就是音量，滚轮一拨就好。'],
     en: ['Voice panel', 'A new voice\nin one click', 'Click the voice name to switch voices or turn speech on and off. The waterline beneath it is the volume: just scroll.'] }],
