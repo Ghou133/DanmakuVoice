@@ -216,10 +216,12 @@ The frontend applies the saved language immediately; the host also updates the w
 Changing `tts_enabled` keeps live reception/display; a speech-capable live session switches its speech gate without reconnecting. A receive-only session needs playback initialization when speech is first enabled. The visible chat is carried through required session replacement. Legacy FFmpeg path values are ignored and are absent from snapshots/exports.
 `snapshot.overlay` is dynamic: `{settings:OverlaySettings,running,port,url,error,clients:[{width,height}]}`.
 `OverlaySettings` is `{enabled:false,style:"card"|"spine",corner:"top_left"|"top_right"|"bottom_left"|"bottom_right",
-offset_x:-8192..8192,offset_y:-8192..8192,scale:0.5..2,vignette:0..1,title,tagline,show_danmaku,show_gift,show_super_chat,show_guard,
+offset_x:-8192..8192,offset_y:-8192..8192,scale:0.5..2,vignette:0..1,history_opacity:0.3..1,title,tagline,show_danmaku,show_gift,show_super_chat,show_guard,
 names:"none"|"special"|"all",merge_duplicates,linger_seconds:3..120,port,token}`. Defaults: spine, top left,
-scale 1, vignette 0.6, title `今晚的弹幕`, empty tagline (the page then uses its English default), names `special`,
-14 seconds, port 47823. Missing offsets default to zero. Offsets are integers in browser-source canvas pixels,
+scale 1, vignette 0.6, history_opacity 0.72, title `今晚的弹幕`, empty tagline (the page then uses its English default), names `special`,
+14 seconds, port 47823. Missing offsets and readability values take these defaults. Loading and saving force the spine style and
+14 seconds; since 2026-10-18 the vignette (shade depth) and `history_opacity` (opacity of the oldest spine line; the middle line sits
+at 1 − (1 − value)·3/7) are kept as the user set them and reach overlay pages in `config`. Offsets are integers in browser-source canvas pixels,
 positive right/down for all corners and independent of overlay scale; they move the whole overlay including Super Chat.
 The heading accepts 1–24 Unicode characters. The token is a 32-hex local address secret: it is in the snapshot so the settings page can
 copy the address (the page shows it masked) and is excluded from configuration export. `clients` are the browser

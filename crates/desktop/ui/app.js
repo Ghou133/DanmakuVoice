@@ -1,6 +1,6 @@
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, createSnapshotSequencer, truncateUtf16, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
+import { errorMessage, escapeHtml as esc, mergeSnapshot, headerIdentity, initial, identityColor, eventText, eventKeys, validUid, numericId, playbackIssue, runtimeIssue, liveConnectionView, snapshotPollingPolicy, createSnapshotSequencer, truncateUtf16, uiIsActive, safeQrUrl, safeMediaUrl, messageParts, soloEmote, playbackCaption, playbackFallbackNotice, startingStep, providerLabel, deviceValue, normalizedEvents, qrLabel, qrNeedsRoomFallback, audienceUsers, audienceDisplayCount, broadcastSessionSummary, createLakePresentationLedger } from './helpers.mjs';
 import { createAutosaveQueue } from './autosave.mjs';
 import { mountSelects, closeSelect, stripSelects } from './select.mjs';
 import { lakeSceneMarkup } from './lake-scene.mjs';
@@ -957,8 +957,9 @@ function renderLakeTranscript(events, keys) {
   const deep = document.querySelector('#lake-deep');
   if (deep) deep.hidden = !lakeDeep;
   const identity = index >= 0 ? JSON.stringify([featured, events[index].observed_at_ms]) : '';
-  const signature = JSON.stringify([identity, index >= 0 ? messageParts(events[index]) : null, keys.slice(-4), events.slice(-4).map(messageParts), scene, room?.title, broadcastAreaPath(snapshot.broadcast || {}, room), lakeSessionSummary, getLanguage(), viewerOpenIdentity]);
-  if (signature !== lakeTranscriptSignature) {
+  const signature = JSON.stringify([identity, index >= 0 ? messageParts(events[index]) : null, keys.slice(-4), events.slice(-4).map(messageParts), scene, room?.title, lakeObsTitle(), lakeSessionSummary, getLanguage(), viewerOpenIdentity]);
+  // Typing in the overlay title must not be replaced by the next redraw.
+  if (signature !== lakeTranscriptSignature && !lakeObsTitleEditing()) {
     for (const [key, node] of lakeMessageNodes) if (key !== featured) { node.remove(); lakeMessageNodes.delete(key); }
     current.querySelector('.lake-state')?.remove();
     if (index >= 0) {
@@ -988,7 +989,11 @@ function renderLakeTranscript(events, keys) {
     } else {
       const text = prepared ? lakeEnded ? t('今晚辛苦啦') : room.title || '' : 'waiting for the first word…';
       const title = lakeLettersHtml([{ type: 'text', text }]);
-      const kicker = prepared && !lakeEnded ? `<span class="lake-title-kicker">TONIGHT’S TITLE <em>— ${esc(broadcastAreaPath(snapshot.broadcast || {}, room))}</em></span>` : '';
+      // The kicker edits the OBS overlay title in place, so it can be set for
+      // tonight without opening settings. Without an overlay it is just a label.
+      const obsTitle = lakeObsTitle();
+      const obs = obsTitle ? ` <em>— OBS · <span class="lake-obs-title" data-lake-obs-title tabindex="0" role="textbox" aria-readonly="true" spellcheck="false" aria-label="${esc(t('OBS 叠加层主标题'))}" title="${esc(t('OBS 叠加层主标题'))}">${esc(obsTitle)}</span></em>` : '';
+      const kicker = prepared && !lakeEnded ? `<span class="lake-title-kicker">TONIGHT’S TITLE${obs}</span>` : '';
       current.innerHTML = `<div class="lake-state${prepared ? '' : ' lake-waiting'}">${kicker}<${prepared && !lakeEnded ? `button type="button" data-action="onair.info" title="${esc(t('改标题'))}"` : 'span'} class="lake-state-title lake-message-text" data-size="${title.size}">${prepared ? title.html : esc(text)}</${prepared && !lakeEnded ? 'button' : 'span'}></div>`;
     }
     const recent = keys.map((key, i) => [key, events[i]]).filter(([key]) => key !== featured).slice(-3).reverse();
@@ -2545,12 +2550,14 @@ function collectAutosave(form) {
   if (type === 'overlay') {
     const current = snapshot.overlay?.settings;
     if (!current) throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
-    const settings = { ...current, style: 'spine', vignette: .6, linger_seconds: 14 };
+    const settings = { ...current, style: 'spine', linger_seconds: 14 };
     for (const key of ['corner', 'title', 'tagline', 'names']) if (form.elements[key]) settings[key] = value(key);
-    for (const key of ['offset_x', 'offset_y', 'scale']) if (form.elements[key]) settings[key] = number(key);
+    for (const key of ['offset_x', 'offset_y', 'scale', 'vignette', 'history_opacity']) if (form.elements[key]) settings[key] = number(key);
     for (const key of ['enabled', 'show_danmaku', 'show_gift', 'show_super_chat', 'show_guard', 'merge_duplicates']) if (form.elements[key]) settings[key] = checked(key);
     if (!settings.title || [...settings.title].length > 24 || /[\u0000-\u001f\u007f-\u009f]/u.test(settings.title)) throw new Error(t('请填写 1 到 24 字的叠加层主标题'));
     if (![settings.offset_x, settings.offset_y].every(value => Number.isInteger(value) && Math.abs(value) <= 8192)) throw new Error(t('位置偏移需为 -8192 到 8192 之间的整数'));
+    // Absent readability values keep the stored or default ones (Rust fills them).
+    for (const [key, min] of [['vignette', 0], ['history_opacity', .3]]) if (settings[key] != null && !(settings[key] >= min && settings[key] <= 1)) throw new Error(t('暂时无法保存此项设置，请重新打开页面'));
     if (!Number.isInteger(settings.linger_seconds) || settings.linger_seconds < 3 || settings.linger_seconds > 120) throw new Error(t('停留时间需在 3 到 120 秒之间'));
     return { action: 'overlay.save', payload: { settings } };
   }
@@ -2983,6 +2990,33 @@ function syncBroadcastAccount() {
     settingsBitrateExpanded = false;
   }
   return account;
+}
+
+// The OBS overlay title shown in the main screen's title kicker, once the
+// overlay is in use.
+function lakeObsTitle() {
+  const settings = snapshot.overlay?.settings;
+  return settings?.enabled ? settings.title || t('今晚的弹幕') : '';
+}
+
+function lakeObsTitleEditing() { return !!document.querySelector('[data-lake-obs-title][contenteditable="plaintext-only"]'); }
+
+function beginLakeObsTitle(node) {
+  if (node.isContentEditable) return;
+  node.dataset.original = node.textContent; node.contentEditable = 'plaintext-only'; node.setAttribute('aria-readonly', 'false'); node.focus();
+  const range = document.createRange(); range.selectNodeContents(node); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+}
+
+async function endLakeObsTitle(node) {
+  const original = node.dataset.original, cancelled = !!node.dataset.cancelled;
+  const value = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+  node.contentEditable = 'false'; node.setAttribute('aria-readonly', 'true'); delete node.dataset.original; delete node.dataset.cancelled;
+  const settings = snapshot.overlay?.settings;
+  const redraw = () => { lakeTranscriptSignature = ''; renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); };
+  if (cancelled || !settings || value === original) { node.textContent = original; return redraw(); }
+  if (!value || [...value].length > 24 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) { node.textContent = original; showToast(t('请填写 1 到 24 字的叠加层主标题'), true); return redraw(); }
+  try { await command('overlay.title.save', { title: value }); }
+  finally { redraw(); }
 }
 
 function broadcastAreaPath(view = snapshot.broadcast || {}, room = view.room) {
@@ -3669,7 +3703,7 @@ async function addOverlayToObs() {
   if (!await flushAutosaves()) return;
   const settings = snapshot.overlay?.settings;
   if (!settings) return;
-  if (!settings.enabled) await command('overlay.save', { settings: { ...settings, enabled: true, style: 'spine', vignette: .6, linger_seconds: 14 } }, { quiet: true });
+  if (!settings.enabled) await command('overlay.save', { settings: { ...settings, enabled: true, style: 'spine', linger_seconds: 14 } }, { quiet: true });
   const placed = await runObs('overlay', 'obs.overlay.add');
   if (!placed) return;
   const where = `“${placed.scene}” · ${placed.width} × ${placed.height}`;
@@ -4816,7 +4850,7 @@ function renderOverlayPanel() {
   if (!s) return empty(t('桌面连接不可用。'));
   const hidden = ['corner', 'offset_x', 'offset_y', 'scale', 'title', 'tagline'].map(name => `<input type="hidden" name="${name}" value="${esc(s[name] ?? (name.startsWith('offset_') ? 0 : ''))}">`).join('');
   const edit = name => `data-ovp-edit="${name}" tabindex="0" role="textbox" aria-label="${esc(t(name === 'title' ? '双击编辑主标题' : '双击编辑副标题'))}" aria-readonly="true" spellcheck="false" title="${esc(t('双击文字编辑，回车保存'))}"`;
-  return `<form data-form="overlay" class="lake-obs-preview" novalidate>${hidden}<div class="lake-obs-binding"><span class="lake-obs-link" aria-hidden="true"><i></i><b></b><i></i></span><span data-overlay-status-text></span><small data-overlay-binding-detail></small>${button(t('添加到 OBS'), 'overlay.obs_add', { class: 'primary', icon: 'plus' })}${button(t('打开 OBS'), 'lake.obs.launch', { class: 'primary', icon: 'play' })}${button(t('重新连接'), 'lake.obs.connect', { class: 'quiet' })}</div><div class="lake-obs-preview-frame"><div class="ovp lake-obs-canvas" data-style="spine" data-corner="${esc(s.corner)}" data-backdrop="dark"><div class="ovp-stage"><svg class="lake-obs-scene" viewBox="0 0 640 360" preserveAspectRatio="none" aria-hidden="true"><path d="M0 360V250C60 236 110 214 170 222C230 230 260 200 320 196C380 192 420 222 480 226C540 230 590 208 640 214V360Z" fill="#151326"></path><path d="M0 360V292C80 280 150 300 230 290C320 278 380 262 460 272C540 282 600 290 640 284V360Z" fill="#0c0b15"></path></svg><i class="lake-obs-guide-x" hidden></i><i class="lake-obs-guide-y" hidden></i><div class="lake-obs-superchat" data-ovp-superchat></div><div class="ovp-block" data-ovp-drag tabindex="0" role="group" aria-label="${esc(t('拖动摆放叠加层，也可用方向键微调'))}"><i class="ovp-vig"></i><i class="ovp-spine"></i><div class="ovp-mast"><div class="ovp-kicker"><i class="ovp-dot"></i><span class="ovp-live">LIVE</span><span class="ovp-sep">·</span><span data-ovp-day></span><span class="ovp-time" data-ovp-time></span></div><div class="ovp-title" data-ovp-title ${edit('title')}></div><div class="ovp-tagrow"><i class="ovp-rule"></i><span class="ovp-tagline" data-ovp-tagline ${edit('tagline')}></span></div></div><div class="ovp-list" data-ovp-items></div><button type="button" class="lake-obs-resize" data-ovp-resize tabindex="0" aria-label="${esc(t('拖动缩放，也可用方向键调整大小'))}"></button></div></div></div></div><div class="lake-obs-preview-foot"><span>${esc(t('拖动摆放，拖右下角缩放，靠近四角会自动贴合'))}</span><span class="lake-obs-canvas-size">${esc(t('OBS 画布'))} <em data-ovp-size></em></span><i aria-hidden="true"></i><button type="button" data-action="lake.obs.advanced">${esc(t('高级'))}${icon('arrow')}</button></div>${autoStatus()}</form>`;
+  return `<form data-form="overlay" class="lake-obs-preview" novalidate>${hidden}<div class="lake-obs-binding"><span class="lake-obs-link" aria-hidden="true"><i></i><b></b><i></i></span><span data-overlay-status-text></span><small data-overlay-binding-detail></small>${button(t('添加到 OBS'), 'overlay.obs_add', { class: 'primary', icon: 'plus' })}${button(t('打开 OBS'), 'lake.obs.launch', { class: 'primary', icon: 'play' })}${button(t('重新连接'), 'lake.obs.connect', { class: 'quiet' })}</div><div class="lake-obs-preview-frame"><div class="ovp lake-obs-canvas" data-style="spine" data-corner="${esc(s.corner)}" data-backdrop="dark"><div class="ovp-stage"><svg class="lake-obs-scene" viewBox="0 0 640 360" preserveAspectRatio="none" aria-hidden="true"><path d="M0 360V250C60 236 110 214 170 222C230 230 260 200 320 196C380 192 420 222 480 226C540 230 590 208 640 214V360Z" fill="#151326"></path><path d="M0 360V292C80 280 150 300 230 290C320 278 380 262 460 272C540 282 600 290 640 284V360Z" fill="#0c0b15"></path></svg><i class="lake-obs-guide-x" hidden></i><i class="lake-obs-guide-y" hidden></i><div class="lake-obs-superchat" data-ovp-superchat></div><div class="ovp-block" data-ovp-drag tabindex="0" role="group" aria-label="${esc(t('拖动摆放叠加层，也可用方向键微调'))}"><i class="ovp-vig"></i><i class="ovp-spine"></i><div class="ovp-mast"><div class="ovp-kicker"><i class="ovp-dot"></i><span class="ovp-live">LIVE</span><span class="ovp-sep">·</span><span data-ovp-day></span><span class="ovp-time" data-ovp-time></span></div><div class="ovp-title" data-ovp-title ${edit('title')}></div><div class="ovp-tagrow"><i class="ovp-rule"></i><span class="ovp-tagline" data-ovp-tagline ${edit('tagline')}></span></div></div><div class="ovp-list" data-ovp-items></div><button type="button" class="lake-obs-resize" data-ovp-resize tabindex="0" aria-label="${esc(t('拖动缩放，也可用方向键调整大小'))}"></button></div></div></div></div><div class="lake-obs-preview-foot"><span>${esc(t('拖动摆放，拖右下角缩放，靠近四角会自动贴合'))}</span><span class="lake-obs-canvas-size">${esc(t('OBS 画布'))} <em data-ovp-size></em></span><i aria-hidden="true"></i><button type="button" data-action="lake.obs.advanced">${esc(t('高级'))}${icon('arrow')}</button></div><div class="lake-obs-looks">${lakeObsLook('vignette', t('暗角深浅'), s.vignette ?? .6, 0, t('在亮的游戏画面上调深一些，文字更清楚。'))}${lakeObsLook('history_opacity', t('历史弹幕清晰度'), s.history_opacity ?? .72, .3, t('上面几条旧弹幕的清楚程度'))}</div>${autoStatus()}</form>`;
 }
 
 function updateOverlayStatus() {
@@ -4854,6 +4888,13 @@ function updateOverlayStatus() {
   updateOverlayPreview();
 }
 
+// Readability under the preview: how dark the shade behind the corner is and
+// how clearly the older lines stay. Both apply to OBS as they move.
+function lakeObsLook(name, label, value, min, tip) {
+  const number = Math.min(1, Math.max(min, Number(value)));
+  return `<label class="lake-obs-option-row lake-obs-look" title="${esc(tip)}"><span>${esc(label)}</span><input type="range" name="${name}" min="${min}" max="1" step="0.01" value="${number}" style="--fill:${100 * (number - min) / (1 - min)}%"><output data-ovp-out="${name}">${Math.round(number * 100)}%</output></label>`;
+}
+
 function lakeOverlayItems() {
   const feed = snapshot.overlay?.preview || {};
   const source = feed.items || [];
@@ -4876,7 +4917,17 @@ function updateOverlayPreview() {
   const field = name => form.elements[name];
   const scale = Math.min(2, Math.max(.5, Number(field('scale')?.value) || 1));
   frame.dataset.style = 'spine'; frame.dataset.corner = field('corner')?.value || 'top_left';
-  frame.style.setProperty('--ovp-scale', String(scale)); frame.style.setProperty('--ovp-vig', '.6');
+  const look = (name, min, fallback) => { const value = Number(field(name)?.value); return Number.isFinite(value) ? Math.min(1, Math.max(min, value)) : fallback; };
+  const vignette = look('vignette', 0, .6), history = look('history_opacity', .3, .72);
+  frame.style.setProperty('--ovp-scale', String(scale)); frame.style.setProperty('--ovp-vig', String(vignette));
+  frame.style.setProperty('--ovp-vig-boost', String(Math.round(Math.max(0, (vignette - .6) / .4) * 1000) / 1000));
+  // Same fade as the overlay page: the oldest line at the chosen opacity, the one between closer to full.
+  frame.style.setProperty('--ovp-near', String(Math.round((1 - (1 - history) * 3 / 7) * 1000) / 1000)); frame.style.setProperty('--ovp-old', String(history));
+  for (const [name, value, min] of [['vignette', vignette, 0], ['history_opacity', history, .3]]) {
+    const out = form.querySelector(`[data-ovp-out="${name}"]`), label = `${Math.round(value * 100)}%`;
+    if (out && out.textContent !== label) out.textContent = label;
+    field(name)?.style.setProperty('--fill', `${100 * (value - min) / (1 - min)}%`);
+  }
   const size = overlayPreviewSize();
   frame.style.setProperty('--ovp-ratio', `${size.width} / ${size.height}`);
   frame.style.setProperty('--ovp-aspect', String(size.width / size.height));
@@ -4893,7 +4944,9 @@ function updateOverlayPreview() {
     const progress = reading ? Math.min(100, 100 * (Number(current.played_ms) || 0) / Math.max(Number(current.queued_ms) || 0, 500)) : 100;
     const event = { ...item, gift_name: item.gift, guard_name: item.guard, user_name: item.name, avatar_url: item.avatar, is_bilibili_emoticon: item.sticker };
     const avatar = safeMediaUrl(item.avatar);
-    return `<div class="ovp-item ${reading || index === ordinary.length - 1 ? 'spot' : index === ordinary.length - 2 ? 'recent' : 'older'}${item.kind !== 'danmaku' ? ' special' : ''}"><span class="ovp-av">${avatar ? `<img src="${esc(avatar)}" alt="" referrerpolicy="no-referrer">` : '<i class="ovp-face"></i>'}</span><span class="ovp-text">${item.name ? `<span class="ovp-name">${esc(item.name)}</span>` : ''}<span class="ovp-live-words${reading ? ' reading' : ''}" style="--read:${progress}%">${renderChatBody(event)}</span>${item.count > 1 ? `<small class="ovp-repeat">×${item.count}</small>` : ''}</span></div>`;
+    const solo = soloEmote(event);
+    const body = solo ? `<img class="message-emote ovp-sticker" src="${esc(solo.url)}" alt="" aria-label="${esc(solo.text)}" loading="lazy" referrerpolicy="no-referrer">` : renderChatBody(event);
+    return `<div class="ovp-item ${reading || index === ordinary.length - 1 ? 'spot' : index === ordinary.length - 2 ? 'recent' : 'older'}${item.kind !== 'danmaku' ? ' special' : ''}${solo ? ' solo' : ''}"><span class="ovp-av">${avatar ? `<img src="${esc(avatar)}" alt="" referrerpolicy="no-referrer">` : '<i class="ovp-face"></i>'}</span><span class="ovp-text">${item.name ? `<span class="ovp-name">${esc(item.name)}</span>` : ''}<span class="ovp-live-words${reading ? ' reading' : ''}" style="--read:${progress}%">${body}</span>${item.count > 1 ? `<small class="ovp-repeat">×${item.count}</small>` : ''}</span></div>`;
   };
   const list = form.querySelector('[data-ovp-items]');
   const markup = ordinary.length ? ordinary.map(renderItem).join('') : `<span class="lake-obs-waiting">waiting for the first word…</span>`;
@@ -6200,6 +6253,25 @@ document.addEventListener('keydown', event => {
   if (queuePanel && !queuePanel.hidden) { closeQueuePanel(true); return; }
   const onAirPanel = document.querySelector('#onair-panel');
   if (onAirPanel && !onAirPanel.hidden) void handleAction('onair.close').then(updateLakePopScrim).catch(showError);
+});
+
+// The overlay title in the main screen's kicker: click or Enter edits it,
+// Enter or leaving saves, Escape puts it back.
+document.addEventListener('click', event => {
+  const node = event.target.closest?.('[data-lake-obs-title]');
+  if (node) beginLakeObsTitle(node);
+});
+document.addEventListener('keydown', event => {
+  const node = event.target.closest?.('[data-lake-obs-title]');
+  if (!node || !['Enter', 'Escape'].includes(event.key) || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault(); event.stopPropagation();
+  if (!node.isContentEditable) { if (event.key === 'Enter') beginLakeObsTitle(node); return; }
+  if (event.key === 'Escape') node.dataset.cancelled = 'true';
+  node.blur();
+}, true);
+document.addEventListener('focusout', event => {
+  const node = event.target.closest?.('[data-lake-obs-title]');
+  if (node?.isContentEditable) void endLakeObsTitle(node).catch(showError);
 });
 
 document.addEventListener('error', event => {

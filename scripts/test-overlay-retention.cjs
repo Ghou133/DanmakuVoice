@@ -28,9 +28,11 @@ async function run() {
   // behind the lit text, brighter history rows) and thread-led arrival (light
   // pours down to the socket, which blooms into the avatar, and a branch of
   // light writes the line out; the idle light only runs at rest) and the title
-  // rule as a branch of the thread that the idle light runs into. Any further
-  // artwork change must be reviewed and re-pinned deliberately.
-  assert.equal(hash(section(html, '<style>', '</style>')), 'fa32c10df642dfa2cda579e9fc1ef40e15017193ac98b7fe8b16a91863fae327', 'overlay CSS differs from the reviewed spine redesign');
+  // rule as a branch of the thread that the idle light runs into, and the
+  // 2026-10-18 lone-emote line (the emote alone, sized by its place) and the
+  // shade's stronger range past its default. Any further artwork change must
+  // be reviewed and re-pinned deliberately.
+  assert.equal(hash(section(html, '<style>', '</style>')), '9911f4137ff780c24fdb150dd003b929bb7cde5b1742e7973294d9cf527ed0f4', 'overlay CSS differs from the reviewed spine redesign');
   assert.equal(hash(section(html, '<body>', '<script>')), 'a21359d8e025b3dfc27c347c5b41eaf9691c37ab88b2ba5653990a0e7d5ffd50', 'overlay DOM differs from the reviewed spine redesign');
   checks.push({name:'overlay artwork matches the reviewed 2026-10-14 spine redesign',passed:true});
   let opening = {instance:'fictional-app',session:0,heartbeat_ms:15000,config:{style:'spine',linger_seconds:14},status:{connection:'connected',tts:true,words:4},items:[1,2,3,4].map(seq=>item(seq,seq)),reading:null};
@@ -115,6 +117,15 @@ async function run() {
       // the halo must sit behind the glyphs.
       assert.deepEqual(await rows().locator('.lit').evaluateAll(nodes=>nodes.map(el=>getComputedStyle(el).textShadow)),['none','none','none']);
       assert.ok((await rows().locator('.text').evaluateAll(nodes=>nodes.map(el=>getComputedStyle(el).filter))).every(f=>f.startsWith('drop-shadow(')),'spine text keeps its halo behind the glyphs');
+    });
+    await check('the shade and older-line clarity chosen by the streamer reach the page; defaults keep the reviewed look',async()=>{
+      const look=()=>page.evaluate(()=>[getComputedStyle(document.documentElement).getPropertyValue('--vig').trim(),getComputedStyle(document.documentElement).getPropertyValue('--vig-boost').trim(),...[...document.querySelectorAll('#list .item:not(.out)')].map(el=>getComputedStyle(el).opacity)]);
+      await emit('config',{vignette:1,history_opacity:1});
+      assert.deepEqual(await look(),['1','1','1','1','1']);
+      await emit('config',{vignette:.3,history_opacity:.3});
+      assert.deepEqual(await look(),['0.3','0','0.3','0.7','1']);
+      await emit('config',{vignette:.6,history_opacity:.72});
+      assert.deepEqual(await look(),['0.6','0','0.72','0.88','1']);
     });
     await check('pixel offsets move the title, chat and Super Chat equally across corners, scales and canvas sizes',async()=>{
       // A separate context keeps resize-triggered SSE reconnects and its clock
@@ -412,6 +423,34 @@ async function run() {
       assert.equal(await settled.locator('.text').evaluate(el=>getComputedStyle(el).fontSize),'28px');
       assert.equal(await normal.locator('#list .item:not(.out)').count(),3);
       await normalContext.close();
+    });
+    await check('a line that is one emote shows the emote alone, sized by its place, with its count at its foot',async()=>{
+      // B站 sticker or a single small emote alike; mixed text keeps its emotes inline.
+      const emote=(seq,message,text,large)=>({...item(seq,null,Date.now()),message,emotes:[{text,url:`https://i0.hdslb.com/bfs/emote/fictional-${seq}.png`,large}],sticker:large});
+      const saved=opening;
+      opening={...saved,instance:'fictional-emote-app',items:[emote(51,'[天使]','[天使]',true),item(52,null,Date.now()),emote(53,' [dog] ','[dog]',false)]};
+      const emoteContext=await browser.newContext({viewport:{width:1920,height:1080},reducedMotion:'reduce'});
+      await emoteContext.route('**/*',route=>route.request().url().startsWith(origin+'/')?route.continue():route.abort());
+      const page=await emoteContext.newPage();page.on('pageerror',error=>errors.push(error.message));
+      await page.goto(`${origin}/overlay?token=fictional-emote-token`);await page.locator('#ov.ready').waitFor();
+      opening=saved;
+      const emit=(event,data)=>page.evaluate(({event,data})=>source.dispatchEvent(new MessageEvent(event,{data:JSON.stringify(data)})),{event,data});
+      const rows=page.locator('#list .item:not(.out)');
+      // Offline the images are refused, so each lone emote keeps its box as a graphic fallback.
+      await page.waitForFunction(()=>document.querySelectorAll('#list .sticker.emote-unavailable').length===2);
+      const lines=()=>rows.evaluateAll(nodes=>nodes.map(el=>[el.querySelector('.text').classList.contains('solo'),el.querySelector('.lit').textContent,el.querySelector('.sticker')?.getAttribute('aria-label')??null,el.querySelector('.sticker')?getComputedStyle(el.querySelector('.sticker')).height:null]));
+      assert.deepEqual(await lines(),[[true,'','[天使]','44px'],[false,'第52条弹幕',null,null],[true,'','[dog]','88px']]);
+      assert.deepEqual(await rows.locator('.sticker').evaluateAll(nodes=>nodes.map(el=>getComputedStyle(el).width)),['44px','88px']);
+      await emit('item',emote(54,'[dog]','[dog]',false));
+      await page.waitForFunction(()=>[...document.querySelectorAll('#list .item:not(.out) .count')].some(el=>el.textContent==='×2'));
+      const foot=await rows.last().evaluate(el=>{const s=el.querySelector('.sticker').getBoundingClientRect(),c=el.querySelector('.count').getBoundingClientRect();return {beside:c.left>=s.right,gap:Math.round(s.bottom-c.bottom)};});
+      assert.deepEqual(foot,{beside:true,gap:6},'the repeat count sits at the emote\'s foot, not below it');
+      await emit('item',emote(55,'好[天使]','[天使]',false));
+      await page.waitForFunction(()=>[...document.querySelectorAll('#list .item:not(.out)')].pop()?.querySelector('.lit')?.textContent==='好');
+      assert.deepEqual(await lines(),[[false,'第52条弹幕',null,null],[true,'','[dog]','56px'],[false,'好',null,null]]);
+      assert.equal(await rows.last().locator('.emote').count(),1);
+      await page.screenshot({path:path.join(out,'lone-emote.png'),clip:{x:0,y:0,width:900,height:640}});
+      await emoteContext.close();
     });
     assert.deepEqual(errors,[]);
     await fs.writeFile(path.join(out,'results.json'),JSON.stringify({passed:true,checks,errors,requests,pageSha256:hash(html),cssSha256:hash(section(html,'<style>','</style>')),productionAccounts:false,nativeOBS:false},null,2));

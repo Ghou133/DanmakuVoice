@@ -1798,14 +1798,17 @@ test('overlay settings render connection, placement and advanced without retired
   assert.match(html, /type="hidden" name="title" value="今晚的弹幕"/);
   assert.match(html, /type="hidden" name="offset_x" value="0"/);
   assert.match(html, /type="hidden" name="offset_y" value="0"/);
-  assert.doesNotMatch(html, /data-action="overlay\.(?:copy|test)"|name="(?:style|vignette|linger_seconds)"|实验/);
+  assert.doesNotMatch(html, /data-action="overlay\.(?:copy|test)"|name="(?:style|linger_seconds)"|实验/);
+  // 2026-10-18: readability is the streamer's again, under the preview rather than in 高级.
+  assert.match(html, /type="range" name="vignette" min="0" max="1" step="0.01" value="0.6000000238418579"/);
+  assert.match(html, /type="range" name="history_opacity" min="0.3" max="1" step="0.01" value="0.72"/);
   assert.doesNotMatch(html, /0123456789abcdef0123456789abcdef/);
   assert.equal(vm.runInContext('isLakeObsWide()', context), true);
   const advanced = vm.runInContext("lakeObsPage = 'advanced'; renderSettingsPage()", context);
   assert.match(advanced, /data-form="obs-link"/);
   assert.match(advanced, /name="names" value="special" checked/);
   assert.match(advanced, /name="show_guard" value="on"/);
-  assert.doesNotMatch(advanced, /data-action="overlay\.token\.reset"|lake-obs-advanced-foot/);
+  assert.doesNotMatch(advanced, /data-action="overlay\.token\.reset"|lake-obs-advanced-foot|name="(?:vignette|history_opacity)"/);
   assert.equal(vm.runInContext('isLakeObsWide()', context), false);
   assert.equal(vm.runInContext('overlayPreviewSize().width', context), 3840);
 });
@@ -1843,7 +1846,16 @@ test('overlay partial autosave preserves source identity and unrelated choices w
   context.overlayForm = { dataset: { form: 'overlay' }, fields, elements: Object.fromEntries(Object.keys(fields).map(key => [key, {}])), checkValidity: () => true };
   const envelope = vm.runInContext('collectAutosave(overlayForm)', context);
   assert.equal(envelope.action, 'overlay.save');
-  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.settings)), { ...context.overlay.settings, style: 'spine', corner: 'bottom_left', offset_x: -37, offset_y: 121, scale: 1.25, vignette: .6, title: '深夜电台', tagline: 'one more round.', linger_seconds: 14 });
+  // The stored shade passes through untouched; it is no longer pinned to 0.6.
+  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.settings)), { ...context.overlay.settings, style: 'spine', corner: 'bottom_left', offset_x: -37, offset_y: 121, scale: 1.25, title: '深夜电台', tagline: 'one more round.', linger_seconds: 14 });
+  for (const [vignette, history, ok] of [['1', '0.3', true], ['0', '1', true], ['1.01', '0.72', false], ['0.6', '0.29', false]]) {
+    context.overlayForm.fields = { ...fields, vignette, history_opacity: history };
+    context.overlayForm.elements = Object.fromEntries(Object.keys(context.overlayForm.fields).map(key => [key, {}]));
+    if (ok) assert.deepEqual(['vignette', 'history_opacity'].map(key => vm.runInContext('collectAutosave(overlayForm)', context).payload.settings[key]), [Number(vignette), Number(history)]);
+    else assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context));
+  }
+  context.overlayForm.fields = fields;
+  context.overlayForm.elements = Object.fromEntries(Object.keys(fields).map(key => [key, {}]));
   fields.title = '  ';
   assert.throws(() => vm.runInContext('collectAutosave(overlayForm)', context), /主标题/);
   for (const invalid of ['字'.repeat(25), '坏\u0085标题']) {

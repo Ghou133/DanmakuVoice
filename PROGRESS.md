@@ -1283,3 +1283,39 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - 中英文说明、短介绍、更新说明、各 12 项功能、各 9 张 1920×1080 PNG 及九条对应标题、CurePrism 版权与开发者字段已保存并重新加载逐项比对。18 张图片在页面内部计算完整 data URL 长度与 FNV-1a 校验值，按语言及 01–09 顺序全部匹配本地原文件；页面图片均加载完成。初次导出的大 data URL 被工具限长而产生的截断 PNG 保留为失败材料，未用作像素证据。两套既有七个通用搜索词、免费价格与市场保持原配置。
 - 审核说明已保存并重新加载核验，含新的“设置 → 声音”空状态测试音路径、权限复核、精确源码提交/下载链接/摘要；不含开发者登录凭据。后台实际回执为 **正在认证更新：提交完成、预处理进行中，认证与发布未开始**，且显示“产品在通过认证后立即开始发布”。这不表示认证通过或 1.3.3.0 已上架；商店当前线上版本仍是先前 Submission 3。
 - 本轮证据保存在 `target/release-0.3.3-20261018/`：`ci-39106033309-success.log`、`ci-39106033309-summary.json`、`packaging-results.json`、`store-permission-recheck.json`、`github-publication-result.json`、`store-upload-proof-validation.json`、`store-submission4-confirmation.txt` 与 `store-submission4-proof.jpg`。商店签名安装/升级、SAC、真实声卡、直播账号、TTS 与 OBS 在线验收仍未完成，不由构建和送审替代。
+
+
+## 2026-10-18 商店版任务栏蓝框原因核查
+
+用户要求查明任务栏标志有蓝框、应用自绘标题栏没有的原因；本轮仅调查与记录，未修改图标、打包脚本、已安装商店包或运行中的应用。
+
+- 当前运行进程来自 WindowsApps 的商店版 1.3.3.0（CurePirsm.334999D231AD4_srm51y1gxbpqm!App）。已安装 AppxManifest 与源码 scripts/package_msix.py 一致，VisualElements 指向 Assets/Square44x44Logo.png，BackgroundColor 为 transparent；实际 Assets 仅含 StoreLogo、Square44x44Logo、Square150x150Logo 三张 PNG，没有 targetsize、altform-unplated 或 altform-lightunplated 资源。
+- 用户截图蓝框为 #0078D4，共 368 像素，范围 x=26..73、y=12..59；恰好是 48×48 外框减去 44×44 内部，即四边 2px。Shell 应用属性 System.Tile.Background 实际为 4292114432（0xFFD47800，RGB #0078D4），与截图一致；System.Tile.SmallLogoPath 指向该 44px 包资源。已安装 44px PNG 与源码 SHA-256 一致。
+- UI 的 logo.png、包内 44px PNG 以及 ICO 全部九种尺寸均无 #0078D4 像素。标题栏由 index.html 的 logo.png 和 lake.css 的 5px 圆角绘制；原生窗口 main.rs 的 apply_window_icons 仅加载 EXE 图标并设置 WM_SETICON，没有绘框。IShellItemImageFactory 的 ICONONLY 输出同样只有原始头像、没有蓝框；该接口不模拟任务栏的底板合成，不能作为修复验收。
+- 结论：证据定位到 MSIX 图标资源缺项造成 Windows Shell 补入强调色底板，蓝色在头像周围露出；自绘标题栏使用独立的前端图片路径，因此显示正常。Microsoft 官方 app-icon-construction 文档明确说明缺少 targetsize/altform-unplated 会使任务栏和开始菜单出现额外 backplate。后续修复应补齐 Square44x44Logo.targetsize-N_altform-unplated.png 与浅色主题 lightunplated 等资源，并确保配对源码和打包路径都收录，随后在实际安装包的任务栏验证。
+- 证据保存在 target/taskbar-icon-diagnostic-20261018/：installed-package.json、installed-AppxManifest.xml、shell-properties.json、diagnostic-summary.json、shell-icon-summary.json 和五种尺寸的 Shell 原图。未构建修正版、未安装或重启进程、未运行回归或作发布声明，未提交或推送。
+
+
+## 2026-10-18 OBS 单表情、开播前改叠加层主标题、恢复暗角与历史弹幕清晰度
+
+用户反馈（含主播实际直播截图）三件事：设置页 OBS 预览里表情包缩成小图；希望主界面 `TONIGHT’S TITLE — 网游 · 英雄联盟` 的分区位置改成编辑 OBS 叠加层主标题，少进设置；观众反馈“背景有点颜色就完全看不清字”，暗角（主播口中的“透明度”）被砍掉了，要求放回，并且放在预览下面、不塞进「高级」，还要考虑“历史弹幕看不清”。
+
+- 单表情：原因是预览 CSS `.lake-obs-canvas .ovp-text .message-emote{height:1.3em}` 把 B站大表情也压回 1.3em；叠加层页面本身只在 `sticker` 标记时放大到固定 96 设计像素，单独一个小表情仍是 1.45em 行内小图。现在两边同一规则（`overlay.html` 的 `soloEmote`，设置页用 `helpers.mjs` 的 `soloEmote`）：一条弹幕只有一个可信表情时，行里只放这个表情，大小按位置——最新 88、上一条 56、最早 44 设计像素；`×N` 放在表情脚边；图片失败的占位图同尺寸。混排文字里的表情不变。单表情轮到的显示时长按最短 1.8 秒。醒目留言不受影响。
+- 主标题：`renderLakeTranscript` 的 kicker 在叠加层启用时写 `TONIGHT’S TITLE — OBS · 主标题`，点击或聚焦回车原地编辑（`contenteditable="plaintext-only"`），回车或失焦保存，走已有的后端动作 `overlay.title.save`（只改标题，保留其他叠加层设置与令牌），Esc 放弃；空、超过 24 字或控制字符在本地拒绝并恢复；内容没变不写；保存失败按快照恢复。编辑期间每秒重绘不会覆盖草稿。叠加层未启用时 kicker 只写 `TONIGHT’S TITLE`。分区仍可在点大标题打开的原地编辑里看到和修改。
+- 可读性：`OverlaySettings` 新增 `history_opacity`（0.3–1，默认 0.72，旧配置缺省取默认），`with_lake_design` 和保存合并不再把 `vignette` 固定为 0.6（旧版用户存过的暗角值会重新生效），两者都随 `config` 推给叠加层页面。叠加层按 `history_opacity` 设置最早一行不透明度，中间一行为 1 − (1 − 值)·3/7（默认仍是 1 / 0.88 / 0.72）。暗角超过 60% 后阴影 50%/78% 两档加深、文字加 2 设计像素贴身暗描边；60% 及以下与之前逐像素相同（亮背景探测截图除时钟外最大通道差 1）。OBS 页预览让出高度，下面两条发丝行滑条「暗角深浅」「历史弹幕清晰度」（步长 0.01，避免 0.72 被吸附成 0.70），拖动时预览同步、自动保存；`collectAutosave` 只在值存在时校验范围。「高级」页没有这两项。
+- 文档：`docs/UI-DESIGN.md`、`docs/LAKE-REDESIGN-HANDOFF.md`（§3.6 kicker、OBS 页、撤回“暗角用默认值”）、`docs/UI-IPC.md`（新字段与不再固定暗角）。
+- 测试改动：`helpers.test.mjs` 新增单表情判定；`app-flow.test.mjs` 两项原先固定“暗角已退役”的断言按用户新决定改为断言两条滑条在预览页、不在高级页，并新增范围校验用例；`test-overlay-retention.cjs` 新增“单表情按位置定尺寸、×N 在脚边、混排仍行内”和“暗角与历史清晰度到达页面、默认值保持原样”两项，CSS 摘要按本次美术改动重新固定为 `9911f413…d0f4`（DOM 摘要不变）；Rust `storage.rs`、`app_tests.rs` 同步新字段与不再固定暗角。
+- 验证（本机离线，全局 Playwright + Chromium；证据在 `target/lone-emote-20261018/`）：Node `node --test` 202/202；`cargo fmt --all --check` 通过；`cargo clippy --offline --locked --workspace --all-targets -D warnings` 通过；`cargo test --workspace --no-fail-fast`：desktop 215 通过 / 2 失败，engine 325 通过 / 2 失败，四个失败都是测试里创建符号链接报 os error 1314（本机无创建符号链接特权），与本次无关；叠加层相关 Rust 测试 engine 7/7、desktop 35/35。浏览器：overlay-retention 21/21、overlay-reconnect、audience 14、broadcast-focus 5、broadcast 11、chat-send 46、emotes-alias、lake-recovery 16、lake-redesign-obs、lake-redesign 13、lake-round3 19 组、lake-settings、lake-voices 11、lake 21、localization 10、moderation 31、obs-recovery 16、received-personal-emotes 15、settings-stability 通过。未通过但与本次无关：lake-review 需要先跑 parity 渲染生成 `target/lake-parity/review.html`（本轮未跑 parity）；serif-fonts 缺少 `pngjs` 模块；spotlight-transition（No original 900 ms sink animation）和 viewer-layout（default voice must retain its natural pill width）用 `git archive HEAD` 导出的未改动文件运行同样失败。另用会话临时脚本（不在仓库）实测：kicker 点击编辑/回车保存/Esc/空与 25 字拒绝/失败恢复/重绘不吞草稿/键盘进入、叠加层未启用时只剩标签，深浅两色主题与 780×580 最小窗口；OBS 页两条滑条对齐、拖到 100% 时预览变量与两次 `overlay.save` 都带上新值；亮色背景下 HEAD、默认 60%、100% 三档对比截图。
+- 未做：真实 OBS 浏览器来源、真实直播间与真实 B站表情 CDN 图片的在线验收；原生 WebView2 窗口里点 kicker 编辑未实测；未打包；未提交、未推送。本节之前的“商店版任务栏蓝框原因核查”一节是另一会话写入的，未改动。
+
+## 2026-10-19 Claude 最新改动本地集成与编译
+
+用户要求把 Claude 最新改动合并到本地并编译。本轮核对了全部分支及两个 `.claude/worktrees`：当前 `lake-redesign` 已包含两工作树的 HEAD `3f6479c`，最新生产改动实际位于主工作区原有的 16 个未提交文件中，内容为上节 OBS 单表情、主界面编辑叠加层标题、暗角与历史弹幕清晰度。完整保留原有任务栏蓝框调查记录；该调查仍没有图标修复代码。
+
+- `trusting-lewin-72da4c` 干净；`suspicious-bassi-129026` 只有 10 月 14 日的旧 parity 测试和报告草稿。现行 parity 脚本已在 `453985e` 按新版界面整体替换，旧工作树没有独有生产代码，保留原状。集成前的完整工作差异保存在 `.git/claude-merge-20261019/pre-integration.patch`，不覆盖旧工作树。
+- 本轮没有修改生产实现或依赖；整理现有改动并重新验证。`cargo fmt --all --check`、`cargo clippy --offline --locked --workspace --all-targets -- -D warnings`、JavaScript 语法检查通过；Node 全部 202/202，Python 包装测试 28/28。
+- Rust 全工作区执行 `cargo test --offline --locked --workspace --no-fail-fast`，合计 541 通过、4 失败、10 忽略。四项失败均为创建测试符号链接时 Windows 返回 1314（当前令牌缺少所需特权）：`embedded_ffmpeg::tests::cache_directory_redirection_is_rejected`、`local_service::tests::service_log_redirection_is_rejected_and_rotation_preserves_link_targets`、`diagnostics::tests::redirected_log_file_is_rejected_before_open_or_clear`、`voice_library::tests::linked_version_roots_are_not_scanned`。这四个生产/测试文件不在本次改动范围，错误与上一节 Claude 记录一致；全量测试不能记为全部通过。
+- 聚焦浏览器回归（headless Edge、隔离虚构 IPC）：overlay-retention 21/21、lake-recovery 16/16、lake-redesign-obs 15 项检查通过。
+- 编译命令：`RUSTFLAGS=-C target-feature=+crt-static`，`cargo build --release --offline --locked -p danmakuvoice`；Release 编译成功，用时 2m06s，版本保持 0.3.3。可运行副本：`dist/claude-local-20261019/DanmakuVoice.exe`，19,787,776 字节，SHA-256 `dc7ae038a4847f760d26dece5a3a37ec409ee385a3cd859456bc79157496b0a0`；同目录保留 `SHA256SUMS.txt`。
+- 对上述 EXE 运行 `scripts/smoke-portable.ps1 -ObserveSeconds 8` 通过：独立临时数据目录、禁用网络、限制 PATH、仅单 EXE 启动，SQLite/WebView2 初始化及固定哈希 FFmpeg 解压成功。测试未读取日常配置与凭据。
+- 本轮日志与浏览器报告位于 `target/claude-merge-20261019/`（OBS 原始截图仍在 `dist/lake-redesign-obs-tests/`）。这是本地编译与离线/原生启动验证，不代表真实 OBS 推流、直播间操作、在线 TTS 合成、物理音频或商店验收；上述在线验收仍待完成。本轮没有推送、发布或更新已安装的商店版本。

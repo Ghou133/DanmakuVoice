@@ -71,6 +71,17 @@
 .lake-obs-canvas .ovp-text .message-emote{height:1.3em;width:auto;vertical-align:middle}
 .lake-obs-canvas .ovp-live-words.reading{color:transparent;background:linear-gradient(90deg,#fff var(--read),rgba(255,255,255,.4) var(--read));background-clip:text;-webkit-background-clip:text}
 .lake-obs-canvas .ovp-repeat{font:italic calc(20*var(--p)) var(--numeral);margin-left:.5em;color:#f2a7c3}
+/* As on the overlay page: a danmaku that is one emote shows the emote alone,
+   sized by its place, with a repeat count at its foot. */
+.lake-obs-canvas .ovp-item.solo .ovp-text{display:flex;flex-wrap:wrap;align-items:flex-end;column-gap:calc(6*var(--p))}
+.lake-obs-canvas[data-style] .ovp-item.solo .ovp-text{filter:none}
+.lake-obs-canvas[data-corner$=right] .ovp-item.solo .ovp-text{justify-content:flex-end}
+.lake-obs-canvas .ovp-item.solo .ovp-name{flex-basis:100%}
+.lake-obs-canvas .ovp-item.solo .ovp-repeat{margin:0 0 calc(6*var(--p));line-height:1}
+.lake-obs-canvas .ovp-text .message-emote.ovp-sticker{--ovp-sticker:calc(44*var(--p));display:block;height:var(--ovp-sticker);width:auto;max-width:calc(3*var(--ovp-sticker));object-fit:contain;margin:0;vertical-align:top;filter:drop-shadow(0 calc(4*var(--p)) calc(8*var(--p)) rgba(0,0,0,.4))}
+.lake-obs-canvas .ovp-item.recent .message-emote.ovp-sticker{--ovp-sticker:calc(56*var(--p))}
+.lake-obs-canvas .ovp-item.spot .message-emote.ovp-sticker{--ovp-sticker:calc(88*var(--p))}
+.lake-obs-canvas .ovp-text .message-emote.ovp-sticker.emote-unavailable{width:var(--ovp-sticker);color:#b4b0c6}
 .lake-obs-waiting{font:italic calc(23*var(--p)) var(--numeral);color:#cfc9dc;opacity:.7;padding:calc(12*var(--p)) 0}
 .lake-obs-resize{position:absolute;right:-14px;bottom:-14px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 0 0 4px rgba(255,255,255,.16);padding:0;cursor:nwse-resize;touch-action:none}
 .lake-obs-resize::after{position:absolute;content:"";inset:-8px}
@@ -89,6 +100,18 @@
 .lake-obs-canvas-size em{font:italic 15px var(--numeral);color:var(--obs-muted)}
 .lake-obs-preview-foot>i{height:12px;width:1px;flex:none;margin:0 6px;background:var(--obs-line)}
 .lake-obs-preview-foot>button{display:flex;align-items:center;gap:4px;white-space:nowrap;color:var(--obs-muted);padding:8px 0}
+/* Readability under the preview (the preview gives up the height): how dark the
+   shade behind the corner is and how clearly the older lines stay. */
+.lake-obs-looks{flex:none;margin-top:4px}
+.lake-obs-option-row.lake-obs-look{display:grid;grid-template-columns:minmax(0,1fr) minmax(96px,280px) 42px;cursor:pointer}
+.lake-obs-look>input[type=range]{width:100%}
+.lake-obs-look>output{width:42px;flex:none;text-align:right;font:italic 15px var(--numeral);color:var(--obs-muted)}
+.ovp.lake-obs-canvas[data-style=spine] .ovp-item.recent{opacity:var(--ovp-near,.88)}
+.ovp.lake-obs-canvas[data-style=spine] .ovp-item.older{opacity:var(--ovp-old,.72)}
+/* The overlay's shade and its outline past the default (overlay.html --vig-boost). */
+.lake-obs-canvas .ovp-vig{opacity:1;background:radial-gradient(closest-side,rgba(8,7,13,calc(.86*var(--ovp-vig,.6))),rgba(8,7,13,calc(.44*var(--ovp-vig,.6) + .2*var(--ovp-vig-boost,0))) 50%,rgba(8,7,13,calc(.12*var(--ovp-vig,.6) + .22*var(--ovp-vig-boost,0))) 78%,transparent)}
+.ovp.lake-obs-canvas[data-style=spine] .ovp-text{filter:drop-shadow(0 1px calc(8*var(--p)) rgba(0,0,0,.85)) drop-shadow(0 0 calc(2*var(--p)) rgba(0,0,0,calc(.75*var(--ovp-vig-boost,0))))}
+.ovp.lake-obs-canvas[data-style=spine] .ovp-item.solo .ovp-text{filter:none}
 .lake-obs-advanced .lake-obs-connection{margin-top:14px}
 .lake-obs-advanced .lake-obs-connect-actions{margin-top:10px}
 .lake-obs-advanced .lake-obs-connect-actions .button{font-size:12px;min-height:28px;padding:4px 12px}

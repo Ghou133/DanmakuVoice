@@ -4044,6 +4044,7 @@ fn overlay_config(settings: &OverlaySettings) -> Value {
         "offset_y": settings.offset_y,
         "scale": settings.scale,
         "vignette": settings.vignette,
+        "history_opacity": settings.history_opacity,
         "title": settings.title,
         "tagline": settings.tagline,
         "merge": settings.merge_duplicates,

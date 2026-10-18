@@ -747,6 +747,8 @@ OBS 叠加层	OBS overlay
 大小	Size
 暗角深浅	Shadow depth
 在亮的游戏画面上调深一些，文字更清楚。	Raise it on bright game scenes so the text stays clear.
+历史弹幕清晰度	Older lines
+上面几条旧弹幕的清楚程度	How clearly the older lines above stay
 停留时间	Display time
 没有在朗读的弹幕显示多久后淡出。	How long messages that are not being read stay before fading out.
 <span>秒</span>	<span>s</span>

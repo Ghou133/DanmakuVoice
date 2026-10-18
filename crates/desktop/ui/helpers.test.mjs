@@ -58,7 +58,7 @@ test('support codes survive wrapping and runtime display without duplicated gene
 });
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { escapeHtml, headerIdentity, initial, eventText, eventKeys, validUid, numericId, safeQrUrl, safeMediaUrl, messageParts, playbackCaption, playbackFallbackNotice, startingStep, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, qrNeedsRoomFallback } from './helpers.mjs';
+import { escapeHtml, headerIdentity, initial, eventText, eventKeys, validUid, numericId, safeQrUrl, safeMediaUrl, messageParts, soloEmote, playbackCaption, playbackFallbackNotice, startingStep, runtimeIssue, liveConnectionView, snapshotPollingPolicy, uiIsActive, qrNeedsRoomFallback } from './helpers.mjs';
 
 test('voice settings keep read-only observations active during onboarding', () => {
   assert.equal(snapshotPollingPolicy({}, { step: 'login', settingsOpen: true }).poll, true);
@@ -175,6 +175,17 @@ test('large emotes follow explicit metadata, not whether the emote fills the mes
   const image = { text: '[妙]', url: 'https://i0.hdslb.com/bfs/live/a.png' };
   assert.deepEqual(messageParts({ ...base, emotes: [{ ...image, large: true }] }), [{ type: 'emote', ...image, large: true }]);
   assert.deepEqual(messageParts({ ...base, emotes: [{ ...image, large: false }] }), [{ type: 'emote', ...image }]);
+});
+
+test('the OBS overlay shows a danmaku made of one emote on its own', () => {
+  const image = { text: '[天使]', url: 'https://i0.hdslb.com/bfs/live/a.png' };
+  assert.deepEqual(soloEmote({ kind: 'danmaku', message: ' [天使] ', emotes: [image] }), { type: 'emote', ...image });
+  assert.deepEqual(soloEmote({ kind: 'danmaku', message: '[天使]', emotes: [{ ...image, large: true }] }), { type: 'emote', ...image, large: true });
+  assert.equal(soloEmote({ kind: 'danmaku', message: '[天使][天使]', emotes: [image] }), null);
+  assert.equal(soloEmote({ kind: 'danmaku', message: '好[天使]', emotes: [image] }), null);
+  assert.equal(soloEmote({ kind: 'danmaku', message: '[天使]', emotes: [] }), null);
+  assert.equal(soloEmote({ kind: 'danmaku', message: '[天使]', emotes: [{ ...image, url: 'https://evil.test/a.png' }] }), null);
+  assert.equal(soloEmote({ kind: 'super_chat', message: '[天使]', emotes: [image] }), null);
 });
 
 test('playback caption uses the rendered speech text only once', () => {

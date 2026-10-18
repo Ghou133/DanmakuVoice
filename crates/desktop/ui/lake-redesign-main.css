@@ -10,6 +10,10 @@
 #live-shell.lake-mode #lake-current .lake-state-title[data-size=small]{font-size:32px}
 .lake-title-kicker{display:flex;align-items:center;gap:10px;margin:0 0 17px 2px;font:12.5px/1.4 var(--numeral);letter-spacing:.26em;color:var(--lake-ink3)}
 .lake-title-kicker em{font:12px/1.4 "Segoe UI Variable","Microsoft YaHei UI",sans-serif;letter-spacing:.04em}
+/* The OBS overlay title, edited in place: a hairline on hover, the lilac underline and caret while typing. */
+.lake-title-kicker .lake-obs-title{display:inline-block;min-width:1em;padding-bottom:1px;border-bottom:1px solid transparent;color:var(--lake-ink2);cursor:text;outline:none;white-space:nowrap;transition:color .2s,border-color .2s}
+.lake-title-kicker .lake-obs-title:is(:hover,:focus-visible){border-bottom-color:color-mix(in srgb,var(--lake-lilac) 55%,transparent)}
+.lake-title-kicker .lake-obs-title[contenteditable=plaintext-only]{color:var(--lake-ink);border-bottom-color:var(--lake-lilac);caret-color:var(--lake-lilac)}
 .lake-text-reflection{position:absolute;left:calc(94 * var(--lake-x));bottom:calc(100% - var(--lake-horizon));width:calc(620 * var(--lake-x));padding-bottom:16px;transform:scaleY(-.78);transform-origin:50% 100%;filter:url(#lake-caption-ripple) blur(.6px);font:700 48px/1.36 var(--serif);letter-spacing:.03em;color:var(--lake-water-ink);pointer-events:none;z-index:2;-webkit-mask-image:linear-gradient(0deg,rgba(0,0,0,.62),transparent 92%),repeating-linear-gradient(0deg,#000 0 3px,rgba(0,0,0,.4) 3px 5px);-webkit-mask-composite:source-in;mask-image:linear-gradient(0deg,rgba(0,0,0,.62),transparent 92%),repeating-linear-gradient(0deg,#000 0 3px,rgba(0,0,0,.4) 3px 5px);mask-composite:intersect}
 .lake-text-reflection[data-size=medium]{font-size:40px}.lake-text-reflection[data-size=small]{font-size:32px}
 .lake-text-reflection .lake-letter{animation:none!important;opacity:1;transform:none;filter:none}

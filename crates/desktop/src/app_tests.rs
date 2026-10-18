@@ -205,7 +205,9 @@ async fn lake_overlay_migrates_old_style_and_previews_the_obs_feed() {
     let snapshot = reopened.snapshot().unwrap();
     let settings = &snapshot["overlay"]["settings"];
     assert_eq!(settings["style"], "spine");
-    assert!((settings["vignette"].as_f64().unwrap() - 0.6).abs() < 0.00001);
+    // The vignette is a readability control again, so an earlier choice is kept.
+    assert!((settings["vignette"].as_f64().unwrap() - 0.9).abs() < 0.00001);
+    assert!((settings["history_opacity"].as_f64().unwrap() - 0.72).abs() < 0.00001);
     assert_eq!(settings["linger_seconds"], 14);
     assert_eq!(settings["offset_x"], -49);
     assert_eq!(settings["offset_y"], 83);

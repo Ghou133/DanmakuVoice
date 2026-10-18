@@ -309,6 +309,7 @@ pub enum OverlayNames {
 pub const OVERLAY_DEFAULT_PORT: u16 = 47823;
 pub const OVERLAY_DEFAULT_TITLE: &str = "今晚的弹幕";
 pub const OVERLAY_TITLE_LIMIT: usize = 24;
+pub const OVERLAY_DEFAULT_HISTORY_OPACITY: f32 = 0.72;
 const OVERLAY_TAGLINE_LIMIT: usize = 64;
 
 /// Experimental OBS browser-source overlay. The token only gates the local
@@ -324,7 +325,11 @@ pub struct OverlaySettings {
     pub offset_x: i32,
     pub offset_y: i32,
     pub scale: f32,
+    /// Darkness of the soft shade behind the corner, 0–1.
     pub vignette: f32,
+    /// Opacity of the oldest line kept on the spine; the line between it and
+    /// the newest sits proportionally closer to fully visible.
+    pub history_opacity: f32,
     pub title: String,
     /// Shown while nobody is speaking. Empty means the built-in line.
     pub tagline: String,
@@ -349,6 +354,7 @@ impl Default for OverlaySettings {
             offset_y: 0,
             scale: 1.0,
             vignette: 0.6,
+            history_opacity: OVERLAY_DEFAULT_HISTORY_OPACITY,
             title: OVERLAY_DEFAULT_TITLE.into(),
             tagline: String::new(),
             show_danmaku: true,
@@ -367,9 +373,9 @@ impl Default for OverlaySettings {
 impl OverlaySettings {
     /// Preserve placement and content while retiring the older style controls.
     /// The legacy fields remain deserializable for existing local settings.
+    /// The vignette is a control again (2026-10-18), so it is kept.
     pub fn with_lake_design(mut self) -> Self {
         self.style = OverlayStyle::Spine;
-        self.vignette = 0.6;
         self.linger_seconds = 14;
         self
     }
@@ -384,6 +390,8 @@ impl OverlaySettings {
             && (0.5..=2.0).contains(&self.scale)
             && self.vignette.is_finite()
             && (0.0..=1.0).contains(&self.vignette)
+            && self.history_opacity.is_finite()
+            && (0.3..=1.0).contains(&self.history_opacity)
             && !self.title.trim().is_empty()
             && text_ok(&self.title, OVERLAY_TITLE_LIMIT)
             && text_ok(&self.tagline, OVERLAY_TAGLINE_LIMIT)
@@ -4119,6 +4127,7 @@ mod tests {
             offset_y: 29,
             scale: 1.25,
             vignette: 0.8,
+            history_opacity: 0.9,
             title: "上分夜".into(),
             tagline: "say a word — it'll be read aloud.".into(),
             names: OverlayNames::None,
@@ -4151,6 +4160,14 @@ mod tests {
             },
             OverlaySettings {
                 vignette: -0.1,
+                ..settings.clone()
+            },
+            OverlaySettings {
+                history_opacity: 0.2,
+                ..settings.clone()
+            },
+            OverlaySettings {
+                history_opacity: f32::NAN,
                 ..settings.clone()
             },
             OverlaySettings {
@@ -4194,7 +4211,9 @@ mod tests {
         assert_eq!(merged.port, settings.port);
         assert_eq!(merged.token, settings.token);
         assert_eq!(merged.style, OverlayStyle::Spine);
-        assert_eq!(merged.vignette, 0.6);
+        // The readability controls are the user's again.
+        assert_eq!(merged.vignette, 0.8);
+        assert_eq!(merged.history_opacity, 0.9);
         assert_eq!(merged.linger_seconds, 14);
         let migrated = settings.clone().with_lake_design();
         assert_eq!(migrated.corner, settings.corner);

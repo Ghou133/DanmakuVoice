@@ -95,6 +95,14 @@ export function messageParts(event) {
   return parts;
 }
 
+// OBS overlay: a danmaku that is one emote and nothing else is shown as that
+// emote on its own, whatever its size metadata says (overlay.html soloEmote).
+export function soloEmote(event) {
+  if (event?.kind !== 'danmaku') return null;
+  const parts = messageParts(event).filter(part => part.type === 'emote' || part.text.trim());
+  return parts.length === 1 && parts[0].type === 'emote' ? parts[0] : null;
+}
+
 export function playbackCaption(queue = {}) {
   if (queue.current) return queue.current.text || t('正在播报');
   return queue.pending?.length ? ui`等待播报 · ${queue.pending.length} 条` : t('等待下一句');

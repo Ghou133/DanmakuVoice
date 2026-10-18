@@ -20,6 +20,8 @@
 :root{
   --p:1px;
   --vig:.6;
+  /* 0 up to the default shade, 1 at the strongest: see applyConfig. */
+  --vig-boost:0;
   --serif:"DV Serif","Noto Serif SC","Source Han Serif SC","Songti SC","SimSun",serif;
   --numeral:"DV Numeral","Instrument Serif","Cambria","Georgia",serif;
   --sans:"Segoe UI Variable","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
@@ -44,7 +46,7 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .ov[data-corner$=l] .block{left:calc(72*var(--p))}
 .ov[data-corner$=r] .block{right:calc(72*var(--p));align-items:flex-end;text-align:right}
 .vig{position:absolute;z-index:-3;left:calc(-240*var(--p));top:calc(-180*var(--p));right:calc(60*var(--p));bottom:calc(-180*var(--p));border-radius:50%;
-  background:radial-gradient(closest-side,rgba(8,7,13,calc(.86*var(--vig))),rgba(8,7,13,calc(.44*var(--vig))) 50%,rgba(8,7,13,calc(.12*var(--vig))) 78%,transparent);transition:opacity .8s ease}
+  background:radial-gradient(closest-side,rgba(8,7,13,calc(.86*var(--vig))),rgba(8,7,13,calc(.44*var(--vig) + .2*var(--vig-boost))) 50%,rgba(8,7,13,calc(.12*var(--vig) + .22*var(--vig-boost))) 78%,transparent);transition:opacity .8s ease}
 .ov[data-corner$=r] .vig{left:calc(60*var(--p));right:calc(-240*var(--p))}
 
 /* ---------- masthead (always on) ---------- */
@@ -66,7 +68,7 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .ov[data-corner$=r] .rule{background:linear-gradient(270deg,var(--pink),var(--lilac) 55%,transparent)}
 .rule::after{content:"";position:absolute;top:-1px;left:0;width:calc(40*var(--p));height:calc(4*var(--p));background:linear-gradient(90deg,transparent,#fff,transparent);animation:sheen 9s cubic-bezier(.4,0,.2,1) infinite}
 @keyframes sheen{0%,82%{transform:translateX(-120%)}100%{transform:translateX(320%)}}
-.tagline{font-family:var(--numeral);font-style:italic;font-size:calc(19*var(--p));color:var(--muted);white-space:nowrap;text-shadow:0 1px calc(8*var(--p)) rgba(0,0,0,.85);transition:opacity .4s ease}
+.tagline{font-family:var(--numeral);font-style:italic;font-size:calc(19*var(--p));color:var(--muted);white-space:nowrap;text-shadow:0 1px calc(8*var(--p)) rgba(0,0,0,.85),0 0 calc(2*var(--p)) rgba(0,0,0,calc(.75*var(--vig-boost)));transition:opacity .4s ease}
 .tagline.swap{opacity:0}
 .tagline b{font-weight:400;color:var(--pink)}
 .tagline .cn{font-family:var(--serif);font-style:normal;font-size:.9em;letter-spacing:.06em}
@@ -75,7 +77,7 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .list{position:relative;display:flex;flex-direction:column;gap:calc(14*var(--p));margin-top:calc(13*var(--p))}
 .ov[data-corner$=r] .list{align-items:flex-end}
 .item{position:relative;display:flex;gap:calc(14*var(--p));align-items:flex-start;max-width:100%;
-  transition:opacity .6s ease,filter .45s ease;text-shadow:0 1px calc(8*var(--p)) rgba(0,0,0,.85)}
+  transition:opacity .6s ease,filter .45s ease;text-shadow:0 1px calc(8*var(--p)) rgba(0,0,0,.85),0 0 calc(2*var(--p)) rgba(0,0,0,calc(.75*var(--vig-boost)))}
 .ov[data-corner$=r] .item{flex-direction:row-reverse}
 .item.enter{animation:item-in .7s var(--ease) both}
 @keyframes item-in{from{opacity:0;transform:translateY(calc(-8*var(--p))) scale(.98);filter:blur(6px)}}
@@ -95,7 +97,15 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .item.bump .count{display:inline-block;animation:bump .5s var(--spring)}
 @keyframes bump{35%{transform:scale(1.35) rotate(-6deg)}}
 .emote{height:1.45em;vertical-align:-.34em;margin:0 .06em}
-.sticker{height:calc(96*var(--p));display:block;filter:drop-shadow(0 calc(4*var(--p)) calc(8*var(--p)) rgba(0,0,0,.4))}
+/* A line that is one emote and nothing else shows the emote itself in place of
+   the text, sized by the line's place like text is; a repeat count sits at its
+   foot instead of dropping below it. */
+.sticker{--sticker:calc(72*var(--p));height:var(--sticker);width:auto;max-width:calc(3*var(--sticker));object-fit:contain;display:block;
+  filter:drop-shadow(0 calc(4*var(--p)) calc(8*var(--p)) rgba(0,0,0,.4));transition:height .52s var(--ease),width .52s var(--ease)}
+.sticker.emote-unavailable{width:var(--sticker);color:var(--dim)}
+.text.solo{display:flex;align-items:flex-end;gap:calc(6*var(--p))}
+.ov[data-corner$=r] .text.solo{justify-content:flex-end}
+.text.solo .count{line-height:1;margin:0 0 calc(6*var(--p))}
 
 /* avatar */
 .av{position:relative;flex:none;border-radius:50%;width:calc(26*var(--p));height:calc(26*var(--p));margin-top:calc(2*var(--p));transition:width .52s var(--ease),height .52s var(--ease)}
@@ -226,10 +236,13 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 /* The lit text is clipped from its background, so a text-shadow would paint
    over the glyphs and grey them out. The same halo goes behind them instead;
    a sticker keeps its own shadow. */
-.ov[data-style=spine] .text{text-shadow:none;filter:drop-shadow(0 1px calc(8*var(--p)) rgba(0,0,0,.85))}
+.ov[data-style=spine] .text{text-shadow:none;filter:drop-shadow(0 1px calc(8*var(--p)) rgba(0,0,0,.85)) drop-shadow(0 0 calc(2*var(--p)) rgba(0,0,0,calc(.75*var(--vig-boost))))}
 .ov[data-style=spine] .text.solo{filter:none}
 .ov[data-style=spine] .item.near .text{font-size:calc(20*var(--p))}
 .ov[data-style=spine] .item.tip .text{font-size:calc(28*var(--p));text-wrap:balance}
+.ov[data-style=spine] .sticker{--sticker:calc(44*var(--p))}
+.ov[data-style=spine] .item.near .sticker{--sticker:calc(56*var(--p))}
+.ov[data-style=spine] .item.tip .sticker{--sticker:calc(88*var(--p))}
 .ov[data-style=spine] .item.tip .meta{font-size:calc(13*var(--p))}
 .ov[data-style=spine] .item.fading{opacity:0!important;translate:0 calc(-8*var(--p));transition:opacity .15s ease,translate .15s ease}
 .ov[data-style=spine] .item.out{translate:0 calc(-16*var(--p));transition:opacity .45s ease,filter .45s ease,translate .45s cubic-bezier(.4,0,.6,1)}
@@ -306,6 +319,7 @@ body{font-family:var(--sans);color:var(--text);-webkit-font-smoothing:antialiase
 .ov[data-style=card] .item.spot{padding-bottom:calc(26*var(--p))}
 .ov[data-style=card] .item.spot .av{width:calc(40*var(--p));height:calc(40*var(--p))}
 .ov[data-style=card] .item.spot .text{font-size:calc(28*var(--p))}
+.ov[data-style=card] .item.spot .sticker{--sticker:calc(88*var(--p))}
 .ov[data-style=card] .item.spot .prog{display:block;position:absolute;left:calc(54*var(--p));right:0;bottom:calc(10*var(--p));height:calc(2*var(--p));border-radius:2px;background:rgba(255,255,255,.1)}
 .ov[data-style=card][data-corner$=r] .item.spot .prog{left:0;right:calc(54*var(--p))}
 .ov[data-style=card] .prog .fill{position:absolute;left:0;top:0;bottom:0;width:calc(var(--prog,0)*100%);border-radius:2px;background:linear-gradient(90deg,var(--pink),var(--lilac),var(--blue))}
@@ -395,14 +409,15 @@ const SPINE_ENTRIES = 3;
 // a short display time. A line whose voice never starts gives up its turn.
 const SPINE_GAP_MS = 350;
 const SPINE_JOB_WAIT_MS = 10000;
-function spineDwellMs(item) { return Math.min(3600, Math.max(1800, 1000 + 120 * [...String(item.message || item.gift || "")].length)); }
+// A lone emote's marker text is not read on screen, so it gets the shortest turn.
+function spineDwellMs(item) { return Math.min(3600, Math.max(1800, 1000 + 120 * (soloEmote(item) ? 0 : [...String(item.message || item.gift || "")].length))); }
 // Waiting lines keep their order; only a very long display-only backlog is cut.
 const SPINE_BACKLOG = 12;
 const QUEUE_STALE_MS = 30000;
 // With no new chat or reading for this long, the spine dims into rest.
 const REST_MS = 45000;
 const state = {
-  config: { style: "spine", corner: "top_left", offset_x: 0, offset_y: 0, scale: 1, vignette: .6, title: "今晚的弹幕", tagline: "", merge: true, linger_seconds: 14 },
+  config: { style: "spine", corner: "top_left", offset_x: 0, offset_y: 0, scale: 1, vignette: .6, history_opacity: .72, title: "今晚的弹幕", tagline: "", merge: true, linger_seconds: 14 },
   status: { connection: "stopped", tts: true, words: 0 },
   reading: null,           // {job_id, played_ms, queued_ms, chars, at}
   items: new Map(),        // seq -> record
@@ -446,7 +461,11 @@ function applyConfig(config) {
   // Move the whole overlay so Super Chat and the main block stay together.
   const offset = value => Number.isFinite(Number(value)) ? Math.max(-8192, Math.min(8192, Math.trunc(Number(value)))) : 0;
   ov.style.transform = `translate(${offset(c.offset_x)}px, ${offset(c.offset_y)}px)`;
-  document.documentElement.style.setProperty("--vig", String(Math.min(1, Math.max(0, Number(c.vignette) || 0))));
+  const vig = Math.min(1, Math.max(0, Number(c.vignette) || 0));
+  document.documentElement.style.setProperty("--vig", String(vig));
+  // Past the default the shade also widens and text gains a tight outline, so
+  // the top of the range still reads on bright, busy game scenes.
+  document.documentElement.style.setProperty("--vig-boost", String(Math.round(Math.max(0, (vig - .6) / .4) * 1000) / 1000));
   $("title").textContent = c.title || "今晚的弹幕";
   fit();
   refreshTagline();
@@ -547,15 +566,16 @@ function emoteImage(kind, emote) {
   img.onerror = () => {
     const fallback = h("span", `${kind} emote-unavailable`);
     fallback.setAttribute("role", "img"); fallback.setAttribute("aria-label", emote.text);
-    fallback.style.display = kind === "sticker" ? "block" : "inline-block";
-    fallback.style.width = fallback.style.height = kind === "sticker" ? "calc(96 * var(--p))" : "1.45em";
+    // A sticker's box comes from its line's place (see .sticker).
+    if (kind === "emote") { fallback.style.display = "inline-block"; fallback.style.width = fallback.style.height = "1.45em"; }
     fallback.innerHTML = '<svg viewBox="0 0 24 24" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><circle cx="8" cy="8" r="1.5"/><path d="m4 17 5-5 3 3 3-4 5 6"/></svg>';
     img.replaceWith(fallback);
   };
   img.src = emote.url;
   return img;
 }
-function messageNodes(item, target) {
+// The message as text runs and trusted emotes, longest marker first.
+function messageParts(item) {
   const msg = String(item.message || "");
   const emotes = (Array.isArray(item.emotes) ? item.emotes : []).slice(0, 32).filter(e => {
     if (!e || typeof e.text !== "string" || !e.text || !SAFE_IMG.test(e.url || "")) return false;
@@ -564,17 +584,27 @@ function messageNodes(item, target) {
       return url.protocol === "https:" && /^i\d+\.hdslb\.com$/i.test(url.hostname) && !url.port && !url.username && !url.password && url.pathname.startsWith("/bfs/") && !/\.svg(?:$|@)/i.test(url.pathname);
     } catch { return false; }
   }).sort((a, b) => b.text.length - a.text.length);
-  if (item.sticker && emotes.length === 1 && emotes[0].text === msg.trim()) {
-    target.append(emoteImage("sticker", emotes[0])); return true;
-  }
+  const parts = [];
   let i = 0, buffer = "";
-  const flush = () => { if (buffer) { target.append(buffer); buffer = ""; } };
   while (i < msg.length) {
     const e = emotes.find(e => msg.startsWith(e.text, i));
-    if (e) { flush(); target.append(emoteImage("emote", e)); i += e.text.length; }
+    if (e) { if (buffer) parts.push(buffer); buffer = ""; parts.push(e); i += e.text.length; }
     else { buffer += msg[i]; i++; }
   }
-  flush();
+  if (buffer) parts.push(buffer);
+  return parts;
+}
+// A danmaku that is one emote and nothing else, whether B站 marked it a
+// sticker or it is a single small emote, is shown as that emote on its own.
+function soloEmote(item) {
+  if (item.kind !== "danmaku") return null;
+  const parts = messageParts(item).filter(part => typeof part !== "string" || part.trim());
+  return parts.length === 1 && typeof parts[0] !== "string" ? parts[0] : null;
+}
+function messageNodes(item, target) {
+  const solo = soloEmote(item);
+  if (solo) { target.append(emoteImage("sticker", solo)); return true; }
+  for (const part of messageParts(item)) target.append(typeof part === "string" ? part : emoteImage("emote", part));
   return false;
 }
 function textKey(item) { return String(item.message || "").replace(/\s+/g, "").toLowerCase(); }
@@ -873,14 +903,17 @@ function markRecent() {
     first = false;
   }
 }
-// Spine sizes and fades follow position only: newest, previous, oldest.
+// Spine sizes and fades follow position only: newest, previous, oldest. The
+// streamer sets how clear the oldest stays; the one between sits closer to full.
 function arrange() {
   const rows = [...list.children].filter(el => !el.classList.contains("out"));
+  const set = Number(state.config.history_opacity), oldest = Number.isFinite(set) ? Math.min(1, Math.max(.3, set)) : .72;
+  const fade = [1, Math.round((1 - (1 - oldest) * 3 / 7) * 1000) / 1000, oldest];
   rows.forEach((el, i) => {
     const rank = rows.length - 1 - i;
     if (el.classList.contains("tip") !== (rank === 0)) el.classList.toggle("tip", rank === 0);
     if (el.classList.contains("near") !== (rank === 1)) el.classList.toggle("near", rank === 1);
-    el.style.opacity = String([1, .88, .72][Math.min(rank, 2)]);
+    el.style.opacity = String(fade[Math.min(rank, 2)]);
   });
 }
 function setLit(rec, fraction) {
