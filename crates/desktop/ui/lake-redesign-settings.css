@@ -108,17 +108,39 @@ body.lake-settings-open #titlebar{z-index:65}
 .lake-room-number>div{display:flex;align-items:center;justify-content:space-between;margin:10px 0}
 .lake-room-number strong{font:italic 42px var(--numeral)}
 .lake-room-number small{font-size:12px;color:var(--lk-dim)}
+/* 换一个 edits the number where it stands, as the room title is edited on the lake:
+   a halo behind it, a lilac line and caret, and the rest of the page steps back. */
+.lake-room>*,.lake-room-number>small{transition:opacity .25s ease,filter .25s ease}
+.lake-room:has(.lake-room-number.editing)>:not(.lake-room-number),.lake-room-number.editing>small{opacity:.14;filter:blur(2px);pointer-events:none}
+.lake-room-number.editing>div{position:relative;isolation:isolate}
+.lake-room-number.editing>div::before{content:"";position:absolute;inset:-26px 0;z-index:-1;background:radial-gradient(closest-side,var(--lake-halo),transparent);pointer-events:none}
+#settings.lake-settings .lake-room .lake-room-number.editing input.lake-room-input{flex:1;width:100%;min-width:0;height:auto;margin:0 0 -1px;padding:0;border:0;border-bottom:1px solid var(--lk-lilac);border-radius:0;background:transparent;box-shadow:none;outline:0;font:italic 42px var(--numeral);color:var(--lk-ink);caret-color:var(--lk-lilac)}
 .lake-room-qr{display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;padding:20px 0}
 .lake-room-qr .qr-card{width:190px;height:190px;box-sizing:border-box;background:#fff;box-shadow:none}
 .lake-readings-search{display:flex;gap:10px;align-items:center;min-height:40px;border-bottom:1px solid var(--lk-line2)}
 .lake-readings-search>svg{width:15px;flex-shrink:0;color:var(--lk-dim)}
 #settings.lake-settings .lake-readings-search input{border:0;flex:1;min-width:0;font-size:12.5px}
 .lake-reading-group{margin-top:18px}
-.lake-reading-group h3{display:flex;gap:8px;align-items:baseline;margin:0 0 5px;font-size:11px;font-weight:400;letter-spacing:.2em;color:var(--lk-dim)}
+.lake-reading-group h3{display:flex;gap:8px;align-items:center;margin:0 0 5px;font-size:11px;font-weight:400;letter-spacing:.2em;color:var(--lk-dim)}
+/* Each group adds its own kind of reading; the + stays quiet until it is wanted. */
+#settings.lake-settings .lake-reading-group h3>.icon-button{margin-left:auto;width:24px;height:24px;min-height:24px;padding:5px;color:var(--lk-dim)}
+#settings.lake-settings .lake-reading-group h3>.icon-button:hover{background:none;color:var(--lk-lilac)}
 .lake-reading-group h3 i{font:italic 14px var(--numeral);letter-spacing:0}
 .lake-reading-row{display:flex;align-items:center;min-height:44px;border-top:1px solid var(--lk-line)}
 .lake-reading-row[hidden]{display:none}
-.lake-reading-row>button:first-child{display:grid;grid-template-columns:16px minmax(60px,1fr) 14px minmax(65px,1.2fr);gap:8px;align-items:center;flex:1;min-width:0;padding:10px 0;border:0;background:transparent;color:var(--lk-ink);text-align:left}
+.lake-reading-row>button:first-child,.lake-reading-edit{display:grid;grid-template-columns:16px minmax(60px,1fr) 14px minmax(65px,1.2fr);gap:8px;align-items:center;flex:1;min-width:0;padding:10px 0;border:0;background:transparent;color:var(--lk-ink);text-align:left}
+/* Editing happens in the row's own columns: the text becomes a field with a lilac line, nothing else moves. */
+.lake-reading-tail{width:28px;flex:none}
+.lake-reading-row.editing .lake-reading-edit{padding:9px 0}
+#settings.lake-settings .lake-reading-row.editing .lake-reading-edit input.lake-reading-input{flex:1 1 auto;width:100%;min-width:0;height:auto;padding:0 0 2px;line-height:1.4;border:0;border-bottom:1px solid var(--lk-line2);border-radius:0;background:transparent;box-shadow:none;outline:0;color:var(--lk-ink);caret-color:var(--lk-lilac);transition:border-color .2s}
+#settings.lake-settings .lake-reading-row.editing .lake-reading-edit input.lake-reading-input:focus{border-bottom-color:var(--lk-lilac)}
+#settings.lake-settings .lake-reading-row.editing .lake-reading-edit input.lake-reading-input::placeholder{color:var(--lk-dim)}
+#settings.lake-settings .lake-reading-row.editing .lake-reading-edit input.lake-reading-input[name=from]{font:12px var(--sans)}
+#settings.lake-settings .lake-reading-row.editing .lake-reading-edit input.lake-reading-input[name=to]{font:500 14px var(--serif)}
+/* A viewer's voice sits after the reading, where a shown row puts it. */
+.lake-reading-row.editing .lake-reading-to{flex-wrap:nowrap;align-items:center;gap:8px}
+#settings.lake-settings .lake-reading-row.editing .select-control{flex:none;width:auto}
+#settings.lake-settings .lake-reading-row.editing .select-trigger{display:inline-flex;align-items:center;gap:4px;width:auto;min-height:0;height:auto;padding:0;border:0;border-radius:0;background:none;box-shadow:none;font:11px var(--sans);color:var(--lk-lilac)}
 .lake-reading-mark{width:16px;display:grid;place-items:center}
 .lake-reading-mark img{width:16px;height:16px;object-fit:contain}
 .lake-reading-dot{width:8px;height:8px;background:var(--lk-pink);border-radius:50%}
@@ -256,18 +278,6 @@ body.lake-settings-open #titlebar{z-index:65}
 #settings.lake-settings :is(.voice-service-row,.voice-catalog-row):hover{background:none}
 #settings.lake-settings :is(.voice-service-row,.voice-catalog-row,.lake-voice-row:not(.editing))::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,var(--lk-lilac),var(--lk-pink) 42%,transparent 92%);transform:scaleX(0);transform-origin:left;opacity:.8;transition:transform .5s cubic-bezier(.2,.8,.2,1);pointer-events:none}
 #settings.lake-settings :is(.voice-service-row,.voice-catalog-row,.lake-voice-row:not(.editing)):is(:hover,:focus-within)::after{transform:scaleX(1)}
-/* Readings: the composer opens in the list — kind, original → reading on one line, then the voice for viewers. */
-#settings.lake-settings .lake-reading-composer{display:flex;flex-direction:column;gap:12px;margin:12px 0 4px;padding:6px 0 16px;border-bottom:1px solid var(--lk-line)}
-#settings.lake-settings .lake-reading-kinds{justify-content:flex-start;margin-left:0}
-#settings.lake-settings .lake-reading-pair{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1.2fr);align-items:center;gap:10px}
-#settings.lake-settings .lake-reading-pair>span{color:var(--lk-dim)}
-#settings.lake-settings .lake-reading-pair input{padding:7px 0;font-size:14px}
-#settings.lake-settings .lake-reading-pair input[name=to]{font-family:var(--serif)}
-#settings.lake-settings .lake-reading-composer .field{margin:0}
-#settings.lake-settings .lake-reading-composer .lake-note{margin:0}
-#settings.lake-settings .lake-reading-actions{display:flex;align-items:center;gap:18px}
-#settings.lake-settings .lake-reading-group .lake-reading-composer{margin-top:0}
 #settings.lake-settings .lake-gold-outline{color:var(--lk-gold);text-decoration-color:var(--lk-gold)}
 /* Nothing in a drawer page scrolls sideways; inputs in a row may shrink. */
 #settings.lake-settings .settings-content{overflow-x:hidden}
-#settings.lake-settings .lake-reading-pair input{min-width:0;width:100%}

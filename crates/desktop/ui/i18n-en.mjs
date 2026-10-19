@@ -228,6 +228,9 @@ AGPL-3.0-only · 许可信息见 GitHub 仓库 NOTICE。	AGPL-3.0-only · See NO
 个音色	voices
 为观众指定声音	Assign a viewer voice
 添加观众	Add viewer
+添加词	Add word
+添加表情	Add emote
+[表情名]	[emote name]
 直接添加用户名，或点击弹幕头像指定声音。	Enter a username, or select a chat avatar to assign a voice.
 首选	Preferred
 设为首选	Set as preferred

@@ -10,10 +10,14 @@
 #live-shell.lake-mode #lake-current .lake-state-title[data-size=small]{font-size:32px}
 .lake-title-kicker{display:flex;align-items:center;gap:10px;margin:0 0 17px 2px;font:12.5px/1.4 var(--numeral);letter-spacing:.26em;color:var(--lake-ink3)}
 .lake-title-kicker em{font:12px/1.4 "Segoe UI Variable","Microsoft YaHei UI",sans-serif;letter-spacing:.04em}
-/* The OBS overlay title, edited in place: a hairline on hover, the lilac underline and caret while typing. */
-.lake-title-kicker .lake-obs-title{display:inline-block;min-width:1em;padding-bottom:1px;border-bottom:1px solid transparent;color:var(--lake-ink2);cursor:text;outline:none;white-space:nowrap;transition:color .2s,border-color .2s}
-.lake-title-kicker .lake-obs-title:is(:hover,:focus-visible){border-bottom-color:color-mix(in srgb,var(--lake-lilac) 55%,transparent)}
-.lake-title-kicker .lake-obs-title[contenteditable=plaintext-only]{color:var(--lake-ink);border-bottom-color:var(--lake-lilac);caret-color:var(--lake-lilac)}
+/* The OBS overlay title in the kicker opens the room title's in-place editor (#onair-panel[data-mode=obs]); at rest it is only a lit hairline on hover. */
+.lake-title-kicker .lake-obs-title{display:inline;margin:0;padding:0 0 1px;border:0;border-bottom:1px solid transparent;border-radius:0;background:none;box-shadow:none;font:inherit;letter-spacing:inherit;color:var(--lake-ink2);cursor:pointer;white-space:nowrap;transition:color .2s,border-color .2s}
+.lake-title-kicker .lake-obs-title:hover{color:var(--lake-ink);border-bottom-color:color-mix(in srgb,var(--lake-lilac) 55%,transparent)}
+.lake-title-kicker .lake-obs-title:focus-visible{outline:0;color:var(--lake-ink);border-bottom-color:var(--lake-lilac)}
+/* While the OBS title is edited its kicker stays where the main one was, and the room title's reflection steps away. */
+#live-shell.lake-mode #onair-panel[data-mode=obs] .lake-edit-kicker{grid-column:1;grid-row:1;display:flex;align-items:baseline;gap:10px;margin:0 0 0 2px;font:12.5px/1.4 var(--numeral);letter-spacing:.26em;color:var(--lake-ink3)}
+#live-shell.lake-mode #onair-panel[data-mode=obs] .lake-edit-kicker em{font:12px/1.4 "Segoe UI Variable","Microsoft YaHei UI",sans-serif;letter-spacing:.04em}
+#live-shell.lake-mode.lake-editing-obs .lake-text-reflection{opacity:0}
 .lake-text-reflection{position:absolute;left:calc(94 * var(--lake-x));bottom:calc(100% - var(--lake-horizon));width:calc(620 * var(--lake-x));padding-bottom:16px;transform:scaleY(-.78);transform-origin:50% 100%;filter:url(#lake-caption-ripple) blur(.6px);font:700 48px/1.36 var(--serif);letter-spacing:.03em;color:var(--lake-water-ink);pointer-events:none;z-index:2;-webkit-mask-image:linear-gradient(0deg,rgba(0,0,0,.62),transparent 92%),repeating-linear-gradient(0deg,#000 0 3px,rgba(0,0,0,.4) 3px 5px);-webkit-mask-composite:source-in;mask-image:linear-gradient(0deg,rgba(0,0,0,.62),transparent 92%),repeating-linear-gradient(0deg,#000 0 3px,rgba(0,0,0,.4) 3px 5px);mask-composite:intersect}
 .lake-text-reflection[data-size=medium]{font-size:40px}.lake-text-reflection[data-size=small]{font-size:32px}
 .lake-text-reflection .lake-letter{animation:none!important;opacity:1;transform:none;filter:none}
@@ -92,16 +96,16 @@
 #live-shell.lake-deep{--lake-horizon:calc(96 * var(--lake-y) - var(--titlebar-h))}#live-shell.lake-deep .lake-sky{height:calc(96 * var(--lake-y))}#live-shell.lake-deep .lake-ridge{top:auto;bottom:calc(100% - var(--lake-horizon))}#live-shell.lake-deep .lake-water{top:var(--lake-horizon)}#live-shell.lake-deep .lake-horizon{top:var(--lake-horizon);filter:url(#lake-peek-ripple)}
 #live-shell.lake-deep :is(.lake-header,#lake-transcript,.lake-stars,.lake-mist,.lake-cloud,.lake-bird,.lake-reflection,.lake-waves,#lake-orb,.lake-orb-tip){visibility:hidden;pointer-events:none}#live-shell.lake-deep .lake-deep-rays{display:block}#live-shell.lake-deep .lake-foot{width:calc(300 * var(--lake-x))}
 #live-shell.lake-mode.lake-editing #lake-current{visibility:hidden}#live-shell.lake-mode.lake-editing .lake-text-reflection{opacity:.2}
-#live-shell.lake-mode #onair-panel[data-mode=info]{left:calc(94 * var(--lake-x));top:auto;bottom:calc(100% - var(--lake-horizon) + 15px);width:calc(750 * var(--lake-x));padding:0;max-height:none;overflow:visible;background:none;border:0;box-shadow:none;backdrop-filter:none}
-#live-shell.lake-mode #onair-panel[data-mode=info] .lake-edit-halo{display:none}#onair-panel[data-mode=info] .lake-title-form{display:flex;flex-direction:column;position:relative}#onair-panel[data-mode=info] .lake-edit-kicker{display:none}#onair-panel[data-mode=info] .onair-areas{order:-1;position:static;display:flex;margin:0 0 14px;max-width:calc(100% - 180px)}#onair-panel[data-mode=info] .onair-field{margin:0;width:calc(620 * var(--lake-x))}#onair-panel[data-mode=info] .onair-input{border-bottom:1px solid var(--lake-lilac)}#onair-panel[data-mode=info] .onair-input input{font:700 48px/1.36 var(--serif);height:auto;padding:0 0 8px}#onair-panel[data-mode=info] .onair-count{position:absolute;top:-36px;right:0;font:italic 16px var(--numeral)}#onair-panel[data-mode=info] .onair-panel-foot{position:absolute;right:0;bottom:10px;gap:14px;margin:0}#onair-panel[data-mode=info] .onair-save{height:32px;padding:0 16px}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-input input{font-size:48px;line-height:1.36;padding:0 0 8px}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-count{position:absolute;top:-36px;right:0}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-areas{order:-1;margin:0 0 14px}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-panel-foot{position:absolute;right:0;bottom:10px;margin:0}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]){left:calc(94 * var(--lake-x));top:auto;bottom:calc(100% - var(--lake-horizon) + 15px);width:calc(750 * var(--lake-x));padding:0;max-height:none;overflow:visible;background:none;border:0;box-shadow:none;backdrop-filter:none}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .lake-edit-halo{display:none}#onair-panel:is([data-mode=info],[data-mode=obs]) .lake-title-form{display:flex;flex-direction:column;position:relative}#onair-panel[data-mode=info] .lake-edit-kicker{display:none}#onair-panel:is([data-mode=info],[data-mode=obs]) .onair-areas{order:-1;position:static;display:flex;margin:0 0 14px;max-width:calc(100% - 180px)}#onair-panel:is([data-mode=info],[data-mode=obs]) .onair-field{margin:0;width:calc(620 * var(--lake-x))}#onair-panel:is([data-mode=info],[data-mode=obs]) .onair-input{border-bottom:1px solid var(--lake-lilac)}#onair-panel:is([data-mode=info],[data-mode=obs]) .onair-input input{font:700 48px/1.36 var(--serif);height:auto;padding:0 0 8px}#onair-panel:is([data-mode=info],[data-mode=obs]) .onair-count{position:absolute;top:-36px;right:0;font:italic 16px var(--numeral)}#onair-panel:is([data-mode=info],[data-mode=obs]) .onair-panel-foot{position:absolute;right:0;bottom:10px;gap:14px;margin:0}#onair-panel:is([data-mode=info],[data-mode=obs]) .onair-save{height:32px;padding:0 16px}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-input input{font-size:48px;line-height:1.36;padding:0 0 8px}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-count{position:absolute;top:-36px;right:0}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-areas{order:-1;margin:0 0 14px}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-panel-foot{position:absolute;right:0;bottom:10px;margin:0}
 #live-shell.lake-mode #onair-panel[data-mode=face]{left:auto;right:calc(44 * var(--lake-x));top:calc(112 * var(--lake-y) - var(--titlebar-h));transform:none;width:280px;padding:22px;border-radius:20px}
 #live-shell.lake-mode #onair-panel[data-mode=face] .lake-face-note{font-size:12.5px;line-height:1.7}
 .lake-face-waiting{font:italic 14px var(--numeral);color:var(--lake-ink3)}
-@media(max-width:820px){#lake-deep-stats{left:68%;right:20px}#lake-deep #chat-scroll{width:54%}.lake-deep-head{right:24px}.lake-volume-hint small{display:none}#live-shell.lake-mode #onair-panel[data-mode=info]{width:calc(100% - 2 * var(--lake-left))}#onair-panel[data-mode=info] .onair-field{width:calc(100% - 120px)}#live-shell.lake-mode #onair-panel[data-mode=info] .onair-input input{font-size:36px}}
+@media(max-width:820px){#lake-deep-stats{left:68%;right:20px}#lake-deep #chat-scroll{width:54%}.lake-deep-head{right:24px}.lake-volume-hint small{display:none}#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]){width:calc(100% - 2 * var(--lake-left))}#onair-panel:is([data-mode=info],[data-mode=obs]) .onair-field{width:calc(100% - 120px)}#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-input input{font-size:36px}}
 @media(prefers-reduced-motion:reduce){.lake-text-reflection,#lake-peek{filter:none}.lake-voice-row.waking .lake-voice-copy{animation:none}.lake-voice-control *{transition:none}}
 
 .lake-history-more { min-height: 40px; padding: 14px 4px 28px; color: var(--lake-water-ink3); font-size: 11px; }
@@ -115,14 +119,14 @@
 
 /* Scrollbars on the lake: a hairline that brightens under the pointer — no arrows, no track.
    Chromium ignores ::-webkit-scrollbar once scrollbar-width/color are set, so those go back to auto. */
-:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel[data-mode=info]){scrollbar-width:auto;scrollbar-color:auto}
-:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel[data-mode=info])::-webkit-scrollbar{width:4px;height:4px;background:transparent}
-:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel[data-mode=info])::-webkit-scrollbar-button{display:none;width:0;height:0}
-:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel[data-mode=info])::-webkit-scrollbar-track{background:transparent}
-:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel[data-mode=info])::-webkit-scrollbar-thumb{border-radius:2px;background:rgba(255,255,255,.1)}
-:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel[data-mode=info]):hover::-webkit-scrollbar-thumb{background:rgba(255,255,255,.24)}
-:root[data-theme=light] :is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel[data-mode=info])::-webkit-scrollbar-thumb{background:rgba(42,35,64,.12)}
-:root[data-theme=light] :is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel[data-mode=info]):hover::-webkit-scrollbar-thumb{background:rgba(42,35,64,.26)}
+:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs])){scrollbar-width:auto;scrollbar-color:auto}
+:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]))::-webkit-scrollbar{width:4px;height:4px;background:transparent}
+:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]))::-webkit-scrollbar-button{display:none;width:0;height:0}
+:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]))::-webkit-scrollbar-track{background:transparent}
+:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]))::-webkit-scrollbar-thumb{border-radius:2px;background:rgba(255,255,255,.1)}
+:is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs])):hover::-webkit-scrollbar-thumb{background:rgba(255,255,255,.24)}
+:root[data-theme=light] :is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]))::-webkit-scrollbar-thumb{background:rgba(42,35,64,.12)}
+:root[data-theme=light] :is(#settings.lake-settings .settings-content,#live-shell.lake-mode #tts-menu,#lake-deep #chat-scroll,.setup-lake-drawer,.viewer-body,.audience-scroll,#chat-emote-page,.lake-emote-tabs,.select-menu,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs])):hover::-webkit-scrollbar-thumb{background:rgba(42,35,64,.26)}
 
 /* ===== Hand-offs: states meet instead of cutting (2026-10-18) ===== */
 /* Diving and surfacing: the horizon moves at once, the scene dims and settles, and the
@@ -185,7 +189,7 @@
 :root[data-step=main] #toast{bottom:176px;white-space:normal;max-width:min(560px,calc(100vw - 48px));height:auto;min-height:40px;padding:9px 18px;text-align:center}
 :root[data-step=main][data-theme=dark] #toast.error{background:rgba(32,27,46,.94);color:#ebcb93;box-shadow:inset 0 0 0 1px rgba(235,203,147,.4)}
 /* Title edit: the lilac underline and caret the design asked for; 好了 is a plain capsule. */
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-title-input,#live-shell.lake-mode #onair-panel[data-mode=info] input[name=title]{caret-color:var(--lake-lilac)}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-title-input,#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) input[name=title]{caret-color:var(--lake-lilac)}
 /* The voice line reads as a name: serif, like the line on the water. */
 #live-shell.lake-mode .lake-voice-control .dock-voice{font-family:var(--serif)}
 /* The reflection mirrors the line at every size. */
@@ -194,16 +198,16 @@
 #live-shell.lake-mode .onair-wrap:has(#onair-panel[data-mode=face]:not([hidden])) #onair{position:relative;z-index:9}
 
 /* Remaining review: title actions occupy their own column at every window width. */
-#live-shell.lake-mode #onair-panel[data-mode=info]{width:min(750px,calc(100% - 2 * var(--lake-left)));max-height:none;overflow:visible}
-#live-shell.lake-mode #onair-panel[data-mode=info] .lake-title-form{display:grid;grid-template-columns:minmax(0,1fr) max-content;column-gap:16px;row-gap:14px;align-items:end}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-field{grid-column:1;grid-row:2;width:auto;min-width:0}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-areas{grid-column:1;grid-row:1;max-width:calc(100% - 74px);margin:0;min-width:0}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-input{position:relative;margin:0;border-bottom:1px solid var(--lake-lilac)}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-input::after{content:none}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-input input{caret-color:var(--lake-lilac)}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-count{top:-36px;right:0}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-panel-foot{grid-column:2;grid-row:2;position:static;align-self:end;gap:14px;margin:0;padding-bottom:10px;white-space:nowrap}
-#live-shell.lake-mode #onair-panel[data-mode=info] .onair-save{background:var(--lake-ink);color:var(--lake-on);box-shadow:none}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]){width:min(750px,calc(100% - 2 * var(--lake-left)));max-height:none;overflow:visible}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .lake-title-form{display:grid;grid-template-columns:minmax(0,1fr) max-content;column-gap:16px;row-gap:14px;align-items:end}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-field{grid-column:1;grid-row:2;width:auto;min-width:0}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-areas{grid-column:1;grid-row:1;max-width:calc(100% - 74px);margin:0;min-width:0}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-input{position:relative;margin:0;border-bottom:1px solid var(--lake-lilac)}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-input::after{content:none}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-input input{caret-color:var(--lake-lilac)}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-count{top:-36px;right:0}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-panel-foot{grid-column:2;grid-row:2;position:static;align-self:end;gap:14px;margin:0;padding-bottom:10px;white-space:nowrap}
+#live-shell.lake-mode #onair-panel:is([data-mode=info],[data-mode=obs]) .onair-save{background:var(--lake-ink);color:var(--lake-on);box-shadow:none}
 
 /* One typography scale drives both sides of the horizon, including the 780px edge. */
 #live-shell.lake-mode{--lake-caption-large:48px;--lake-caption-medium:38px;--lake-caption-small:30px;--lake-foot-width:400px}

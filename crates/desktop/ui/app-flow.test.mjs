@@ -924,27 +924,43 @@ test('anonymous navigation and legacy UID forms are disabled before invoking any
   assert.equal(context.calls.length, 0);
 });
 
-test('unsaved Fish API key requires explicit discard and is never copied into drafts', async () => {
+// 2026-10-19: the app never asks to discard a draft (docs/UI-DESIGN.md). An
+// unfinished Fish key is left behind, and it still never becomes a draft.
+test('leaving with an unsaved Fish API key never prompts and never copies the key into drafts', async () => {
   const context = appContext();
   const form = { dataset: { form: 'service-fish' }, fields: { credential: 'private-test-key' } };
   const input = { id: '', name: 'credential', closest() { return form; } };
   const dialog = context.document.querySelector('#settings');
   dialog.querySelectorAll = selector => selector === '[data-form][data-dirty]' && form.dataset.dirty ? [form] : [];
   const prompts = [];
-  let discard = false;
-  context.testConfirm = async (title, message) => { prompts.push({ title, message }); return discard; };
+  context.testConfirm = async (title, message) => { prompts.push({ title, message }); return false; };
   vm.runInContext('confirmAction = testConfirm', context);
   dialog.listeners.input[0]({ target: input });
   assert.equal(form.dataset.dirty, 'true');
-  const leave = vm.runInContext('allowLeaveSettings', context);
-  assert.equal(await leave(), false);
-  assert.equal(form.dataset.dirty, 'true');
   assert.equal(vm.runInContext('formDrafts.size', context), 0);
-  discard = true;
+  const leave = vm.runInContext('allowLeaveSettings', context);
   assert.equal(await leave(), true);
   assert.equal(form.dataset.dirty, undefined);
-  assert.equal(prompts.length, 2);
-  assert.doesNotMatch(JSON.stringify(prompts), /private-test-key/);
+  assert.deepEqual(prompts, []);
+  assert.equal(vm.runInContext('formDrafts.size', context), 0);
+});
+
+// Leaving never waits on an unfinished field; it is put down, not kept for later.
+test('leaving puts an unfinished automatic field down, while staying on the page keeps it', async () => {
+  const context = appContext();
+  const form = {
+    dataset: { form: 'sound-words' }, fields: {},
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    cloneNode() { return { dataset: { ...this.dataset }, querySelectorAll() { return []; }, removeAttribute() {}, outerHTML: '<form></form>' }; },
+  };
+  context.testForm = form;
+  context.unfinished = () => { throw new Error('请检查未填或格式不正确的项目'); };
+  vm.runInContext(`collectAutosave = unfinished; autosaves.set(testForm, { key: 'advanced:sound-words:new', form: testForm, tab: 'advanced', editor: null, revision: 0, touched: true, invalid: '', lastScheduled: '', baseline: '', queue: { cancel() {}, schedule() {}, flush: async () => {}, saving: false } });`, context);
+  assert.equal(await vm.runInContext('flushAutosaves()', context), false, 'an action on the same page waits for the field');
+  assert.equal(vm.runInContext('formDrafts.has("advanced:sound-words:new")', context), true);
+  assert.equal(await vm.runInContext('allowLeaveSettings()', context), true);
+  assert.equal(vm.runInContext('autosaves.get(testForm).touched', context), false);
+  assert.equal(vm.runInContext('formDrafts.size', context), 0);
 });
 
 test('checking a local service keeps an unsaved directory field visible', async () => {
@@ -1016,6 +1032,43 @@ test('room settings never expose anonymous UID controls, including no-own-room a
   const expired = vm.runInContext('renderRoomSettings()', context);
   assert.match(expired, /登录已失效/);
   assert.match(expired, /重新扫码登录/);
+});
+
+test('the room number changes in place: no editor page, form, save or cancel', async () => {
+  const context = appContext();
+  vm.runInContext(`snapshot.account = { user_id: 12 }; snapshot.setup = { mode: 'account', room_id: 34 }; settingsTab = 'room'; editor = null;`, context);
+  const page = vm.runInContext('renderRoomSettings()', context);
+  assert.match(page, /<strong>34<\/strong><button[^>]*data-action="lake\.room\.edit"/);
+  assert.doesNotMatch(page, /data-form="lake-room"|lake\.room\.save|lake\.editor\.cancel/);
+  await vm.runInContext(`handleAction('lake.room.edit', '', null)`, context);
+  assert.equal(vm.runInContext('editor', context), null);
+  assert.equal(vm.runInContext('settingsViewDepth()', context), 1);
+  assert.match(vm.runInContext('lakeRoomNumberField(true)', context), /<input class="lake-room-input" value="34"/);
+});
+
+test('a changed room number reconnects a running room; a failed change reconnects the old one; others write nothing', async () => {
+  const context = appContext();
+  const calls = [];
+  context.mockCommand = async (action, payload) => { calls.push([action, payload]); if (action === 'live.save' && payload.room_id === 13) throw new Error('fixture failure'); };
+  vm.runInContext(`command = mockCommand; showLakeRoomNumber = () => {}; snapshot.setup = { room_id: 34 }; snapshot.live = { running: true };`, context);
+  const save = vm.runInContext('saveLakeRoomNumber', context);
+  const input = { value: ' 56 ', readOnly: false, isConnected: true };
+  await save(input);
+  assert.deepEqual(calls.map(([action]) => action), ['live.disconnect', 'live.save', 'live.connect']);
+  assert.equal(calls[1][1].room_id, 56);
+  assert.equal(input.readOnly, false);
+  calls.length = 0;
+  input.value = '13';
+  await assert.rejects(save(input), /fixture failure/);
+  assert.deepEqual(calls.map(([action]) => action), ['live.disconnect', 'live.save', 'live.connect']);
+  assert.equal(input.readOnly, false);
+  calls.length = 0;
+  for (const value of ['', '34', '0', '12a', '99999999999999999']) { input.value = value; await save(input); }
+  assert.deepEqual(calls, []);
+  vm.runInContext('snapshot.live = { running: false }', context);
+  input.value = '78';
+  await save(input);
+  assert.deepEqual(calls.map(([action]) => action), ['live.save']);
 });
 
 test('dots voice save is atomic and retains the draft and role on failure', async () => {

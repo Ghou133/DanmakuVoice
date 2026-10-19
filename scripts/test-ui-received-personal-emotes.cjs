@@ -162,10 +162,9 @@ async function activity(value) {
     check('incoming enriched messages refresh viewer history without replacing its alias field or composer draft and selection');
 
     await page.evaluate(() => window.__richSettings('readings'));
-    await page.locator('#settings [data-action="lake.reading.add"]').first().click();
-    await page.locator('#settings .lake-reading-kinds label',{hasText:'表情'}).click();
-    await page.locator('#settings [name="from"]').fill(marker);await page.locator('#settings [name="to"]').fill('爱你');
-    await page.locator('#settings [data-action="lake.reading.save"]').click();await page.locator('.lake-reading-list').waitFor();await close();
+    await page.locator('#settings [data-action="lake.reading.add"][data-id="emote_words"]').click();
+    await page.locator('#settings .lake-reading-row[data-new] [name="from"]').fill(marker);await page.locator('#settings .lake-reading-row[data-new] [name="to"]').fill('爱你');
+    await page.locator('#settings .lake-reading-row[data-new] [name="to"]').press('Enter');await page.waitForFunction(()=>!document.querySelector('#settings .lake-reading-row.editing'));await close();
     assert.deepEqual(state.rules.emote_words,[{from:marker,to:'爱你'}]);
     await imageSurface(page.locator('#lake-current .lake-message-text'), 'explicit reading still renders original image', 1, '更新');
     await page.evaluate(() => window.__richSettings('readings'));

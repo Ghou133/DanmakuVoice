@@ -957,9 +957,8 @@ function renderLakeTranscript(events, keys) {
   const deep = document.querySelector('#lake-deep');
   if (deep) deep.hidden = !lakeDeep;
   const identity = index >= 0 ? JSON.stringify([featured, events[index].observed_at_ms]) : '';
-  const signature = JSON.stringify([identity, index >= 0 ? messageParts(events[index]) : null, keys.slice(-4), events.slice(-4).map(messageParts), scene, room?.title, lakeObsTitle(), lakeSessionSummary, getLanguage(), viewerOpenIdentity]);
-  // Typing in the overlay title must not be replaced by the next redraw.
-  if (signature !== lakeTranscriptSignature && !lakeObsTitleEditing()) {
+  const signature = JSON.stringify([identity, index >= 0 ? messageParts(events[index]) : null, keys.slice(-4), events.slice(-4).map(messageParts), scene, room?.title, !!lakeObsTitle(), lakeSessionSummary, getLanguage(), viewerOpenIdentity]);
+  if (signature !== lakeTranscriptSignature) {
     for (const [key, node] of lakeMessageNodes) if (key !== featured) { node.remove(); lakeMessageNodes.delete(key); }
     current.querySelector('.lake-state')?.remove();
     if (index >= 0) {
@@ -989,10 +988,11 @@ function renderLakeTranscript(events, keys) {
     } else {
       const text = prepared ? lakeEnded ? t('今晚辛苦啦') : room.title || '' : 'waiting for the first word…';
       const title = lakeLettersHtml([{ type: 'text', text }]);
-      // The kicker edits the OBS overlay title in place, so it can be set for
-      // tonight without opening settings. Without an overlay it is just a label.
+      // The OBS overlay title sits where the category was, so it can be set for
+      // tonight without opening settings; it opens the same in-place editor as
+      // the room title. Without an overlay the kicker is just a label.
       const obsTitle = lakeObsTitle();
-      const obs = obsTitle ? ` <em>— OBS · <span class="lake-obs-title" data-lake-obs-title tabindex="0" role="textbox" aria-readonly="true" spellcheck="false" aria-label="${esc(t('OBS 叠加层主标题'))}" title="${esc(t('OBS 叠加层主标题'))}">${esc(obsTitle)}</span></em>` : '';
+      const obs = obsTitle ? ` <em>— OBS · <button type="button" class="lake-obs-title" data-action="onair.obs" data-lake-obs-title title="${esc(t('OBS 叠加层主标题'))}">${esc(obsTitle)}</button></em>` : '';
       const kicker = prepared && !lakeEnded ? `<span class="lake-title-kicker">TONIGHT’S TITLE${obs}</span>` : '';
       current.innerHTML = `<div class="lake-state${prepared ? '' : ' lake-waiting'}">${kicker}<${prepared && !lakeEnded ? `button type="button" data-action="onair.info" title="${esc(t('改标题'))}"` : 'span'} class="lake-state-title lake-message-text" data-size="${title.size}">${prepared ? title.html : esc(text)}</${prepared && !lakeEnded ? 'button' : 'span'}></div>`;
     }
@@ -1013,6 +1013,9 @@ function renderLakeTranscript(events, keys) {
     if (reflection && source) { reflection.innerHTML = source.innerHTML; reflection.dataset.size = source.dataset.size || 'normal'; reflection.classList.toggle('lake-waiting', !prepared && index < 0); reflection.classList.toggle('lake-restored', !!source.closest('.lake-restored')); }
     lakeTranscriptSignature = signature;
   }
+  // A saved OBS title changes only its own words: no redraw, no replayed letters.
+  const obsNode = current.querySelector('[data-lake-obs-title]'), obsText = lakeObsTitle();
+  if (obsNode && obsText && obsNode.textContent !== obsText) obsNode.textContent = obsText;
   const relative = current.querySelector('.lake-relative');
   if (relative && index >= 0) {
     const label = lakeMessageTime(events[index].observed_at_ms);
@@ -2255,7 +2258,7 @@ function updateLive() {
   void settleLakeWake().catch(showError);
   syncLakeReadingProgress();
   const notice = updateFallbackStatus(snapshot.queue || {});
-  const renderSignature = JSON.stringify([snapshot.live, snapshot.live_history, snapshot.queue, snapshot.setup, snapshot.account, snapshot.broadcast, snapshot.preferences?.broadcast_console, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, notice, viewerOpenIdentity]);
+  const renderSignature = JSON.stringify([snapshot.live, snapshot.live_history, snapshot.queue, snapshot.setup, snapshot.account, snapshot.broadcast, snapshot.preferences?.broadcast_console, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, notice, viewerOpenIdentity, lakeObsTitle()]);
   if (viewerContext) updateViewerModeration();
   if (liveRenderSignature === renderSignature) return;
   liveRenderSignature = renderSignature;
@@ -2736,7 +2739,9 @@ function scheduleAutosave(form, immediate = false, deferUid = false, composing =
   record.queue.schedule({ ...envelope, revision: record.revision }, { immediate });
 }
 
-async function flushAutosaves() {
+// Leaving a page, a section or a voice row never waits on an unfinished field:
+// what is complete is saved, and the rest is put down with no question asked.
+async function flushAutosaves(leaving = false) {
   if ([...settingsDialog.querySelectorAll('input,textarea,[contenteditable="true"]')].some(input => composingInputs.has(input))) {
     showToast(t('请先完成输入法选字，再切换或退出设置'), true);
     return false;
@@ -2747,6 +2752,9 @@ async function flushAutosaves() {
     scheduleAutosave(form, true);
     try { await record.queue.flush(); }
     catch { failed = true; copyFormDraft(form, record); }
+  }
+  if (leaving) {
+    for (const [form, record] of autosaves) if (record.touched && record.invalid) { record.queue.cancel(); record.touched = false; record.invalid = ''; formDrafts.delete(record.key); showAutoState(form); }
   }
   if (failed) showToast(t('部分更改未能保存，修改已保留在设置中'), true);
   return !failed && ![...autosaves.values()].some(record => record.touched && record.invalid);
@@ -2873,7 +2881,6 @@ function renderRoomSettings() {
   const expired = snapshot.live?.state === 'session_expired';
   const scanning = editor?.type === 'qr' && editor.provider === 'bilibili';
   const needsRoom = qrNeedsRoomFallback(snapshot);
-  const room = snapshot.setup?.room_id || snapshot.live_settings?.room_id;
   const identity = headerIdentity(snapshot);
   const name = loggedIn ? identity.name : t('未登录');
   const state = expired ? t('登录已失效') : loggedIn ? t('已登录') : t('未登录');
@@ -2885,10 +2892,58 @@ function renderRoomSettings() {
   const hero = scanning
     ? `<section class="lake-room-qr">${qrMarkup('bilibili', true)}<p class="lake-note">${esc(t('用哔哩哔哩 App 扫一扫'))}<br>${esc(t('在手机上确认登录'))}</p><p class="lake-note">${esc(t('二维码两分钟后会过期'))} · <button type="button" class="text-button" data-action="qr.retry">${esc(t('换一张'))}</button></p>${button(t('取消扫码'), 'editor.cancel', { class: 'small quiet' })}</section>`
     : ui`<section class="lake-room-account">${avatar}<div class="s-account-text"><strong>${esc(name)}</strong><span class="${expired ? 'lake-gold' : ''}">哔哩哔哩账号 · ${esc(state)}</span>${note ? `<small>${esc(note)}</small>` : ''}</div><div class="s-hero-actions">${heroActions}</div></section>`;
-  const changing = editor?.type === 'lake-room';
-  const card = changing ? `<form data-form="lake-room"><label class="lake-note" for="lake-room-id">${esc(t('直播间号'))}</label><input id="lake-room-id" name="room_id" value="${esc(room || '')}" inputmode="numeric" pattern="[1-9][0-9]*" required aria-label="${esc(t('直播间号'))}"><div class="actions">${button(t('好了'), 'lake.room.save', { class: 'primary small' })}${button(t('取消'), 'lake.editor.cancel', { class: 'quiet small' })}</div><p class="lake-note">${esc(t('切换直播间会先断开当前连接。'))}</p></form>` : `<div class="lake-room-number"><span>${esc(t('直播间号'))}</span><div><strong>${room ? esc(room) : '—'}</strong>${button(t('换一个'), 'lake.room.edit', { class: 'quiet small' })}</div><small>${esc(t('现在'))} · ${esc(snapshot.broadcast?.room?.live_status === 1 ? t('直播中') : t('还没开播'))}</small></div>`;
+  const card = `<div class="lake-room-number"><span>${esc(t('直播间号'))}</span><div>${lakeRoomNumberField()}</div><small>${esc(t('现在'))} · ${esc(snapshot.broadcast?.room?.live_status === 1 ? t('直播中') : t('还没开播'))}</small></div>`;
   const targetNote = needsRoom ? t('未找到本账号直播间，请先在 B站开通直播间后重新扫码') : '';
   return `<div class="lake-settings-page lake-room">${hero}${scanning ? '' : card}${targetNote ? `<p class="lake-note lake-gold">${esc(targetNote)}</p>` : ''}<footer class="lake-settings-footer">${loggedIn ? button(t('退出这个账号'), 'bili.logout', { class: 'quiet' }) : ''}</footer></div>`;
+}
+
+// The room number changes where it stands, like the room title on the lake:
+// 换一个 turns the number into its own field and the rest of the page steps
+// back. Enter or leaving the field saves it (a running room reconnects);
+// Escape puts it back. An empty, unchanged or impossible number just goes back.
+let lakeRoomSave = null;
+
+function lakeRoomNumberField(editing = false) {
+  const room = snapshot.setup?.room_id || snapshot.live_settings?.room_id;
+  return editing
+    ? `<input class="lake-room-input" value="${esc(room || '')}" inputmode="numeric" maxlength="16" autocomplete="off" spellcheck="false" aria-label="${esc(t('直播间号'))}">`
+    : `<strong>${room ? esc(room) : '—'}</strong>${button(t('换一个'), 'lake.room.edit', { class: 'quiet small' })}`;
+}
+
+function showLakeRoomNumber(editing) {
+  const card = settingsDialog.querySelector('.lake-room-number');
+  if (!card) return;
+  const focused = card.contains(document.activeElement);
+  card.classList.toggle('editing', editing);
+  card.querySelector('div').innerHTML = lakeRoomNumberField(editing);
+  const input = card.querySelector('input');
+  if (input) { input.focus({ preventScroll: true }); input.setSelectionRange(input.value.length, input.value.length); }
+  else if (focused) card.querySelector('button')?.focus({ preventScroll: true });
+}
+
+function commitLakeRoomNumber() {
+  const input = settingsDialog.querySelector('.lake-room-number.editing input');
+  if (!input) return Promise.resolve();
+  lakeRoomSave ||= saveLakeRoomNumber(input).finally(() => { lakeRoomSave = null; });
+  return lakeRoomSave;
+}
+
+async function saveLakeRoomNumber(input) {
+  const value = input.value.trim();
+  const saved = String(snapshot.setup?.room_id || snapshot.live_settings?.room_id || '');
+  if (value !== saved && validUid(value) && Number.isSafeInteger(Number(value))) {
+    const reconnect = !!snapshot.live?.running;
+    input.readOnly = true;
+    try {
+      if (reconnect) await command('live.disconnect');
+      await command('live.save', { room_id: numericId(value) });
+    } finally {
+      input.readOnly = false;
+      // Reception picks up on the saved room, or on the old one if the change failed.
+      if (reconnect) await command('live.connect').catch(() => { /* command() already showed it. */ });
+    }
+  }
+  if (input.isConnected) showLakeRoomNumber(false);
 }
 
 // ---- 开播 (experimental) ----
@@ -2999,24 +3054,20 @@ function lakeObsTitle() {
   return settings?.enabled ? settings.title || t('今晚的弹幕') : '';
 }
 
-function lakeObsTitleEditing() { return !!document.querySelector('[data-lake-obs-title][contenteditable="plaintext-only"]'); }
-
-function beginLakeObsTitle(node) {
-  if (node.isContentEditable) return;
-  node.dataset.original = node.textContent; node.contentEditable = 'plaintext-only'; node.setAttribute('aria-readonly', 'false'); node.focus();
-  const range = document.createRange(); range.selectNodeContents(node); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+// The OBS title saves itself when it is done (Enter or clicking away); an empty
+// field simply keeps the saved title. Escape closes without saving.
+async function saveOverlayTitleForm(form) {
+  const value = String(form?.elements.title?.value || '').replace(/\s+/g, ' ').trim();
+  const saved = lakeObsTitle();
+  if (onAirPanelMode === 'obs') closeOnAirPanel();
+  if (!value || value === saved || !snapshot.overlay?.settings?.enabled) return;
+  await command('overlay.title.save', { title: value });
 }
 
-async function endLakeObsTitle(node) {
-  const original = node.dataset.original, cancelled = !!node.dataset.cancelled;
-  const value = String(node.textContent || '').replace(/\s+/g, ' ').trim();
-  node.contentEditable = 'false'; node.setAttribute('aria-readonly', 'true'); delete node.dataset.original; delete node.dataset.cancelled;
-  const settings = snapshot.overlay?.settings;
-  const redraw = () => { lakeTranscriptSignature = ''; renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); };
-  if (cancelled || !settings || value === original) { node.textContent = original; return redraw(); }
-  if (!value || [...value].length > 24 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) { node.textContent = original; showToast(t('请填写 1 到 24 字的叠加层主标题'), true); return redraw(); }
-  try { await command('overlay.title.save', { title: value }); }
-  finally { redraw(); }
+function lakeOverlayTitleFields() {
+  const title = lakeObsTitle();
+  const id = `overlay-title-${++broadcastFieldSequence}`;
+  return `<span class="lake-edit-kicker">TONIGHT’S TITLE<em>— OBS</em></span><div class="onair-field"><label class="sr-only" for="${id}">${esc(t('OBS 叠加层主标题'))}</label><span class="onair-input"><input id="${id}" name="title" value="${esc(title)}" maxlength="24" required autocomplete="off" spellcheck="false"><output class="onair-count" data-title-count><span data-count-number>${Array.from(title).length}</span><i> / 24</i></output></span></div>`;
 }
 
 function broadcastAreaPath(view = snapshot.broadcast || {}, room = view.room) {
@@ -3342,6 +3393,7 @@ function renderOnAirPanel() {
   const content = onAirPanelMode === 'details'
     ? [onAirBitrate, onAirBitrateBusy, onAirBitrateError]
     : onAirPanelMode === 'info' ? [room.title, room.parent_area_id, room.area_id, view.areas]
+      : onAirPanelMode === 'obs' ? [lakeObsTitle()]
       : [view.face_image, room.live_status, view.busy, broadcastBusy, lakeFaceError];
   const signature = JSON.stringify([onAirPanelMode, content, getLanguage()]);
   if (panel.dataset.signature === signature && !panel.hidden) return;
@@ -3354,6 +3406,8 @@ function renderOnAirPanel() {
   const head = (title, note = '') => `<header class="onair-panel-head"><div><strong>${esc(title)}</strong>${note ? `<small>${esc(note)}</small>` : ''}</div><button type="button" class="onair-close" data-action="onair.close" aria-label="${esc(t('关闭'))}" title="${esc(t('关闭'))}">${icon('close')}</button></header>`;
   if (onAirPanelMode === 'info') {
     panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="broadcast-room" class="onair-info lake-title-form" novalidate><span class="lake-edit-kicker">TONIGHT’S TITLE<em>— ${esc(t('B站直播间'))}</em></span>${lakeBroadcastInfoFields(view, room)}<div class="onair-panel-foot"><button type="button" class="onair-text-button" data-action="onair.close">${esc(t('取消'))}</button><button type="submit" class="onair-save">${esc(t('好了'))}</button></div></form>`;
+  } else if (onAirPanelMode === 'obs') {
+    panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="overlay-title" class="onair-info lake-title-form" novalidate>${lakeOverlayTitleFields()}</form>`;
   } else if (onAirPanelMode === 'face' && view.face_image) {
     panel.innerHTML = `<span class="lake-face-kicker">FACE CHECK</span><h3>${esc(t('开播前需要验证本人'))}</h3><div class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></div><p class="lake-face-note">${esc(t('用哔哩哔哩 App 扫一扫，完成验证后会自动开播。'))}</p><div class="onair-panel-foot">${lakeFaceError ? `<span role="alert">${esc(lakeFaceError)}</span><button type="button" class="onair-text-button" data-action="broadcast.start">${esc(t('重试'))}</button>` : `<span class="lake-face-waiting" role="status">${esc(t('等待验证…'))}</span>`}</div>`;
   } else if (onAirPanelMode === 'details') {
@@ -3394,9 +3448,10 @@ function openOnAirPanel(mode) {
   panel.dataset.signature = '';
   renderOnAirPanel();
   panel.hidden = false;
-  document.querySelector('#live-shell')?.classList.toggle('lake-editing', mode === 'info');
+  document.querySelector('#live-shell')?.classList.toggle('lake-editing', mode === 'info' || mode === 'obs');
+  document.querySelector('#live-shell')?.classList.toggle('lake-editing-obs', mode === 'obs');
   document.querySelector('[data-action="onair.details"]')?.setAttribute('aria-expanded', String(mode === 'details'));
-  if (mode === 'info') panel.querySelector('input[name="title"]')?.focus({ preventScroll: true });
+  if (mode === 'info' || mode === 'obs') panel.querySelector('input[name="title"]')?.focus({ preventScroll: true });
   if (mode === 'details') { onAirBitrate = null; void readOnAirBitrate(); }
   if (mode === 'face') { renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); updateOnAir(); }
 }
@@ -3406,7 +3461,7 @@ function closeOnAirPanel(focus = false) {
   const wasFace = onAirPanelMode === 'face';
   if (wasFace) cancelLakeFaceWait();
   onAirPanelMode = '';
-  document.querySelector('#live-shell')?.classList.remove('lake-editing');
+  document.querySelector('#live-shell')?.classList.remove('lake-editing', 'lake-editing-obs');
   ++onAirBitrateSequence;
   onAirBitrateBusy = false;
   onAirDrafts.clear();
@@ -4047,7 +4102,7 @@ async function handleLakeVoiceAction(action, id, target) {
   }
   if (action === 'voice.provider') { await selectLakeVoiceProvider(id); return true; }
   if (action === 'voice.edit' || action === 'preset.edit' || action === 'voice.added.edit') {
-    if (!await flushAutosaves()) return true;
+    if (!await flushAutosaves(true)) return true;
     const preset = snapshot.presets.find(item => item.id === id);
     const opening = action === 'voice.added.edit' || lakeVoiceEditId !== id;
     editor = null; lakeVoiceEditId = opening ? id : '';
@@ -4556,36 +4611,148 @@ function renderLakeSettingsHome() {
   return `<div class="lake-settings-page lake-home">${warning}<nav class="lake-home-primary" aria-label="${esc(t('设置分类'))}">${row('room', avatar, '直播间', snapshot.account?.user_id ? identity.name : t('还没登录'))}${row('voices', lakeMiniWave(), '声音', `${voice ? presetLabel(voice) : t('还没有默认声音')} · ${snapshot.presets.length}`)}${row('overlay', `<span class="lake-overlay-mini${obsConnected ? ' on' : ''}"><i></i><b></b><b></b><b></b></span>`, 'OBS', obsDetail)}${row('readings', `<i class="lake-home-count">${count}</i>`, '记住的读法', t('观众名字、词和表情'))}</nav><div class="lake-home-foot"><nav class="lake-home-secondary" aria-label="${esc(t('更多设置'))}">${minor('general', '通用')}${minor('advanced', '高级')}</nav><footer class="lake-settings-footer">${lakeVersionRow()}</footer></div></div>`;
 }
 
+// 记住的读法 is a single page. A row is edited where it is: no editor page, no
+// kind tabs, no save or cancel. It saves itself once complete, on Enter or when
+// focus leaves it; Escape puts it back. Nothing ever asks to discard a draft.
+const lakeReadingKinds = [['user_words', '观众', '添加观众'], ['message_words', '词', '添加词'], ['emote_words', '表情', '添加表情']];
+const lakeReadingCommits = new WeakMap();
+
 function renderLakeReadings() {
   if (editor?.type === 'alias') return renderAliasEditor();
   if (editor?.type === 'binding') return renderBindingEditor(editor.id);
-  const composing = editor?.type === 'lake-reading';
-  const editingKey = composing && editor.row ? `${editor.row.kind}\u0000${editor.row.from}` : '';
   const rows = lakeReadingRows();
-  const query = lakeReadingsSearch.toLocaleLowerCase();
-  const group = (kind, label) => {
-    const items = rows.map((row, index) => ({ ...row, index })).filter(row => row.kind === kind);
-    if (!items.length) return '';
-    return `<section class="lake-reading-group" data-reading-group><h3>${esc(t(label))}<i>${items.length}</i></h3>${items.map(row => {
-      if (`${row.kind}\u0000${row.from}` === editingKey) return renderLakeReadingComposer();
-      const preset = snapshot.presets.find(item => item.id === row.binding?.preset_id);
-      const emote = kind === 'emote_words' ? normalizedEvents(snapshot).flatMap(item => item.emotes || []).find(item => item.text === row.from) : null;
-      const image = emote && safeMediaUrl(emote.url);
-      const marker = kind === 'user_words' ? `<i class="lake-reading-dot color-${identityColor(row.from)}"></i>` : kind === 'emote_words' ? (image ? `<img src="${esc(image)}" alt="" referrerpolicy="no-referrer">` : '<span>☺</span>') : '';
-      const search = `${row.from} ${row.to} ${preset ? presetLabel(preset) : ''}`.toLocaleLowerCase();
-      return `<div class="lake-reading-row" data-reading-search="${esc(search)}"${query && !search.includes(query) ? ' hidden' : ''}><button type="button" data-action="lake.reading.edit" data-id="${row.index}" aria-label="${esc(t('编辑读法'))}: ${esc(row.from)}"><span class="lake-reading-mark">${marker}</span><span class="lake-reading-from">${esc(row.from)}</span><span class="lake-reading-arrow">→</span><span class="lake-reading-to">${esc(row.to)}${preset ? `<small>${lakeMiniWave()}${esc(presetLabel(preset))}</small>` : ''}</span></button>${iconButton('close', t('删除这条'), 'lake.reading.delete', String(row.index))}</div>`;
-    }).join('')}</section>`;
-  };
-  const adding = composing && !editor.row ? renderLakeReadingComposer() : '';
-  const emptyState = adding ? '' : `<div class="lake-readings-empty"><h3>${esc(t('还没有记住的读法'))}</h3><p>${esc(t('教它几个名字、词和表情，下次就会这样读。'))}</p><div aria-hidden="true"><span>Kinoko7</span>→<strong>${esc(t('蘑菇七'))}</strong><span>yyds</span>→<strong>${esc(t('永远的神'))}</strong><span>☺ doge</span>→<strong>${esc(t('狗头'))}</strong></div>${button(t('添加一条'), 'lake.reading.add', { class: 'primary' })}</div>`;
-  return `<div class="lake-settings-page"><div class="lake-readings-search">${icon('search')}<input id="lake-readings-search" type="search" value="${esc(lakeReadingsSearch)}" placeholder="${esc(t('找一个名字、词或表情'))}" aria-label="${esc(t('找一个名字、词或表情'))}">${iconButton('plus', t('添加一条'), 'lake.reading.add')}</div><div class="lake-reading-list">${adding}${rows.length ? group('user_words', '观众') + group('message_words', '词') + group('emote_words', '表情') : emptyState}</div></div>`;
+  const intro = rows.length ? '' : `<div class="lake-readings-empty"><h3>${esc(t('还没有记住的读法'))}</h3><p>${esc(t('教它几个名字、词和表情，下次就会这样读。'))}</p><div aria-hidden="true"><span>Kinoko7</span>→<strong>${esc(t('蘑菇七'))}</strong><span>yyds</span>→<strong>${esc(t('永远的神'))}</strong><span>☺ doge</span>→<strong>${esc(t('狗头'))}</strong></div></div>`;
+  const groups = lakeReadingKinds.map(([kind, label, add]) => {
+    const items = rows.filter(row => row.kind === kind);
+    return `<section class="lake-reading-group" data-reading-group="${kind}"><h3><span>${esc(t(label))}</span><i data-reading-count>${items.length}</i>${iconButton('plus', t(add), 'lake.reading.add', kind)}</h3>${items.map(lakeReadingRowHtml).join('')}</section>`;
+  }).join('');
+  return `<div class="lake-settings-page"><div class="lake-readings-search">${icon('search')}<input id="lake-readings-search" type="search" value="${esc(lakeReadingsSearch)}" placeholder="${esc(t('找一个名字、词或表情'))}" aria-label="${esc(t('找一个名字、词或表情'))}"></div>${intro}<div class="lake-reading-list">${groups}</div></div>`;
 }
 
-function renderLakeReadingComposer() {
-  const current = editor.row || { kind: 'user_words', from: '', to: '' };
-  const kinds = [['user_words', '观众'], ['message_words', '词'], ['emote_words', '表情']];
-  const voices = option('', t('跟随默认'), current.binding?.preset_id || '') + snapshot.presets.map(preset => option(preset.id, presetLabel(preset), current.binding?.preset_id)).join('');
-  return `<form data-form="lake-reading" class="lake-reading-composer"><div class="lake-obs-choices lake-reading-kinds" role="radiogroup" aria-label="${esc(t('种类'))}">${kinds.map(([kind, label]) => `<label><input type="radio" name="kind" value="${kind}"${kind === current.kind ? ' checked' : ''}><span>${esc(t(label))}</span></label>`).join('')}</div><div class="lake-reading-pair"><input name="from" value="${esc(current.from)}" placeholder="${esc(t('原文'))}" aria-label="${esc(t('原文'))}" required maxlength="160" autocomplete="off" spellcheck="false"><span aria-hidden="true">→</span><input name="to" value="${esc(current.to)}" placeholder="${esc(t('读法'))}" aria-label="${esc(t('读法'))}" maxlength="500" autocomplete="off" spellcheck="false"></div><div data-reading-voice${current.kind !== 'user_words' ? ' hidden' : ''}>${select('preset_id', t('TA 的声音'), voices)}</div><input type="hidden" name="user_id" value="${esc(current.binding?.user_id || '')}"><p class="lake-note" data-reading-emote-note${current.kind !== 'emote_words' ? ' hidden' : ''}>${esc(t('填表情的完整名字，例如 [doge]。'))}</p><div class="lake-reading-actions">${button(t(editor.row ? '保存' : '记住'), 'lake.reading.save', { class: 'primary' })}${button(t('取消'), 'lake.editor.cancel', { class: 'quiet' })}</div></form>`;
+function lakeReadingFind(kind, from) { return lakeReadingRows().find(row => row.kind === kind && row.from === from) || null; }
+
+function lakeReadingMarker(row) {
+  if (row.kind === 'user_words') return row.from ? `<i class="lake-reading-dot color-${identityColor(row.from)}"></i>` : '';
+  if (row.kind !== 'emote_words') return '';
+  const emote = normalizedEvents(snapshot).flatMap(item => item.emotes || []).find(item => item.text === row.from);
+  const image = emote && safeMediaUrl(emote.url);
+  return image ? `<img src="${esc(image)}" alt="" referrerpolicy="no-referrer">` : '<span>☺</span>';
+}
+
+function lakeReadingRowHtml(row) {
+  const preset = snapshot.presets.find(item => item.id === row.binding?.preset_id);
+  const query = lakeReadingsSearch.toLocaleLowerCase();
+  const search = `${row.from} ${row.to} ${preset ? presetLabel(preset) : ''}`.toLocaleLowerCase();
+  return `<div class="lake-reading-row" data-kind="${row.kind}" data-from="${esc(row.from)}" data-reading-search="${esc(search)}"${query && !search.includes(query) ? ' hidden' : ''}><button type="button" data-action="lake.reading.edit" aria-label="${esc(t('编辑读法'))}: ${esc(row.from)}"><span class="lake-reading-mark">${lakeReadingMarker(row)}</span><span class="lake-reading-from">${esc(row.from)}</span><span class="lake-reading-arrow">→</span><span class="lake-reading-to">${esc(row.to)}${preset ? `<small>${lakeMiniWave()}${esc(presetLabel(preset))}</small>` : ''}</span></button>${iconButton('close', t('删除这条'), 'lake.reading.delete')}</div>`;
+}
+
+// The same four columns as a shown row; only what can change becomes a field.
+// A viewer's name and an emote's marker are the row's identity, so an existing
+// row only edits its reading (and a viewer's voice).
+function lakeReadingEditHtml(row) {
+  const fresh = !!row.fresh;
+  const named = { user_words: '观众名字', message_words: '原文', emote_words: '[表情名]' }[row.kind];
+  const from = fresh || row.kind === 'message_words'
+    ? `<input class="lake-reading-input" name="from" value="${esc(row.from)}" placeholder="${esc(t(named))}" aria-label="${esc(t(named))}" maxlength="160" autocomplete="off" spellcheck="false">`
+    : `<span class="lake-reading-from">${esc(row.from)}</span>`;
+  const voices = row.kind === 'user_words' ? `<select name="preset_id" aria-label="${esc(t('TA 的声音'))}">${option('', t('跟随默认'), row.binding?.preset_id || '')}${snapshot.presets.map(preset => option(preset.id, presetLabel(preset), row.binding?.preset_id)).join('')}</select>` : '';
+  return `<div class="lake-reading-row editing" data-kind="${row.kind}" data-from="${esc(fresh ? '' : row.from)}"${fresh ? ' data-new' : ''}><div class="lake-reading-edit"><span class="lake-reading-mark">${fresh ? '' : lakeReadingMarker(row)}</span>${from}<span class="lake-reading-arrow">→</span><span class="lake-reading-to"><input class="lake-reading-input" name="to" value="${esc(row.to)}" placeholder="${esc(t('读法'))}" aria-label="${esc(t('读法'))}" maxlength="500" autocomplete="off" spellcheck="false">${voices}</span></div><span class="lake-reading-tail" aria-hidden="true"></span></div>`;
+}
+
+function lakeReadingElement(html) {
+  const holder = document.createElement('div');
+  holder.innerHTML = html;
+  return holder.firstElementChild;
+}
+
+function updateLakeReadingCounts() {
+  for (const group of settingsDialog.querySelectorAll('[data-reading-group]')) {
+    const count = group.querySelector('[data-reading-count]');
+    const value = String(group.querySelectorAll('.lake-reading-row:not([data-new])').length);
+    if (count && count.textContent !== value) count.textContent = value;
+  }
+}
+
+function closeLakeReadingRow(element, row) {
+  if (!element.isConnected) return;
+  const focused = element.contains(document.activeElement);
+  if (!row) { element.remove(); updateLakeReadingCounts(); return; }
+  const next = lakeReadingElement(lakeReadingRowHtml(row));
+  element.replaceWith(next);
+  if (focused) next.querySelector('button')?.focus({ preventScroll: true });
+  updateLakeReadingCounts();
+}
+
+async function openLakeReadingRow(element) {
+  if (!element?.isConnected) return;
+  const kind = element.dataset.kind, from = element.dataset.from;
+  await commitLakeReadingRows();
+  const row = lakeReadingFind(kind, from);
+  const current = [...settingsDialog.querySelectorAll('.lake-reading-row:not(.editing)')].find(node => node.dataset.kind === kind && node.dataset.from === from);
+  if (!row || !current) return;
+  const next = lakeReadingElement(lakeReadingEditHtml(row));
+  current.replaceWith(next);
+  mountSelects(next);
+  const input = next.querySelector('[name="to"]');
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+async function addLakeReadingRow(kind) {
+  const group = settingsDialog.querySelector(`[data-reading-group="${kind}"]`);
+  if (!group) return;
+  const draft = group.querySelector('.lake-reading-row[data-new]');
+  if (draft) { draft.querySelector('input')?.focus({ preventScroll: true }); return; }
+  await commitLakeReadingRows();
+  const next = lakeReadingElement(lakeReadingEditHtml({ kind, from: '', to: '', fresh: true }));
+  group.querySelector('h3').after(next);
+  mountSelects(next);
+  next.querySelector('[name="from"]').focus({ preventScroll: true });
+}
+
+function commitLakeReadingRow(element, leaving = false) {
+  if (!lakeReadingCommits.has(element)) lakeReadingCommits.set(element, saveLakeReadingRow(element, leaving).finally(() => lakeReadingCommits.delete(element)));
+  return lakeReadingCommits.get(element);
+}
+
+async function commitLakeReadingRows(leaving = false) {
+  for (const element of [...settingsDialog.querySelectorAll('.lake-reading-row.editing')]) {
+    try { await commitLakeReadingRow(element, leaving); } catch { /* The command already showed its error; the draft stays. */ }
+  }
+}
+
+async function saveLakeReadingRow(element, leaving) {
+  const kind = element.dataset.kind, fresh = element.hasAttribute('data-new');
+  const original = fresh ? null : lakeReadingFind(kind, element.dataset.from);
+  const field = name => element.querySelector(`[name="${name}"]`);
+  const from = (field('from') ? field('from').value : element.dataset.from).trim();
+  const to = field('to').value.trim();
+  const presetId = kind === 'user_words' ? field('preset_id')?.value || '' : '';
+  if (!from || (!to && !presetId)) {
+    // Unfinished: an existing row keeps what it had; a new line stays where it
+    // is until the page is left, and an untouched one simply goes away.
+    if (!fresh) return closeLakeReadingRow(element, original);
+    if (leaving || (!from && !to && !presetId)) { element.remove(); updateLakeReadingCounts(); }
+    return;
+  }
+  const sameVoice = (original?.binding?.preset_id || '') === presetId;
+  if (original && original.from === from && (original.to || '') === to && sameVoice) return closeLakeReadingRow(element, original);
+  const rules = structuredClone(snapshot.rules);
+  const list = rules[kind] || [];
+  const at = original ? list.findIndex(item => item.from === original.from) : -1;
+  const next = list.filter(item => item.from !== from && item.from !== original?.from);
+  // An edited line keeps its place; a new one goes first, where it was typed.
+  if (to) next.splice(at >= 0 ? Math.min(at, next.length) : 0, 0, { from, to });
+  rules[kind] = next;
+  if (JSON.stringify(next) !== JSON.stringify(snapshot.rules[kind] || [])) await command('rules.save', { rules });
+  if (kind === 'user_words' && !sameVoice) {
+    const uid = original?.binding?.user_id ?? null;
+    if (presetId) await command('bindings.save', { id: original?.bindingId || '', binding: { platform: 'bilibili', user_id: uid, user_name: uid ? null : from, legacy_user_name: null, preset_id: presetId, enabled: true } });
+    else if (original?.bindingId) await command('bindings.delete', { id: original.bindingId, confirmed: true });
+  }
+  // The same original text elsewhere in the group was just replaced.
+  for (const other of settingsDialog.querySelectorAll(`[data-reading-group="${kind}"] .lake-reading-row:not(.editing)`)) if (other.dataset.from === from) other.remove();
+  closeLakeReadingRow(element, lakeReadingFind(kind, from));
 }
 
 function lakeTemplateMarkup(value) {
@@ -4644,55 +4811,23 @@ function syncLakeTemplate(node) {
 
 async function handleLakeSettingsAction(action, id, target) {
   if (!action.startsWith('lake.')) return false;
-  if (!['lake.room.relogin', 'lake.room.edit', 'lake.room.save', 'lake.editor.cancel', 'lake.reading.add', 'lake.reading.edit', 'lake.reading.save', 'lake.reading.delete', 'lake.advanced.section', 'lake.advanced.reset', 'lake.template.insert', 'lake.template.reset', 'lake.sound.add', 'lake.sound.pick', 'lake.sound.audition', 'lake.backup.export', 'lake.backup.import'].includes(action)) return false;
-  if (action === 'lake.editor.cancel') { if (!await allowLeaveSettings()) return true; editor = null; renderSettings(); return true; }
+  if (!['lake.room.relogin', 'lake.room.edit', 'lake.reading.add', 'lake.reading.edit', 'lake.reading.delete', 'lake.advanced.section', 'lake.advanced.reset', 'lake.template.insert', 'lake.template.reset', 'lake.sound.add', 'lake.sound.pick', 'lake.sound.audition', 'lake.backup.export', 'lake.backup.import'].includes(action)) return false;
   if (action === 'lake.room.relogin') { await openSettings('room'); await handleAction('bili.begin', '', target); return true; }
-  if (['lake.room.edit', 'lake.reading.add', 'lake.reading.edit'].includes(action)) {
-    if (!await allowLeaveSettings()) return true;
-    editor = action === 'lake.room.edit' ? { type: 'lake-room' } : { type: 'lake-reading', row: action === 'lake.reading.edit' ? lakeReadingRows()[Number(id)] : null };
-    renderSettings();
-    const first = settingsDialog.querySelector('[data-form="lake-reading"] [name="from"], [data-form="lake-room"] input');
-    const target = action === 'lake.reading.edit' ? first?.closest('form')?.querySelector('[name="to"]') : first;
-    target?.focus({ preventScroll: true });
-    return true;
-  }
-  if (action === 'lake.room.save') {
-    const form = target.closest('form');
-    if (!form.reportValidity()) return true;
-    const reconnect = !!snapshot.live?.running;
-    if (reconnect) await command('live.disconnect');
-    await command('live.save', { room_id: numericId(form.elements.room_id.value) });
-    if (reconnect) await command('live.connect');
-    delete form.dataset.dirty; editor = null; renderSettings(); return true;
-  }
-  if (action === 'lake.reading.save') {
-    const form = target.closest('form');
-    if (!form.reportValidity()) return true;
-    if (!await flushAutosaves()) return true;
-    const kind = form.elements.kind.value;
-    const from = form.elements.from.value.trim(), to = form.elements.to.value.trim();
-    const presetId = kind === 'user_words' ? form.elements.preset_id.value : '';
-    if (!from || (!to && !presetId)) throw new Error(t('填写读法，或给这位观众选一个声音。'));
-    const original = editor.row;
-    const rules = structuredClone(snapshot.rules);
-    if (original) rules[original.kind] = (rules[original.kind] || []).filter(row => row.from !== original.from);
-    if (to) rules[kind] = [...(rules[kind] || []).filter(row => row.from !== from), { from, to }];
-    await command('rules.save', { rules });
-    if (presetId) await command('bindings.save', { id: original?.bindingId || '', binding: { platform: 'bilibili', user_id: form.elements.user_id.value ? numericId(form.elements.user_id.value) : null, user_name: form.elements.user_id.value ? null : from, legacy_user_name: null, preset_id: presetId, enabled: true } });
-    else if (original?.bindingId) await command('bindings.delete', { id: original.bindingId, confirmed: true });
-    delete form.dataset.dirty; editor = null; renderSettings(); showToast(t('读法已记住')); return true;
-  }
+  if (action === 'lake.room.edit') { showLakeRoomNumber(true); return true; }
+  if (action === 'lake.reading.edit') { await openLakeReadingRow(target.closest('.lake-reading-row')); return true; }
+  if (action === 'lake.reading.add') { await addLakeReadingRow(id); return true; }
   if (action === 'lake.reading.delete') {
     if (!await flushAutosaves()) return true;
-    const row = lakeReadingRows()[Number(id)]; if (!row) return true;
+    const element = target.closest('.lake-reading-row');
+    const row = element && lakeReadingFind(element.dataset.kind, element.dataset.from); if (!row) return true;
     const rules = structuredClone(snapshot.rules);
     rules[row.kind] = (rules[row.kind] || []).filter(item => item.from !== row.from);
     await command('rules.save', { rules });
     if (row.bindingId) await command('bindings.delete', { id: row.bindingId, confirmed: true });
-    renderSettings(); return true;
+    element.remove(); updateLakeReadingCounts(); return true;
   }
   if (action === 'lake.advanced.section') {
-    if (!await flushAutosaves()) return true;
+    if (!await flushAutosaves(true)) return true;
     lakeAdvancedSection = lakeAdvancedSection === id ? '' : id; renderSettings(); return true;
   }
   if (action === 'lake.advanced.reset') {
@@ -4734,7 +4869,8 @@ async function handleLakeSettingsAction(action, id, target) {
     if (!snapshot.assets.length) { await handleLakeSettingsAction('lake.sound.pick', '', target); if (!snapshot.assets.length) return true; }
     const list = settingsDialog.querySelector('[data-dictionary="sounds"]');
     list.insertAdjacentHTML('beforeend', `<div class="dict-row lake-sound-row"><span>「</span><input data-key="from" aria-label="${esc(t('关键词'))}" required><span>」→</span><select data-key="to" aria-label="${esc(t('音效'))}">${snapshot.assets.map(asset => option(asset.id, asset.name, snapshot.assets[0]?.id)).join('')}</select>${iconButton('play', t('试听音效'), 'lake.sound.audition')}${iconButton('close', t('删除这条'), 'dictionary.remove')}</div>`);
-    mountSelects(list); list.lastElementChild.querySelector('input').focus(); scheduleAutosave(list.closest('form')); return true;
+    // An empty line is not a draft yet: it saves itself once its keyword is typed.
+    mountSelects(list); list.lastElementChild.querySelector('input').focus(); return true;
   }
   if (action === 'lake.backup.export' || action === 'lake.backup.import') {
     if (!await allowLeaveSettings()) return true;
@@ -4752,7 +4888,6 @@ async function handleLakeSettingsAction(action, id, target) {
 
 function installLakeSettingsEvents() {
   for (const type of ['lake-thresholds', 'lake-templates']) autoFormTypes.add(type);
-  for (const type of ['lake-reading', 'lake-room']) manualSaveFormTypes.add(type);
   // Pages slide in sideways; focus landing mid-slide must not leave the page scrolled sideways.
   settingsDialog.addEventListener('scroll', event => { if (event.target.id === 'settings-content' && event.target.scrollLeft) event.target.scrollLeft = 0; }, true);
   const scrim = document.createElement('button'); scrim.type = 'button'; scrim.className = 'lake-settings-scrim'; scrim.hidden = true; scrim.tabIndex = -1; scrim.setAttribute('aria-label', t('关闭设置')); document.body.append(scrim);
@@ -4768,10 +4903,33 @@ function installLakeSettingsEvents() {
     const template = event.target.closest('[data-lake-template]');
     if (template) syncLakeTemplate(template);
   }, true);
-  settingsDialog.addEventListener('change', event => {
-    if (event.target.name !== 'kind' || !event.target.closest('[data-form="lake-reading"]')) return;
-    settingsDialog.querySelector('[data-reading-voice]').hidden = event.target.value !== 'user_words';
-    settingsDialog.querySelector('[data-reading-emote-note]').hidden = event.target.value !== 'emote_words';
+  // A reading row being edited: Enter saves it, Escape puts it back (and does not
+  // close the drawer), leaving the row saves it. An open voice menu keeps its keys.
+  settingsDialog.addEventListener('keydown', event => {
+    const element = event.target.closest?.('.lake-reading-row.editing');
+    if (!element || !['Enter', 'Escape'].includes(event.key) || event.isComposing || event.keyCode === 229 || composingInputs.has(event.target)) return;
+    if (event.target.closest('.select-control') && (event.key === 'Enter' || event.target.getAttribute('aria-expanded') === 'true')) return;
+    event.preventDefault(); event.stopPropagation();
+    if (event.key === 'Enter') { void commitLakeReadingRow(element).catch(() => {}); return; }
+    if (element.hasAttribute('data-new')) { const add = element.closest('[data-reading-group]')?.querySelector('h3 .icon-button'); element.remove(); updateLakeReadingCounts(); add?.focus({ preventScroll: true }); return; }
+    closeLakeReadingRow(element, lakeReadingFind(element.dataset.kind, element.dataset.from));
+  }, true);
+  settingsDialog.addEventListener('focusout', event => {
+    const element = event.target.closest?.('.lake-reading-row.editing');
+    if (!element || (event.relatedTarget && element.contains(event.relatedTarget))) return;
+    setTimeout(() => { if (element.isConnected && !element.contains(document.activeElement)) void commitLakeReadingRow(element).catch(() => {}); });
+  });
+  // The room number being changed: the same keys, and leaving the field saves it.
+  settingsDialog.addEventListener('keydown', event => {
+    const card = event.target.closest?.('.lake-room-number.editing');
+    if (!card || !['Enter', 'Escape'].includes(event.key) || event.isComposing || event.keyCode === 229 || composingInputs.has(event.target)) return;
+    event.preventDefault(); event.stopPropagation();
+    if (event.key === 'Enter') void commitLakeRoomNumber().catch(() => {});
+    else if (!lakeRoomSave) showLakeRoomNumber(false);
+  }, true);
+  settingsDialog.addEventListener('focusout', event => {
+    const input = event.target.closest?.('.lake-room-number.editing input');
+    if (input) setTimeout(() => { if (input.isConnected && document.activeElement !== input) void commitLakeRoomNumber().catch(() => {}); });
   });
   settingsDialog.addEventListener('pointerdown', event => {
     // Collapsing the focused row's tools on pointerdown would move later
@@ -4788,10 +4946,6 @@ function installLakeSettingsEvents() {
     const selection = getSelection(); if (!selection?.rangeCount) return;
     const range = selection.getRangeAt(0); range.deleteContents(); const plain = document.createTextNode(text); range.insertNode(plain); range.setStartAfter(plain); range.collapse(true); selection.removeAllRanges(); selection.addRange(range); syncLakeTemplate(node);
   });
-  settingsDialog.addEventListener('submit', event => {
-    if (!['lake-reading', 'lake-room'].includes(event.target.dataset.form)) return;
-    event.preventDefault(); event.stopImmediatePropagation(); const button = event.target.querySelector('[data-action$=".save"]'); if (button) button.click();
-  }, true);
   document.addEventListener('keydown', event => {
     if (!settingsDialog.open || confirmationDialog.open) return;
     if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); void closeSettings(); }
@@ -5018,7 +5172,7 @@ async function saveLakeObsPassword(root = settingsDialog) {
 async function handleLakeObsAction(action, id, target) {
   if (!action.startsWith('lake.obs.')) return false;
   if (action === 'lake.obs.advanced' || action === 'lake.obs.preview' || action === 'lake.obs.back') {
-    if (!await flushAutosaves()) return true;
+    if (!await flushAutosaves(true)) return true;
     await saveLakeObsPassword();
     lakeObsPage = action.endsWith('advanced') ? 'advanced' : 'preview'; renderSettings();
   } else if (action === 'lake.obs.password.show') {
@@ -5072,15 +5226,17 @@ function installLakeObsEvents() {
   const beginEdit = node => {
     if (node.contentEditable === 'true') return;
     node.dataset.original = node.textContent; node.contentEditable = 'true'; node.setAttribute('aria-readonly', 'false'); node.focus();
-    const range = document.createRange(); range.selectNodeContents(node); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    // The lilac caret waits at the end, as in every in-place edit; nothing is painted with a selection.
+    const range = document.createRange(); range.selectNodeContents(node); range.collapse(false); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
   };
   settingsDialog.addEventListener('dblclick', event => { const node = event.target.closest('[data-ovp-edit]'); if (node) { event.preventDefault(); beginEdit(node); } });
   settingsDialog.addEventListener('focusout', event => {
     const node = event.target.closest('[data-ovp-edit]'); if (!node || node.contentEditable !== 'true') return;
     const name = node.dataset.ovpEdit, form = node.closest('form'), value = String(node.textContent || '').trim();
     const limit = name === 'title' ? 24 : 64;
-    if (node.dataset.cancelled) { node.textContent = node.dataset.original; delete node.dataset.cancelled; }
-    else if ((name === 'title' && !value) || [...value].length > limit || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) { node.textContent = node.dataset.original; showToast(t(name === 'title' ? '请填写 1 到 24 字的叠加层主标题' : '副标题最多 64 个字'), true); }
+    // An emptied title simply goes back, as it does on the lake.
+    if (node.dataset.cancelled || (name === 'title' && !value)) { node.textContent = node.dataset.original; delete node.dataset.cancelled; }
+    else if ([...value].length > limit || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) { node.textContent = node.dataset.original; showToast(t(name === 'title' ? '请填写 1 到 24 字的叠加层主标题' : '副标题最多 64 个字'), true); }
     else { form.elements[name].value = value; scheduleAutosave(form, true); }
     node.contentEditable = 'false'; node.setAttribute('aria-readonly', 'true'); delete node.dataset.original; updateOverlayPreview();
   });
@@ -5178,7 +5334,9 @@ async function connectFishCredential(credential, form = null) {
 }
 
 async function allowLeaveSettings() {
-  if (!await flushAutosaves()) return false;
+  await commitLakeReadingRows(true);
+  await commitLakeRoomNumber().catch(() => { /* The command already showed its error. */ });
+  if (!await flushAutosaves(true)) return false;
   const dots = settingsDialog.querySelector('[data-form="dots-preset"][data-dirty]');
   if (dots) {
     try { await saveDotsPresetForm(dots); }
@@ -5189,11 +5347,9 @@ async function allowLeaveSettings() {
     try { await saveReferenceForm(reference); }
     catch (error) { showError(error); return false; }
   }
-  const pending = [...settingsDialog.querySelectorAll('[data-form][data-dirty]')]
-    .filter(form => manualSaveFormTypes.has(form.dataset.form));
-  if (!pending.length) return true;
-  if (!await confirmAction(t('放弃未完成的填写？'), t('离开后，本页尚未提交的内容会丢失。'), t('放弃修改'))) return false;
-  for (const form of pending) delete form.dataset.dirty;
+  // This app never asks to discard a draft: what saves itself is saved by now,
+  // and an unfinished form is simply left behind.
+  for (const form of settingsDialog.querySelectorAll('[data-form][data-dirty]')) if (manualSaveFormTypes.has(form.dataset.form)) delete form.dataset.dirty;
   return true;
 }
 
@@ -5530,8 +5686,8 @@ async function handleAction(action, id, target) {
   }
   if (action === 'settings.close') return closeSettings();
   if (action === 'broadcast.refresh') {
+    // Refreshing is asking for B站's title and category, so it replaces the fields.
     const form = document.querySelector('[data-broadcast-scope] form[data-form="broadcast-room"][data-dirty]');
-    if (form && !await confirmAction(t('放弃未保存的直播信息？'), t('刷新会读取 B站上的标题和分区，本页尚未保存的修改会丢失。'), t('放弃修改'))) return;
     if (form) delete form.dataset.dirty;
     return runBroadcastAction('refresh');
   }
@@ -5580,6 +5736,7 @@ async function handleAction(action, id, target) {
   if (action === 'broadcast.forget') { hidePushCredentials(); return runBroadcastAction('forget'); }
   if (action === 'broadcast.reveal' || action.startsWith('broadcast.copy.')) return revealOrCopyCredentials(action, target);
   if (action === 'onair.info') return openOnAirPanel('info');
+  if (action === 'onair.obs') return openOnAirPanel('obs');
   if (action === 'onair.details') return openOnAirPanel('details');
   if (action === 'settings.bitrate') {
     settingsBitrateExpanded = true;
@@ -5588,9 +5745,15 @@ async function handleAction(action, id, target) {
   }
   if (action === 'onair.bitrate.refresh') return readOnAirBitrate();
   if (action === 'onair.close') {
-    const form = document.querySelector('#onair-panel form[data-dirty]');
-    if (form && onAirPanelMode === 'details' && !await confirmAction(t('放弃未保存的直播详情？'), t('关闭后，尚未保存的码率修改会丢失。'), t('放弃修改'))) return;
-    closeOnAirPanel(true); return;
+    // A finished bitrate is applied on the way out instead of asking to discard it.
+    const form = onAirPanelMode === 'details' ? document.querySelector('#onair-panel form[data-form="onair-bitrate"][data-dirty]') : null;
+    const bitrate = form ? Number(form.elements.bitrate_kbps?.value) : NaN;
+    closeOnAirPanel(true);
+    if (Number.isInteger(bitrate) && bitrate >= 100 && bitrate <= 100000 && bitrate !== onAirBitrate?.bitrate_kbps) {
+      const next = await command('obs.bitrate.set', { bitrate_kbps: bitrate }, { quiet: true });
+      onAirBitrate = next.result; renderSettingsBitrate(); showToast(t('OBS 码率已保存'));
+    }
+    return;
   }
   if (action === 'overlay.preview') {
     const [key, choice] = String(id).split('=');
@@ -6161,7 +6324,8 @@ document.addEventListener('click', async event => {
   }
   const onAirPanel = document.querySelector('#onair-panel');
   if (onAirPanel && !onAirPanel.hidden && !onAirPanel.contains(event.target) && !event.target.closest('.select-menu, #onair, #lake-title, #confirmation')) {
-    if (onAirPanelMode !== 'face' && (onAirPanelMode !== 'details' || !onAirPanel.querySelector('form[data-dirty]'))) closeOnAirPanel();
+    if (onAirPanelMode === 'obs') void saveOverlayTitleForm(onAirPanel.querySelector('form[data-form="overlay-title"]')).catch(showError);
+    else if (onAirPanelMode !== 'face' && (onAirPanelMode !== 'details' || !onAirPanel.querySelector('form[data-dirty]'))) closeOnAirPanel();
   }
   const target = event.target.closest('[data-action]');
   if (!target || target.disabled) { updateLakePopScrim(); return; }
@@ -6181,10 +6345,10 @@ document.addEventListener('click', async event => {
 
 document.addEventListener('compositionstart', event => {
   if (event.target.id === 'viewer-alias' || event.target.id === 'chat-message') composingInputs.add(event.target);
-  if (event.target.closest?.('#onair-panel[data-mode="info"]')) composingInputs.add(event.target);
+  if (event.target.closest?.('#onair-panel:is([data-mode="info"],[data-mode="obs"])')) composingInputs.add(event.target);
 });
 document.addEventListener('compositionend', event => {
-  if (event.target.closest?.('#onair-panel[data-mode="info"]')) composingInputs.delete(event.target);
+  if (event.target.closest?.('#onair-panel:is([data-mode="info"],[data-mode="obs"])')) composingInputs.delete(event.target);
   if (event.target.id === 'viewer-alias') { composingInputs.delete(event.target); scheduleViewerAlias(event.target.value); }
   if (event.target.id === 'chat-message') { composingInputs.delete(event.target); chatMessageDraft = event.target.value; }
 });
@@ -6193,6 +6357,13 @@ document.addEventListener('input', event => {
   if (event.target.id === 'chat-message') { chatMessageDraft = event.target.value; return; }
   const detailsForm = event.target.closest?.('form[data-form="onair-bitrate"]');
   if (detailsForm) { detailsForm.dataset.dirty = 'true'; return; }
+  const overlayTitleForm = event.target.closest?.('form[data-form="overlay-title"]');
+  if (overlayTitleForm) {
+    overlayTitleForm.dataset.dirty = 'true';
+    const digits = overlayTitleForm.querySelector('[data-count-number]');
+    if (digits) digits.textContent = String(Array.from(event.target.value).length);
+    return;
+  }
   const broadcastForm = event.target.closest?.('form[data-form="broadcast-room"]');
   if (broadcastForm) {
     broadcastForm.dataset.dirty = 'true';
@@ -6242,6 +6413,12 @@ document.addEventListener('keydown', event => {
     if (form && !broadcastBusy) void saveBroadcastForm(form).catch(showError);
     return;
   }
+  if (event.target.closest?.('#onair-panel[data-mode="obs"]') && event.key === 'Enter') {
+    event.preventDefault();
+    if (event.isComposing || event.keyCode === 229 || composingInputs.has(event.target)) return;
+    void saveOverlayTitleForm(event.target.closest('form[data-form="overlay-title"]')).catch(showError);
+    return;
+  }
   if (event.target.id === 'chat-message' && event.key === 'Enter' && (event.isComposing || event.keyCode === 229 || composingInputs.has(event.target))) { event.preventDefault(); return; }
   if (event.key !== 'Escape' || settingsDialog.open || confirmationDialog.open) return;
   if (document.querySelector('#audience-dialog')?.open) { event.preventDefault(); closeAudience(); return; }
@@ -6253,25 +6430,6 @@ document.addEventListener('keydown', event => {
   if (queuePanel && !queuePanel.hidden) { closeQueuePanel(true); return; }
   const onAirPanel = document.querySelector('#onair-panel');
   if (onAirPanel && !onAirPanel.hidden) void handleAction('onair.close').then(updateLakePopScrim).catch(showError);
-});
-
-// The overlay title in the main screen's kicker: click or Enter edits it,
-// Enter or leaving saves, Escape puts it back.
-document.addEventListener('click', event => {
-  const node = event.target.closest?.('[data-lake-obs-title]');
-  if (node) beginLakeObsTitle(node);
-});
-document.addEventListener('keydown', event => {
-  const node = event.target.closest?.('[data-lake-obs-title]');
-  if (!node || !['Enter', 'Escape'].includes(event.key) || event.isComposing || event.keyCode === 229) return;
-  event.preventDefault(); event.stopPropagation();
-  if (!node.isContentEditable) { if (event.key === 'Enter') beginLakeObsTitle(node); return; }
-  if (event.key === 'Escape') node.dataset.cancelled = 'true';
-  node.blur();
-}, true);
-document.addEventListener('focusout', event => {
-  const node = event.target.closest?.('[data-lake-obs-title]');
-  if (node?.isContentEditable) void endLakeObsTitle(node).catch(showError);
 });
 
 document.addEventListener('error', event => {
@@ -6291,6 +6449,7 @@ document.addEventListener('submit', async event => {
   if (!form) return;
   event.preventDefault();
   if (form.dataset.form === 'chat-send' && composingInputs.has(form.querySelector('#chat-message'))) return;
+  if (form.dataset.form === 'overlay-title') return;
   if (autoFormTypes.has(form.dataset.form)) {
     scheduleAutosave(form, true);
     try { await autosaves.get(form)?.queue.flush(); } catch { /* Inline status owns this error. */ }

@@ -132,6 +132,13 @@ let saveFailure = false;
     await page.locator('[data-ovp-edit="title"]').fill('夜里的声音');
     await page.locator('[data-ovp-edit="title"]').press('Enter');
     await until(() => state.overlay.settings.title === '夜里的声音');
+    // 2026-10-19: in-place edits paint no browser selection, and an emptied title goes back without a message.
+    await page.locator('[data-ovp-edit="title"]').dblclick();
+    assert.equal(await page.evaluate(() => getSelection().isCollapsed && document.activeElement?.matches('[data-ovp-edit="title"]')), true, 'the preview title was selected like browser text');
+    await page.keyboard.press('Control+A'); await page.keyboard.press('Delete'); await page.keyboard.press('Enter');
+    assert.equal(await page.locator('[data-ovp-edit="title"]').innerText(), '夜里的声音');
+    assert.doesNotMatch(await page.locator('#toast').textContent(), /1 到 24/, 'an emptied title raised a message');
+    assert.equal(state.overlay.settings.title, '夜里的声音');
     await page.locator('[data-ovp-edit="tagline"]').dblclick();
     await page.locator('[data-ovp-edit="tagline"]').fill('a word across the water.');
     await page.locator('[data-ovp-edit="tagline"]').press('Enter');
