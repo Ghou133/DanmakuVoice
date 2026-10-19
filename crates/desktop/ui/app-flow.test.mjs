@@ -54,7 +54,7 @@ function appContext(overrides = {}) {
   vm.runInContext(`snapshot = {
     connections: [{ id: 'dots-connection', name: 'dots', settings: { provider: 'dots' } }],
     presets: [], assets: [], bindings: [], rules: { default_preset_id: null }
-  }; editor = { type: 'preset', id: '', connectionId: 'dots-connection', makePreferred: true }; referenceProfiles = [];`, context);
+  }; editor = { type: 'voice-add', provider: 'dots', connectionId: 'dots-connection' }; referenceProfiles = [];`, context);
   return context;
 }
 
@@ -310,16 +310,16 @@ test('choosing another output while speech plays asks before stopping it, and ca
   assert.deepEqual(JSON.parse(JSON.stringify(context.calls)), [{ action: 'preferences.save', payload: { preferences: { output: 'default' }, confirmed: true } }], 'nothing to stop: switch without a dialog');
 });
 
-test('dots editor uses one visible form and keeps its generated role key hidden', () => {
+test('dots add page shows the recording, optional text and name without an internal role field', () => {
   const context = appContext();
-  const html = vm.runInContext('renderPresetEditor("")', context);
-  assert.match(html, /data-form="dots-preset"/);
-  assert.match(html, /name="audio_path"/);
-  assert.match(html, /name="reference_text"/);
-  assert.match(html, /<textarea[^>]+name="reference_text"/);
-  assert.match(html, /name="name"/);
-  assert.doesNotMatch(html, /data-form="reference"|name="voice_id"|myvoice/);
-  assert.equal(vm.runInContext('editor.dotsVoiceId', context), 'dots-stable-role-id');
+  vm.runInContext("snapshot.local_services = { dots: { state: 'ready', directory: 'D:/dots' } }; lakeVoiceDraft = { audio_path: 'D:/sample.wav', name: '日常播报' };", context);
+  const html = vm.runInContext('renderLakeVoiceAdd()', context);
+  assert.match(html, /data-action="voice\.reference\.pick"/);
+  assert.match(html, /data-voice-draft="reference_text"/);
+  assert.match(html, /参考文本（可选）/);
+  assert.match(html, /data-voice-draft="name"/);
+  assert.match(html, /data-action="voice\.dots\.add"/);
+  assert.doesNotMatch(html, /name="voice_id"|dots-stable-role-id|myvoice/);
 });
 
 test('multiline templates preserve line breaks and escape user text', () => {
@@ -358,18 +358,21 @@ test('voice drawer has default audition followed by one flat editable list', () 
   assert.doesNotMatch(edit, /type="number"/);
 });
 
-test('GPT-SoVITS names omit the prefix in both save paths and existing voice displays', async () => {
+test('GPT-SoVITS catalog names and inline edits omit legacy prefixes while keeping custom names', async () => {
   const context = appContext();
   context.calls = [];
   vm.runInContext(`snapshot.connections = [{id:'gpt',settings:{provider:'gpt_sovits'}}];
-    command = async (action, payload) => calls.push({action,payload}); renderSettings = () => {};`, context);
-  context.testForm = { checkValidity:()=>true, dataset:{form:'preset'}, fields:{connection_id:'gpt',voice_id:'流萤',name:'',speed:'1',volume:'1',model_selection:'global_resident',reference_language:'auto',text_language:'auto',split:'cut0',top_k:'5',top_p:'1',temperature:'1',sample_steps:'8',fragment_interval_secs:'.3'} };
-  assert.equal(vm.runInContext('collectAutosave(testForm).payload.preset.name', context), '流萤');
-  await vm.runInContext('handleForm(testForm)', context);
+    editor = { type:'voice-add', provider:'gpt_sovits', connectionId:'gpt' };
+    modelScan = { pairs:[{name:'流萤',gpt_path:'D:/m/a.ckpt',sovits_path:'D:/m/a.pth'}], issues:[] };
+    command = async (action, payload) => { calls.push({action,payload}); return {result:{id:'new'}}; };
+    renderSettings = () => {}; showToast = () => {};`, context);
+  await vm.runInContext('handleAction', context)('voice.catalog.pick', '0', {});
+  vm.runInContext("lakeVoiceDraft.audio_path='D:/sample.wav'; lakeVoiceDraft.reference_text='你好'", context);
+  await vm.runInContext('handleAction', context)('voice.sovits.add', '', {});
   assert.equal(context.calls[0].payload.preset.name, '流萤');
   vm.runInContext(`snapshot.presets = [{id:'old',name:'GPT-SoVITS · 流萤',provider:'gpt_sovits',connection_id:'gpt',voice_id:'流萤',speed:1,volume:1}];
     snapshot.rules.default_preset_id = 'old'; editor = null; voiceBrowse = 'gpt_sovits';`, context);
-  context.testForm.dataset.id = 'old';
+  context.testForm = { checkValidity:()=>true, dataset:{form:'lake-voice-edit',id:'old'}, fields:{name:'流萤',speed:'1',volume:'1'} };
   assert.equal(vm.runInContext('collectAutosave(testForm).payload.preset.name', context), '流萤');
   assert.match(vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[0])', context), /data-default-voice-name>流萤<\/h2>/);
   assert.doesNotMatch(vm.runInContext('renderVoiceAudition(snapshot.presets, snapshot.presets[0])', context), /GPT-SoVITS · 流萤/);
@@ -391,7 +394,7 @@ test('stopping a local service sends no live disconnect while the room remains c
   assert.equal(vm.runInContext('snapshot.live.running', context), true);
 });
 
-test('service card choice saves its first voice as the live default and keeps audition text', async () => {
+test('choosing a voice as default keeps audition text and the current settings page', async () => {
   const context = appContext();
   vm.runInContext("snapshot.connections.push({ id: 'fish-connection', settings: { provider: 'fish_audio' }, has_credential: true }); snapshot.presets = [{ id: 'dots-voice', name: '木兰', provider: 'dots' }, { id: 'fish-voice', name: '桃子', provider: 'fish_audio' }]; snapshot.rules.default_preset_id = 'dots-voice'; editor = null;", context);
   const calls = [];
@@ -404,7 +407,7 @@ test('service card choice saves its first voice as the live default and keeps au
   context.testForm = form;
   vm.runInContext('command = mockCommand; renderSettings = mockRender', context);
   vm.runInContext('updateVoiceAudition(testForm)', context);
-  await vm.runInContext('handleAction', context)('service.prefer', 'fish_audio', null);
+  await vm.runInContext('handleAction', context)('voice.default', 'fish-voice', null);
   assert.equal(calls[0].action, 'presets.default');
   assert.equal(calls[0].payload.id, 'fish-voice');
   assert.equal(calls.length, 1, 'a service choice must not replace the settings page');
@@ -415,19 +418,17 @@ test('service card choice saves its first voice as the live default and keeps au
   assert.match(html, />比较音色<\/textarea>/);
 });
 
-test('service without an available voice opens setup without clearing the live default', async () => {
+test('adding an unavailable service opens its connection page without clearing the default voice', async () => {
   const context = appContext();
-  vm.runInContext("snapshot.presets = [{ id: 'dots-voice', name: '木兰', provider: 'dots' }]; snapshot.rules.default_preset_id = 'dots-voice'; editor = null;", context);
-  const calls = [];
-  context.mockCommand = async action => calls.push(action);
-  context.mockRender = () => {};
-  context.mockToast = message => calls.push(message);
-  vm.runInContext('command = mockCommand; renderSettings = mockRender; showToast = mockToast', context);
-  await vm.runInContext('handleAction', context)('service.prefer', 'fish_audio', null);
-  assert.deepEqual(calls, ['先连接 Fish Audio 账号，验证后会设为首选']);
+  vm.runInContext("snapshot.presets = [{ id: 'dots-voice', name: '木兰', provider: 'dots' }]; snapshot.rules.default_preset_id = 'dots-voice'; editor = null; renderSettings=()=>{};", context);
+  context.mockCommand = async action => { throw new Error(`unexpected ${action}`); };
+  vm.runInContext('command=mockCommand',context);
+  await vm.runInContext('handleAction', context)('voice.add', '', {});
+  await vm.runInContext('handleAction', context)('voice.provider', 'fish_audio', {});
   assert.equal(vm.runInContext('snapshot.rules.default_preset_id', context), 'dots-voice');
-  assert.equal(vm.runInContext('editor.type', context), 'service');
-  assert.equal(vm.runInContext('editor.makePreferred', context), true);
+  assert.equal(vm.runInContext('editor.type', context), 'voice-add');
+  assert.equal(vm.runInContext('editor.provider', context), 'fish_audio');
+  assert.match(vm.runInContext('renderLakeVoiceAdd()',context), /data-form="service-fish"/);
 });
 
 test('unconnected Doubao selection opens QR instead of replacing the live voice', async () => {
@@ -439,13 +440,13 @@ test('unconnected Doubao selection opens QR instead of replacing the live voice'
   const calls = [];
   context.mockGuide = async id => { calls.push(id); };
   context.mockCommand = async action => { throw new Error(`unexpected ${action}`); };
-  vm.runInContext('guideDoubaoLogin = mockGuide; command = mockCommand', context);
-  await vm.runInContext('handleAction', context)('service.prefer', 'doubao', null);
+  vm.runInContext('guideDoubaoLogin = mockGuide; command = mockCommand; closeVoicePanel = () => {}', context);
+  await vm.runInContext('handleAction', context)('voice.pick', 'doubao-voice', null);
   assert.deepEqual(calls, ['doubao-voice']);
   assert.equal(vm.runInContext('snapshot.rules.default_preset_id', context), 'dots-voice');
 
   context.document.querySelector('#tts-switch').setAttribute = () => {};
-  await vm.runInContext('handleAction', context)('tts.select', 'doubao', null);
+  await vm.runInContext('handleAction', context)('voice.login', '', null);
   assert.deepEqual(calls, ['doubao-voice', 'doubao-voice']);
   assert.equal(vm.runInContext('snapshot.rules.default_preset_id', context), 'dots-voice');
 
@@ -502,31 +503,23 @@ test('blocked Doubao QR navigation restores the visible saved live voice', async
   assert.equal(vm.runInContext('voiceAuditionDraft.text', context), '保留文字');
 });
 
-test('a connected Doubao service without a voice opens voice setup instead of QR', async () => {
+test('connected Doubao without a saved voice opens its catalog without QR or default changes', async () => {
   const context = appContext();
   vm.runInContext(`snapshot.connections.push({ id: 'doubao-connection', settings: { provider: 'doubao' }, has_credential: true });
     snapshot.presets = [{ id: 'dots-voice', provider: 'dots', connection_id: 'dots-connection' }];
-    snapshot.rules.default_preset_id = 'dots-voice'; editor = null;`, context);
-  const calls = [];
+    snapshot.doubao_voices = [{id:'available',name:'温柔'}];
+    snapshot.rules.default_preset_id = 'dots-voice'; editor = null; renderSettings=()=>{};`, context);
+  context.mockCommand = async action => { throw new Error(`unexpected ${action}`); };
   context.mockGuide = async () => { throw new Error('unexpected QR'); };
-  context.mockLoad = async id => { calls.push(['load', id]); return true; };
-  context.mockRender = () => { calls.push(['render']); };
-  context.mockOpen = async (tab, nextEditor) => {
-    calls.push(['open', tab]);
-    context.testEditor = nextEditor;
-    vm.runInContext('editor = testEditor', context);
-  };
-  vm.runInContext('guideDoubaoLogin = mockGuide; loadVoiceEditorData = mockLoad; renderSettings = mockRender; openViewerSettings = mockOpen; showToast = () => {}', context);
-  await vm.runInContext('handleAction', context)('service.prefer', 'doubao', null);
-  assert.equal(vm.runInContext('editor.type', context), 'preset');
+  vm.runInContext('command=mockCommand; guideDoubaoLogin=mockGuide',context);
+  await vm.runInContext('handleAction', context)('voice.add', '', {});
+  await vm.runInContext('handleAction', context)('voice.provider', 'doubao', {});
+  assert.equal(vm.runInContext('editor.type', context), 'voice-add');
   assert.equal(vm.runInContext('editor.connectionId', context), 'doubao-connection');
-  assert.equal(vm.runInContext('editor.makePreferred', context), true);
-  assert.deepEqual(calls, [['load', 'doubao-connection'], ['render']]);
-
-  calls.length = 0;
-  context.document.querySelector('#tts-switch').setAttribute = () => {};
-  await vm.runInContext('handleAction', context)('tts.select', 'doubao', null);
-  assert.deepEqual(calls, [['open', 'voices'], ['load', 'doubao-connection'], ['render']]);
+  assert.equal(vm.runInContext('snapshot.rules.default_preset_id',context), 'dots-voice');
+  const html = vm.runInContext('renderLakeVoiceAdd()',context);
+  assert.match(html, /data-action="voice\.catalog\.add" data-id="available"/);
+  assert.doesNotMatch(html, /data-qr-provider|voice\.doubao\.connect/);
 });
 
 test('Doubao QR setup waits for pending settings saves before replacing the page', async () => {
@@ -595,11 +588,11 @@ test('returning to a TTS restores its last chosen voice and ignores a deleted vo
   const calls = [];
   context.mockCommand = async (action, payload) => { calls.push({ action, payload }); };
   vm.runInContext('command = mockCommand; renderSettings = () => {}', context);
-  await vm.runInContext('handleAction', context)('service.prefer', 'dots', null);
+  await vm.runInContext('handleAction', context)('voice.default', 'dots-b', null);
   assert.equal(calls[0].action, 'presets.default');
   assert.equal(calls[0].payload.id, 'dots-b');
   context.document.querySelector('#tts-switch').setAttribute = () => {};
-  await vm.runInContext('handleAction', context)('tts.select', 'dots', null);
+  await vm.runInContext('handleAction', context)('voice.pick', 'dots-b', null);
   assert.equal(calls[1].payload.id, 'dots-b');
   vm.runInContext('snapshot.presets = snapshot.presets.filter(item => item.id !== "dots-b")', context);
   assert.equal(vm.runInContext('rememberedPreset("dots").id', context), 'dots-a');
@@ -634,7 +627,7 @@ test('rapid audition voice changes retain the last selected live default', async
   assert.equal(vm.runInContext('voiceAuditionDraft.text', context), '文字保留');
 });
 
-test('a service click after a pending voice save remains the live default', async () => {
+test('a current default-voice action waits for a pending audition choice and wins', async () => {
   const context = appContext();
   vm.runInContext(`snapshot.connections.push({ id: 'fish-connection', settings: { provider: 'fish_audio' }, has_credential: true });
     snapshot.presets = [{ id: 'dots-voice', name: '木兰', provider: 'dots', connection_id: 'dots-connection' },
@@ -655,7 +648,7 @@ test('a service click after a pending voice save remains the live default', asyn
   vm.runInContext('command = mockCommand; renderSettings = () => {}', context);
   const voiceChange = vm.runInContext('saveVoiceAuditionChoice', context)(form);
   await fishStarted;
-  const serviceClick = vm.runInContext('handleAction', context)('service.prefer', 'dots', null);
+  const serviceClick = vm.runInContext('handleAction', context)('voice.default', 'dots-voice', null);
   release();
   await Promise.all([voiceChange, serviceClick]);
   assert.deepEqual(calls, ['fish-voice', 'dots-voice']);
@@ -1040,65 +1033,44 @@ test('a changed room number reconnects a running room; a failed change reconnect
   assert.deepEqual(calls.map(([action]) => action), ['live.save']);
 });
 
-test('dots voice save is atomic and retains the draft and role on failure', async () => {
+test('dots add saves the voice and reference atomically and preserves the draft on failure', async () => {
   const context = appContext();
-  vm.runInContext('renderPresetEditor("")', context);
   const calls = [];
   let failSave = true;
   context.mockCommand = async (action, payload) => {
     calls.push({ action, payload });
-    if (action === 'dots.voice.save' && failSave) {
-      failSave = false;
-      throw new Error('source missing');
-    }
-    context.savedPreset = payload.preset;
-    vm.runInContext('snapshot.presets = [{ ...savedPreset, id: "preset-1" }]', context);
+    if (failSave) { failSave = false; throw new Error('source missing'); }
     return { result: { id: 'preset-1' } };
   };
-  vm.runInContext('command = (action, payload) => mockCommand(action, payload)', context);
-  const form = {
-    dataset: { id: '', connectionId: 'dots-connection' },
-    fields: { name: '日常播报', audio_path: 'C:\\voices\\sample.wav', reference_text: '', speed: '1', volume: '1' },
-    checkValidity() { return true; },
-    querySelectorAll() { return []; },
-    cloneNode() { return { dataset: { ...this.dataset }, querySelectorAll() { return []; }, removeAttribute() {}, outerHTML: '<form></form>' }; },
-  };
-  const save = vm.runInContext('saveDotsPresetForm', context);
-  await assert.rejects(save(form), /source missing/);
-  assert.equal(form.dataset.id, '');
-  assert.equal(vm.runInContext('editor.id', context), '');
-  assert.equal(vm.runInContext('formDrafts.has("voices:dots-preset:new")', context), true);
-  assert.deepEqual(calls.map(call => call.action), ['dots.voice.save']);
-  assert.equal(calls[0].payload.preset.voice_id, 'dots-stable-role-id');
-  assert.equal(calls[0].payload.profile.role.role, 'dots-stable-role-id');
-  assert.equal(calls[0].payload.make_preferred, true);
-
-  await save(form);
-  assert.deepEqual(calls.map(call => call.action), ['dots.voice.save', 'dots.voice.save']);
-  assert.equal(calls[1].payload.preset.voice_id, 'dots-stable-role-id');
-  assert.equal(calls[1].payload.preset.id, '');
-  assert.equal(form.dataset.id, 'preset-1');
-  assert.equal(vm.runInContext('editor.id', context), 'preset-1');
-  assert.equal(vm.runInContext('formDrafts.size', context), 0);
+  vm.runInContext(`command=mockCommand; renderSettings=()=>{}; showToast=()=>{};
+    lakeVoiceDraft={ name:'日常播报', audio_path:'C:/voices/sample.wav', reference_text:'你好' };`,context);
+  const add = vm.runInContext('handleAction',context);
+  await assert.rejects(add('voice.dots.add','',{}), /source missing/);
+  assert.equal(vm.runInContext('editor.type',context), 'voice-add');
+  assert.equal(vm.runInContext('lakeVoiceDraft.name',context), '日常播报');
+  assert.equal(vm.runInContext('lakeVoiceDraft.audio_path',context), 'C:/voices/sample.wav');
+  assert.deepEqual(calls.map(call=>call.action), ['dots.voice.save']);
+  assert.equal(calls[0].payload.preset.voice_id,calls[0].payload.profile.role.role);
+  assert.equal(calls[0].payload.profile.audio_path,'C:/voices/sample.wav');
+  assert.equal(calls[0].payload.make_preferred,false);
+  await add('voice.dots.add','',{});
+  assert.deepEqual(calls.map(call=>call.action), ['dots.voice.save','dots.voice.save']);
+  assert.equal(calls[1].payload.preset.voice_id,calls[1].payload.profile.role.role);
+  assert.equal(vm.runInContext('editor',context),null);
+  assert.equal(vm.runInContext('Object.keys(lakeVoiceDraft).length',context),0);
 });
 
-test('an old dots preset without a reference path only saves its preset fields', async () => {
+test('inline edits of a legacy dots voice preserve its service filename without requiring a reference path', async () => {
   const context = appContext();
-  vm.runInContext(`snapshot.presets = [{ id: 'old-1', name: '旧音色', connection_id: 'dots-connection', provider: 'dots', voice_id: 'myvoice.wav', speed: 1, volume: 1 }]; editor.id = 'old-1'; editor.makePreferred = false;`, context);
-  const calls = [];
-  context.mockCommand = async (action, payload) => { calls.push({ action, payload }); return { result: { id: 'old-1' } }; };
-  vm.runInContext('command = (action, payload) => mockCommand(action, payload)', context);
-  const form = {
-    dataset: { id: 'old-1', connectionId: 'dots-connection' },
-    fields: { name: '改名', audio_path: '', reference_text: '', speed: '1.1', volume: '0.9' },
-    checkValidity() { return true; },
-    querySelectorAll() { return []; },
-    cloneNode() { return { dataset: { ...this.dataset }, querySelectorAll() { return []; }, removeAttribute() {}, outerHTML: '<form></form>' }; },
-  };
-  await vm.runInContext('saveDotsPresetForm', context)(form);
-  assert.deepEqual(calls.map(call => call.action), ['presets.save']);
-  assert.equal(calls[0].payload.preset.voice_id, 'myvoice.wav');
-  assert.equal(calls[0].payload.preset.name, '改名');
+  vm.runInContext(`snapshot.presets=[{id:'old-1',name:'旧音色',connection_id:'dots-connection',provider:'dots',voice_id:'myvoice.wav',speed:1,volume:1}];`,context);
+  const form={ dataset:{form:'lake-voice-edit',id:'old-1'}, fields:{name:'改名',speed:'1.1',volume:'.9'},checkValidity:()=>true };
+  const saved=vm.runInContext('collectAutosave',context)(form);
+  assert.equal(saved.action,'presets.save');
+  assert.equal(saved.payload.preset.voice_id,'myvoice.wav');
+  assert.equal(saved.payload.preset.connection_id,'dots-connection');
+  assert.equal(saved.payload.preset.name,'改名');
+  assert.equal(saved.payload.preset.speed,1.1);
+  assert.equal(saved.payload.preset.volume,.9);
 });
 
 test('Fish account form uses read-only verification before storing the key', async () => {
@@ -1125,7 +1097,7 @@ test('an unconnected Fish service opens account setup before adding a voice', as
   vm.runInContext(`snapshot.connections = [{ id: 'fish-1', name: 'Fish Audio', settings: { provider: 'fish_audio' }, has_credential: false }]; editor = null; renderSettings = () => {}; showToast = () => {};`, context);
   context.mockCommand = () => { throw new Error('voice creation must not reach the backend'); };
   vm.runInContext('command = mockCommand', context);
-  await vm.runInContext('handleAction', context)('preset.new', '', {});
+  await vm.runInContext('handleAction', context)('voice.add', '', {});
   assert.equal(vm.runInContext('editor.type', context), 'voice-add');
   await vm.runInContext('handleAction', context)('voice.provider', 'fish_audio', {});
   // Connecting happens in place on the Fish tab of the add page.
@@ -1135,26 +1107,27 @@ test('an unconnected Fish service opens account setup before adding a voice', as
   assert.equal(vm.runInContext('snapshot.rules.default_preset_id', context), null);
 });
 
-test('Fish custom voice lookup precedes save without exposing generation tuning', async () => {
-  const context = appContext();
-  vm.runInContext(`snapshot.connections = [{ id: 'fish-1', name: 'Fish Audio', settings: { provider: 'fish_audio' }, has_credential: true }]; snapshot.fish_audio_settings = {}; snapshot.local_services = {}; editor = { type: 'preset', id: '', connectionId: 'fish-1', makePreferred: false }; renderSettings = () => {}; showToast = () => {};`, context);
-  const serviceHtml = vm.runInContext('renderVoiceConnect("fish_audio", snapshot.connections?.[0])', context);
-  assert.doesNotMatch(serviceHtml, /data-form="fish-settings"|name="model"/);
-  assert.match(serviceHtml, /data-form="service-fish"/);
-  const voiceHtml = vm.runInContext('renderPresetEditor("")', context);
-  assert.match(voiceHtml, /data-form="fish-voice"/);
-  assert.match(voiceHtml, /fish\.voice\.lookup/);
-  const calls = [];
-  context.mockCommand = async (action, payload) => {
-    calls.push({ action, payload });
-    return { result: action === 'fish.voice.lookup' ? { voice_id: 'a'.repeat(32), name: '官方名称' } : { id: 'preset-fish' } };
-  };
-  vm.runInContext('command = (action, payload) => mockCommand(action, payload)', context);
-  const form = { dataset: { form: 'fish-voice', connectionId: 'fish-1', id: '' }, fields: { id_or_url: 'https://fish.audio/m/' + 'a'.repeat(32), name: '' } };
-  await vm.runInContext('handleForm', context)(form);
-  assert.deepEqual(calls.map(call => call.action), ['fish.voice.lookup', 'fish.voice.save']);
-  assert.equal(calls[1].payload.name, '官方名称');
-  assert.equal(calls[1].payload.id_or_url, form.fields.id_or_url);
+test('Fish add looks up the voice before saving its official name without generation tuning', async () => {
+  const context=appContext();
+  const timers=[];
+  context.queueLookup=callback=>{timers.push(callback);return timers.length;};
+  context.calls=[];
+  vm.runInContext(`snapshot.connections=[{id:'fish-1',settings:{provider:'fish_audio'},has_credential:true}];
+    editor={type:'voice-add',provider:'fish_audio',connectionId:'fish-1'};
+    renderSettings=()=>{};showToast=()=>{};setTimeout=queueLookup;
+    command=async(action,payload)=>{calls.push({action,payload});return {result:action==='fish.voice.lookup'?{voice_id:'a'.repeat(32),name:'官方名称'}:{id:'preset-fish'}};};
+    lakeVoiceDraft={fish:'https://fish.audio/m/'+'a'.repeat(32)};`,context);
+  const html=vm.runInContext('renderLakeVoiceAdd()',context);
+  assert.match(html,/data-voice-draft="fish"/);
+  assert.doesNotMatch(html,/data-form="fish-settings"|name="model"|name="temperature"/);
+  vm.runInContext('scheduleFishLookup()',context);
+  assert.equal(timers.length,1);
+  await timers[0]();
+  assert.equal(vm.runInContext('lakeVoiceDraft.fishFound.name',context),'官方名称');
+  await vm.runInContext('handleAction',context)('voice.fish.add','',{});
+  assert.deepEqual(context.calls.map(call=>call.action),['fish.voice.lookup','fish.voice.save']);
+  assert.equal(context.calls[1].payload.name,'官方名称');
+  assert.equal(context.calls[1].payload.id_or_url,'https://fish.audio/m/'+'a'.repeat(32));
 });
 
 test('Fish generation settings and targeted audition use their dedicated IPC', async () => {
@@ -1167,17 +1140,16 @@ test('Fish generation settings and targeted audition use their dedicated IPC', a
   vm.runInContext('command = (action, payload) => mockCommand(action, payload)', context);
   const form = { dataset: { form: 'fish-settings', connectionId: 'fish-1' }, fields: { model: 's2.1-pro-free', latency: 'balanced', volume_db: '-2', temperature: '0.6', top_p: '0.8' } };
   await vm.runInContext('handleForm', context)(form);
-  await vm.runInContext('handleAction', context)('fish.audition', 'preset-fish', null);
-  assert.deepEqual(calls.map(call => call.action), ['fish.settings.save', 'presets.default', 'audition']);
+  await vm.runInContext('handleAction', context)('voice.preview', 'preset-fish', null);
+  assert.deepEqual(calls.map(call => call.action), ['fish.settings.save', 'audition']);
   assert.equal(calls[0].payload.settings.volume_db, -2);
   assert.equal(calls[0].payload.settings.streaming, true);
-  assert.equal(calls[1].payload.id, 'preset-fish');
-  assert.equal(calls[2].payload.preset_id, 'preset-fish');
-  assert.equal(typeof calls[2].payload.text, 'string');
+  assert.equal(calls[1].payload.preset_id, 'preset-fish');
+  assert.equal(typeof calls[1].payload.text, 'string');
   calls.length = 0;
   vm.runInContext('confirmAction = async () => { throw new Error("audition must not ask again"); }', context);
-  await vm.runInContext('handleAction', context)('fish.audition', 'preset-fish', null);
-  assert.deepEqual(calls.map(call => call.action), ['presets.default', 'audition']);
+  await vm.runInContext('handleAction', context)('voice.preview', 'preset-fish', null);
+  assert.deepEqual(calls.map(call => call.action), ['audition']);
 });
 
 test('Fish accepts a manually pasted key without a clipboard watcher', async () => {
@@ -1214,37 +1186,40 @@ test('category navigation returns to its root including when already selected', 
   vm.runInContext(`editor = { type: 'service', provider: 'fish_audio' }; settingsTab = 'voices'; renderSettings = () => {}; allowLeaveSettings = async () => true;`, context);
   await vm.runInContext('handleAction', context)('settings.tab', 'voices');
   assert.equal(vm.runInContext('editor', context), null);
-  vm.runInContext(`editor = { type: 'preset', id: 'draft' }; allowLeaveSettings = async () => false;`, context);
+  vm.runInContext(`editor = { type: 'voice-add', provider: 'dots', id: 'draft' }; allowLeaveSettings = async () => false;`, context);
   await vm.runInContext('handleAction', context)('settings.tab', 'room');
   assert.equal(vm.runInContext('settingsTab', context), 'voices');
   assert.equal(vm.runInContext('editor.id', context), 'draft');
 });
 
-test('Doubao names stay readable while saving exact internal voice IDs', () => {
-  const context = appContext();
-  vm.runInContext(`snapshot.connections = [{ id: 'doubao', settings: { provider: 'doubao' } }]; snapshot.doubao_voices = [{ id: 'zh_female_test_bigtts', name: '温柔桃子' }]; editor = { type: 'preset', connectionId: 'doubao' };`, context);
-  const html = vm.runInContext('renderPresetEditor("")', context);
-  assert.match(html, /option value="zh_female_test_bigtts">温柔桃子<\/option>/);
-  assert.doesNotMatch(html, /datalist|音色 ID/);
-  const form = { checkValidity: () => true, dataset: { form: 'preset' }, fields: { connection_id: 'doubao', voice_id: 'zh_female_test_bigtts', name: '', speed: '1', volume: '1' } };
-  const result = vm.runInContext('collectAutosave', context)(form);
-  assert.equal(result.payload.preset.name, '温柔桃子');
-  assert.equal(result.payload.preset.voice_id, 'zh_female_test_bigtts');
+test('Doubao catalog names stay readable while adding exact internal voice IDs', async () => {
+  const context=appContext();context.calls=[];
+  vm.runInContext(`snapshot.connections=[{id:'doubao',settings:{provider:'doubao'},has_credential:true}];
+    snapshot.doubao_voices=[{id:'zh_female_test_bigtts',name:'温柔桃子'}];
+    editor={type:'voice-add',provider:'doubao',connectionId:'doubao'};
+    renderSettings=()=>{};showToast=()=>{};command=async(action,payload)=>{calls.push({action,payload});return {result:{id:'new'}};};`,context);
+  const html=vm.runInContext('renderLakeVoiceAdd()',context);
+  assert.match(html,/>温柔桃子<\/span>/);
+  assert.match(html,/data-action="voice\.catalog\.add" data-id="zh_female_test_bigtts"/);
+  assert.doesNotMatch(html,/datalist|音色 ID/);
+  await vm.runInContext('handleAction',context)('voice.catalog.add','zh_female_test_bigtts',{});
+  assert.equal(context.calls[0].payload.preset.name,'温柔桃子');
+  assert.equal(context.calls[0].payload.preset.voice_id,'zh_female_test_bigtts');
 });
 
-test('GPT-SoVITS model names with replacement patterns stay literal in the editor', () => {
-  const context = appContext();
-  vm.runInContext(`snapshot.connections = [{ id: 'gpt', settings: { provider: 'gpt_sovits' } }];
-    snapshot.presets = [{ id: 'voice', provider: 'gpt_sovits', connection_id: 'gpt', voice_id: '', speed: 1, volume: 1 }];
-    modelScan = { pairs: [{ name: 'a$\`b$&', version: 'v2', gpt_path: 'C:/m/a.ckpt', sovits_path: 'C:/m/a.pth' }], issues: [] };
-    editor = { type: 'preset', id: 'voice' };`, context);
-  const special = vm.runInContext('renderPresetEditor("voice")', context);
-  vm.runInContext(`modelScan.pairs[0].name = 'plain';`, context);
-  const plain = vm.runInContext('renderPresetEditor("voice")', context);
-  // Field IDs come from a global counter, so compare the markup without them.
-  const normalized = html => html.replace(/field-\d+/g, 'field-N');
-  assert.equal(special.split('class="model-pair-picker"').length - 1, 1);
-  assert.equal(normalized(special), normalized(plain).split('plain · v2').join('a$`b$&amp; · v2'));
+test('GPT-SoVITS catalog renders replacement-pattern names literally and escapes HTML', () => {
+  const context=appContext();
+  context.specialName='a$`b$&';
+  vm.runInContext(`snapshot.connections=[{id:'gpt',settings:{provider:'gpt_sovits'}}];
+    snapshot.local_services={gpt_sovits:{state:'ready',directory:'D:/models'}};
+    modelScan={pairs:[{name:specialName,version:'v2',gpt_path:'D:/a.ckpt',sovits_path:'D:/a.pth'}],issues:[]};
+    editor={type:'voice-add',provider:'gpt_sovits',connectionId:'gpt'};`,context);
+  const special=vm.runInContext('renderLakeVoiceAdd()',context);
+  vm.runInContext("modelScan.pairs[0].name='plain'",context);
+  const plain=vm.runInContext('renderLakeVoiceAdd()',context);
+  assert.equal(special.split('class="voice-catalog-row').length-1,1);
+  assert.equal(special,plain.split('>plain<small').join('>a$`b$&amp;<small'));
+  assert.match(special,/a\$`b\$&amp;/);
 });
 
 test('number fields suppress f32 noise and preserve text identifiers', () => {
@@ -1256,17 +1231,19 @@ test('number fields suppress f32 noise and preserve text identifiers', () => {
   assert.equal(format('000123456789'), '000123456789');
 });
 
-test('Fish parameter and voice edits use autosave without exposing voice IDs', () => {
-  const context = appContext();
-  vm.runInContext(`snapshot.connections = [{ id: 'fish', settings: { provider: 'fish_audio' }, has_credential: true }]; snapshot.presets = [{ id: 'voice', provider: 'fish_audio', connection_id: 'fish', voice_id: '${'a'.repeat(32)}', name: '测试', speed: 1, volume: 1 }]; snapshot.local_services = {}; editor = { type: 'preset', id: 'voice' };`, context);
-  const form = { checkValidity: () => true, dataset: { form: 'fish-preset', id: 'voice', connectionId: 'fish' }, fields: { name: '新的中文名称', speed: '1.2', volume: '.8' } };
-  const saved = vm.runInContext('collectAutosave', context)(form);
-  assert.equal(saved.payload.preset.name, '新的中文名称');
-  assert.equal(saved.payload.preset.speed, 1.2);
-  const html = vm.runInContext('renderPresetEditor("voice")', context);
-  assert.doesNotMatch(html, /音色 ID|保存音色/);
-  assert.doesNotMatch(html, /更改自动保存|已自动保存/);
-  assert.match(html, /class="autosave-status"[^>]+ hidden/);
+test('Fish inline voice edits autosave names and numbers while preserving hidden provider IDs', () => {
+  const context=appContext();
+  vm.runInContext(`snapshot.connections=[{id:'fish',settings:{provider:'fish_audio'},has_credential:true}];
+    snapshot.presets=[{id:'voice',provider:'fish_audio',connection_id:'fish',voice_id:'${'a'.repeat(32)}',name:'测试',speed:1,volume:1}];
+    editor=null;lakeVoiceEditId='voice';`,context);
+  const form={checkValidity:()=>true,dataset:{form:'lake-voice-edit',id:'voice'},fields:{name:'新的中文名称',speed:'1.2',volume:'.8'}};
+  const saved=vm.runInContext('collectAutosave',context)(form);
+  assert.equal(saved.payload.preset.name,'新的中文名称');assert.equal(saved.payload.preset.speed,1.2);assert.equal(saved.payload.preset.volume,.8);
+  assert.equal(saved.payload.preset.voice_id,'a'.repeat(32));assert.equal(saved.payload.preset.connection_id,'fish');
+  const html=vm.runInContext('renderVoicesSettings()',context);
+  assert.match(html,/data-form="lake-voice-edit"/);
+  assert.doesNotMatch(html,/音色 ID|保存音色|更改自动保存|已自动保存|a{32}/);
+  assert.match(html,/class="autosave-status"[^>]+ hidden/);
 });
 
 test('routine saves stay silent while failures retain visible recovery actions', () => {
@@ -1991,32 +1968,19 @@ test('an older voice metadata reply cannot replace the latest editor data', asyn
 });
 
 
-test('dots edits typed during save are committed after ID reconciliation', async () => {
-  const context = appContext();
-  vm.runInContext('renderPresetEditor("")', context);
-  let release;
-  const gate = new Promise(resolve => { release = resolve; });
-  const calls = [];
-  context.mockCommand = async (action, payload) => {
-    calls.push(structuredClone(payload));
-    if (calls.length === 1) await gate;
-    context.savedPreset = payload.preset;
-    vm.runInContext('snapshot.presets = [{...savedPreset,id:"created"}]', context);
-    return {result:{id:'created'}};
-  };
-  vm.runInContext('command = mockCommand', context);
-  const form = {dataset:{id:'',connectionId:'dots-connection'},
-    fields:{name:'first',audio_path:'C:\\fictional.wav',reference_text:'',speed:'1',volume:'1'},
-    checkValidity(){return true},querySelectorAll(){return []},
-    cloneNode(){return {dataset:{...this.dataset},querySelectorAll(){return []},removeAttribute(){},outerHTML:'<form></form>'}}};
-  const saving = vm.runInContext('saveDotsPresetForm', context)(form);
-  form.fields.name = 'typed while saving';
-  release(); await saving;
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1].preset.id, 'created');
-  assert.equal(calls[1].preset.name, 'typed while saving');
-  assert.equal(form.dataset.dirty, undefined);
-  assert.equal(vm.runInContext('formDrafts.size', context), 0);
+test('inline dots edits made during autosave are saved last with the same voice identity', async () => {
+  const context=appContext();
+  vm.runInContext("snapshot.presets=[{id:'voice',provider:'dots',connection_id:'dots-connection',voice_id:'role',name:'原名',speed:1,volume:1}];",context);
+  let release;let started;
+  const gate=new Promise(resolve=>{release=resolve;});const begun=new Promise(resolve=>{started=resolve;});const writes=[];
+  const form={dataset:{form:'lake-voice-edit',id:'voice'},fields:{name:'first',speed:'1',volume:'1'},checkValidity:()=>true};
+  const collect=vm.runInContext('collectAutosave',context);
+  const queue=createAutosaveQueue({delay:0,save:async envelope=>{writes.push(envelope.payload.preset);if(writes.length===1){started();await gate;}}});
+  queue.schedule(collect(form),{immediate:true});await begun;
+  form.fields.name='typed while saving';queue.schedule(collect(form),{immediate:true});
+  release();await queue.flush();
+  assert.deepEqual(writes.map(p=>p.name),['first','typed while saving']);
+  assert.ok(writes.every(p=>p.id==='voice'&&p.voice_id==='role'&&p.connection_id==='dots-connection'));
 });
 
 test('settling an older voice choice never erases a newer pending choice', async () => {
@@ -2031,29 +1995,103 @@ test('settling an older voice choice never erases a newer pending choice', async
   assert.equal(vm.runInContext('voiceAuditionDefaultSave === second',context),true);
 });
 
-test('reference edits during a save are serialized and the latest text is retained', async () => {
+test('current reference edits serialize and retain the latest text and existing profile fields', async () => {
+  const context=appContext();let release;let started;
+  const gate=new Promise(resolve=>{release=resolve;});const begun=new Promise(resolve=>{started=resolve;});
+  const writes=[];let saved;
+  context.mockCommand=async(action,payload)=>{
+    if(action==='references.list')return {result:[{profile:saved}]};
+    assert.equal(action,'references.save');writes.push(structuredClone(payload.profile));
+    if(writes.length===1){started();await gate;}saved=structuredClone(payload.profile);
+  };
+  vm.runInContext(`snapshot.connections=[{id:'gpt',settings:{provider:'gpt_sovits'}}];
+    snapshot.presets=[{id:'voice',connection_id:'gpt',provider:'gpt_sovits',sovits:{gpt_weights_path:'D:/a.ckpt',sovits_weights_path:'D:/a.pth'}}];
+    referenceProfiles=[{profile:{role:referenceRole('gpt_sovits',snapshot.presets[0]),audio_path:'D:/fixture.wav',reference_text:'old',reference_language:'all_zh',text_language:'en'}}];
+    command=mockCommand;`,context);
+  const preset=vm.runInContext('snapshot.presets[0]',context);const save=vm.runInContext('saveVoiceReference',context);
+  const first=save(preset,{reference_text:'first'});await begun;
+  const second=save(preset,{reference_text:'new edit'});
+  assert.equal(writes.length,1,'the second write waits for the first profile');
+  release();await Promise.all([first,second]);
+  assert.deepEqual(writes.map(profile=>profile.reference_text),['first','new edit']);
+  assert.ok(writes.every(profile=>profile.audio_path==='D:/fixture.wav'&&profile.reference_language==='all_zh'&&profile.text_language==='en'));
+  assert.equal(vm.runInContext('referenceProfiles[0].profile.reference_text',context),'new edit');
+  assert.equal(vm.runInContext('voiceReferenceSaves.size',context),0);
+});
+
+test('queued dots reference edits keep names and tuning saved by the current inline editor', async () => {
   const context = appContext();
   let release;
-  const gate = new Promise(resolve => { release = resolve; });
+  let started;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const begun = new Promise(resolve => { started = resolve; });
   const writes = [];
+  let savedProfile;
   context.mockCommand = async (action, payload) => {
-    if (action === 'references.list') return {result: []};
-    assert.equal(action, 'references.save');
-    writes.push(structuredClone(payload.profile));
-    if (writes.length === 1) await gate;
+    if (action === 'references.list') return { result: [{ profile: savedProfile }] };
+    if (action === 'presets.save') {
+      context.editedPreset = structuredClone(payload.preset);
+      vm.runInContext('snapshot.presets = [editedPreset]', context);
+      return { result: { id: 'voice' } };
+    }
+    assert.equal(action, 'dots.voice.save');
+    writes.push(structuredClone(payload));
+    if (writes.length === 1) { started(); await blocked; }
+    savedProfile = structuredClone(payload.profile);
+    return { result: { id: 'voice' } };
   };
-  context.presetForm = {dataset:{id:'voice'},checkValidity(){return true},elements:{connection_id:{value:'dots-connection'},voice_id:{value:'role'}}};
-  vm.runInContext(`editor.makePreferred=false; command=mockCommand; scheduleAutosave=()=>{}; showToast=()=>{};
-    settingsDialog.querySelector=selector=>selector==='[data-form="preset"]'?presetForm:null;`, context);
-  const form = {dataset:{dirty:'true'},fields:{audio_path:'C:\\fixture.wav',reference_text:'first'}};
-  const save = vm.runInContext('saveReferenceForm', context);
-  const first = save(form);
-  await new Promise(resolve => setImmediate(resolve));
-  form.fields.reference_text = 'new edit';
-  const duplicate = save(form);
-  release(); await Promise.all([first, duplicate]);
-  assert.deepEqual(writes.map(profile => profile.reference_text), ['first', 'new edit']);
-  assert.equal(form.dataset.dirty, undefined);
+  vm.runInContext(`snapshot.presets = [{ id:'voice', connection_id:'dots-connection', provider:'dots', voice_id:'role', name:'before', speed:1, volume:1 }];
+    referenceProfiles = [{ profile:{ role:{kind:'dots',role:'role'}, audio_path:'D:/original.wav', reference_text:'old' } }];
+    command = mockCommand;`, context);
+  const preset = vm.runInContext('snapshot.presets[0]', context);
+  const save = vm.runInContext('saveVoiceReference', context);
+  const first = save(preset, { reference_text: 'first' });
+  await begun;
+  const second = save(preset, { audio_path: 'D:/replacement.wav' });
+  const form = { dataset:{form:'lake-voice-edit',id:'voice'}, fields:{name:'new name',speed:'1.4',volume:'.7'}, checkValidity:()=>true };
+  const edited = vm.runInContext('collectAutosave', context)(form);
+  await context.mockCommand(edited.action, edited.payload);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1].preset.name, 'new name');
+  assert.equal(writes[1].preset.speed, 1.4);
+  assert.equal(writes[1].preset.volume, .7);
+  assert.equal(writes[1].profile.audio_path, 'D:/replacement.wav');
+  assert.equal(writes[1].profile.reference_text, 'first');
+  assert.equal(writes[1].preset.voice_id, 'role');
+});
+
+test('a queued reference edit rejects a deleted voice or a changed connection or role', async () => {
+  for (const mutation of ["snapshot.presets = []", "snapshot.presets[0].connection_id = 'other'", "snapshot.presets[0].voice_id = 'other-role'"]) {
+    const context = appContext();
+    let release;
+    let started;
+    const blocked = new Promise(resolve => { release = resolve; });
+    const begun = new Promise(resolve => { started = resolve; });
+    let writes = 0;
+    context.mockCommand = async (action, payload) => {
+      if (action === 'references.list') return { result: [{ profile: payload }] };
+      assert.equal(action, 'dots.voice.save');
+      writes++;
+      started();
+      await blocked;
+      return { result: { id: 'voice' } };
+    };
+    vm.runInContext(`snapshot.presets = [{ id:'voice', connection_id:'dots-connection', provider:'dots', voice_id:'role' }];
+      referenceProfiles = [{profile:{role:{kind:'dots',role:'role'},audio_path:'D:/original.wav'}}]; command=mockCommand;`, context);
+    const preset = vm.runInContext('snapshot.presets[0]', context);
+    const save = vm.runInContext('saveVoiceReference', context);
+    const first = save(preset, { reference_text: 'first' });
+    await begun;
+    const second = save(preset, { reference_text: 'later' });
+    vm.runInContext(mutation, context);
+    release();
+    await first;
+    await assert.rejects(second, /请重新打开声音设置/);
+    assert.equal(writes, 1, mutation);
+    assert.equal(vm.runInContext('voiceReferenceSaves.size', context), 0);
+  }
 });
 
 test('adding voices: every service completes on one page with its essential setting up front', async () => {

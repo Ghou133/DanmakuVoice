@@ -134,10 +134,8 @@ B站只公开部分在线观众	Bilibili lists only some of the viewers online
 请检查未填或格式不正确的项目	Check any empty or invalid fields
 请输入有效的主播 UID	Enter a valid streamer UID
 最长等待不能小于初始等待	Maximum wait cannot be shorter than initial wait
-请选择语音服务和音色	Choose a speech service and voice
 本地服务类型无效。	Invalid local service type.
 请先连接 Fish Audio 账号。	Connect your Fish Audio account first.
-请重新打开音色设置。	Reopen voice settings.
 暂时无法保存此项设置，请重新打开页面	Unable to save this setting. Reopen the page
 已恢复未保存的修改，请重试保存	Unsaved changes restored. Try saving again
 已恢复未完成的修改，请补全	Incomplete changes restored. Complete the fields
@@ -146,7 +144,6 @@ B站只公开部分在线观众	Bilibili lists only some of the viewers online
 部分更改未能保存，修改已保留在设置中	Some changes could not be saved. Your edits are preserved in settings
 服务连接	Service connection
 声音预设	Voice preset
-dots 音色	dots voice
 观众声音	Viewer voice
 丢弃	Discard
 设置分类	Settings category
@@ -187,17 +184,14 @@ AGPL-3.0-only · 许可信息见 GitHub 仓库 NOTICE。	AGPL-3.0-only · See NO
 初始等待（秒）	Initial wait (seconds)
 每次延长（秒）	Extension per gift (seconds)
 最长等待（秒）	Maximum wait (seconds)
-选择音色	Choose a voice
 播报声音	Speech voice
 选择服务	Choose a service
 默认语音服务	Default speech service
-直播首选音色	Preferred live chat voice
 试听	Preview
 试听文字	Preview text
 输入想试听的文字	Enter text to preview
 试听声音	Preview voice
 先为这个服务添加音色	Add a voice for this service first
-添加音色	Add voice
 已设为首选	Set as preferred
 连接豆包	Connect Doubao
 使用豆包 App 扫码，并在手机上确认登录。	Scan with the Doubao app and confirm login on your phone.
@@ -254,7 +248,6 @@ GPT-SoVITS 目录	GPT-SoVITS folder
 启动服务	Start service
 停止服务	Stop service
 检查连接	Check connection
-角色名称	Character name
 音色	Voice
 豆包音色	Doubao voice
 请选择音色	Choose a voice
@@ -265,62 +258,23 @@ GPT-SoVITS 目录	GPT-SoVITS folder
 GPT-SoVITS 参数	GPT-SoVITS options
 编辑音色	Edit voice
 自定义名称（选填）	Custom name (optional)
-默认使用音色名称	Uses the voice name by default
 语速	Speech speed
-音色音量	Voice volume
 模型选择	Model selection
 使用服务当前加载的模型	Use the models currently loaded by the service
 为每次请求指定模型	Specify models for each request
 GPT 模型路径	GPT model path
 SoVITS 模型路径	SoVITS model path
 参考文本	Reference transcript
-无参考文本模式	No reference text
-参考语言	Reference language
 合成语言	Synthesis language
 分句方法	Sentence splitting
 片段间隔（秒）	Segment interval (seconds)
 采样步数	Sampling steps
 超采样	Super sampling
-当前模型（安装目录中未找到）	Current models (not found in the installation folder)
-尚未发现成对模型	No paired models found
 角色模型	Character models
-从安装目录自动配对 GPT 与 SoVITS 权重。	GPT and SoVITS weights are paired automatically from the installation folder.
-刷新模型	Refresh models
-另有	Also,
-个文件未配对或存在歧义。	files are unpaired or ambiguous.
-自动识别	Auto-detect
 中文	Chinese
-英语	English
-日语	Japanese
-韩语	Korean
-粤语	Cantonese
-已记住音频原路径；移动或删除原文件后需要重新选择。	Original audio path saved. Select it again if the file is moved or deleted.
-直接使用原文件，不复制音频。	Uses the original file without copying it.
-文本语言	Text language
 参考音频	Reference audio
-点击选择参考音频	Choose reference audio
-支持 WAV、MP3、FLAC、OGG 或 M4A	Supports WAV, MP3, FLAC, OGG, or M4A
-填写参考音频中实际说出的文字。	Enter the words actually spoken in the reference audio.
-保存参考设置	Save reference settings
-先填写角色名称或选择角色模型。	Enter a character name or select character models first.
-此旧音色尚未记录原文件路径，仍可沿用服务内文件名；选择原文件后会改用新路径。	This legacy voice has no original file path saved. It can still use the service filename; choosing the original file switches it to the new path.
-使用原文件，不复制音频。原文件移动或删除后需重新选择。	Uses the original file without copying it. Select it again if the file is moved or deleted.
-编辑 dots 音色	Edit dots voice
-添加 dots 音色	Add dots voice
 音色名称	Voice name
-例如：日常播报	For example: Everyday voice
 参考文本（可选）	Reference transcript (optional)
-可填写参考音频中说出的文字。	You can enter the words spoken in the reference audio.
-保存音色	Save voice
-收藏 Fish 音色	Save a Fish voice
-音色页面链接或 ID	Voice page link or ID
-https://fish.audio/m/… 或 32 位 ID	https://fish.audio/m/… or a 32-character ID
-查找官方名称	Look up official name
-收藏名称	Saved name
-可自行命名；留空会先读取官方名称。	Choose your own name, or leave it empty to look up the official name.
-收藏音色	Save voice
-编辑 Fish 音色	Edit Fish voice
-试听此音色	Preview this voice
 选择	Select
 观众 UID（选填）	Viewer UID (optional)
 触发词	Trigger
@@ -366,7 +320,6 @@ B站官方表情已过滤	Bilibili standalone emote filtered
 导入音频	Import audio
 素材名称	Sound name
 音频文件完整路径	Full audio file path
-例如：	For example:\u0020
 支持 WAV、MP3 等常用音频；文件会复制到当前应用的数据目录。	Supports WAV, MP3, and other common formats. Files are copied to this app's data folder.
 替换音频	Replace audio
 导入素材	Import sound
@@ -399,7 +352,6 @@ Fish Audio 账号已验证并连接	Fish Audio account verified and connected
 放弃修改	Discard changes
 打开声音设置	Open voice settings
 尚未设置音色	No voice configured
-请先在声音设置中添加这个服务的音色。	Add a voice for this service in voice settings first.
 已切换到	Switched to
 指定声音	Assign voice
 添加别名	Add alias
@@ -417,18 +369,9 @@ Fish Audio 账号已验证并连接	Fish Audio account verified and connected
 已恢复	Restored
 个内置音色	built-in voices
 内置音色已齐全	All built-in voices are already present
-请填写音色页面链接或 32 位音色 ID。	Enter a voice page link or a 32-character voice ID.
-已找到：	Found:\u0020
-已确认音色 ID。	Voice ID verified.
-请重新选择 Fish Audio 音色。	Select the Fish Audio voice again.
 试听已加入播放队列	Voice preview added to the playback queue
 请重新打开声音设置。	Reopen voice settings.
-先连接 Fish Audio 账号，验证后会设为首选	Connect your Fish Audio account first. It becomes preferred after verification
-先添加音色，保存后会设为首选	Add a voice first. It becomes preferred after saving
-先连接服务，再添加首选音色	Connect the service first, then add a preferred voice
-请先设置这个语音服务。	Set up this speech service first.
 请先连接 Fish Audio 账号	Connect your Fish Audio account first
-请先选择 GPT-SoVITS 服务。	Choose a GPT-SoVITS service first.
 文件选择器不可用，请重新打开应用。	File picker unavailable. Reopen the app.
 选择参考音频	Choose reference audio
 音频	Audio
@@ -438,9 +381,7 @@ Fish Audio 账号已验证并连接	Fish Audio account verified and connected
 目录尚未保存，请检查目录并重试。	Folder not saved yet. Check the folder and try again.
 正在启动本地服务	Starting local service
 本应用启动的服务已停止	The service started by this app has stopped
-请重新选择语音服务。	Select the speech service again.
 用户声音绑定	Viewer voice binding
-删除后无法撤销。仍被使用的连接、默认预设或规则素材需要先解除引用。	Deletion cannot be undone. Remove references to any connection, default preset, or sound still in use first.
 测试音已加入播放队列	Test tone added to the playback queue
 设备列表已刷新	Device list refreshed
 音频输出已重新连接	Audio output reconnected
@@ -448,17 +389,7 @@ Fish Audio 账号已验证并连接	Fish Audio account verified and connected
 已有声音、规则和素材会保留。	Existing voices, rules, and sounds are kept.
 重新设置	Restart setup
 观众 UID 需要是有效的正整数。	Viewer UID must be a valid positive integer.
-请填好音色名称、参考音频、语速和音量。	Complete the voice name, reference audio, speed, and volume.
-请重新选择 dots.tts 服务并填写音色名称。	Select a dots.tts service again and enter a voice name.
-语速须在 0.5–2，音量须在 0–2 之间。	Speed must be between 0.5 and 2; volume must be between 0 and 2.
-请重新选择参考音频原文件。	Select the original reference audio file again.
-无法确认音色编号；请重新打开声音设置核对。	Unable to confirm the voice ID. Reopen voice settings to check.
-请先填写角色名称和声音预设。	Enter a character name and voice preset first.
-请先选择成对的角色模型。	Select paired character models first.
 请先选择参考音频。	Choose reference audio first.
-请填写参考音频原文，或开启无参考文本模式。	Enter the reference transcript, or enable the no-reference-text mode.
-音色尚未创建成功，请重试。	The voice was not created. Try again.
-角色参考设置已保存	Character reference settings saved
 请输入有效的主播 UID。	Enter a valid streamer UID.
 直播间已保存	Live room saved
 请先选择这个服务的音色。	Choose a voice for this service first.
@@ -468,14 +399,6 @@ Fish Audio 账号已验证并连接	Fish Audio account verified and connected
 本地服务设置已保存	Local service settings saved
 合成音量须在 -20–20 dB，温度与 Top P 须在 0–1 之间。	Synthesis volume must be between -20 and 20 dB; temperature and Top P must be between 0 and 1.
 Fish Audio 生成设置已保存	Fish Audio generation settings saved
-未查到音色名称，请自行填写收藏名称。	Voice name not found. Enter a saved name yourself.
-Fish 音色已收藏	Fish voice saved
-Fish 音色不存在，请重新打开设置。	Fish voice not found. Reopen settings.
-请填写名称；语速须在 0.5–2，音量须在 0–2 之间。	Enter a name. Speed must be between 0.5 and 2; volume must be between 0 and 2.
-Fish 音色已保存	Fish voice saved
-请先选择有效的服务连接。	Choose a valid service connection first.
-声音预设已保存	Voice preset saved
-音色已保存	Voice saved
 播报开关已保存	Speech preference saved
 播报规则已保存	Speech rules saved
 关键词音效已保存	Keyword sounds saved
@@ -490,8 +413,6 @@ Fish 音色已保存	Fish voice saved
 音频设置已保存	Audio settings saved
 外观已保存	Appearance saved
 启动选项已保存	Startup preference saved
-请先保存参考设置，再切换模型。	Save reference settings before switching models.
-更换语音服务请新建音色。	Create a new voice to change speech services.
 退出前停止播报失败：	Could not stop speech before exit:\u0020
 桌面连接不可用	Desktop connection unavailable
 请重新打开超绝可爱弹幕姬，或点击重试。	Reopen DanmakuVoice, or select Retry.
@@ -552,11 +473,6 @@ Fish 音色已保存	Fish voice saved
 夜幕	Night
 晨雾	Mist
 开机时启动	Start with Windows
-扫码登录豆包后即可选择音色。	Sign in to Doubao by QR code to choose a voice.
-这个服务还没有音色。	This service has no voices yet.
-连接 Fish Audio 账号后即可添加音色。	Connect a Fish Audio account to add voices.
-选择 dots.tts 的安装目录后，可以添加参考音频作为音色。	Choose the dots.tts folder to add reference audio as voices.
-选择 GPT-SoVITS 的安装目录后，可以添加角色音色。	Choose the GPT-SoVITS folder to add character voices.
 连接账号	Connect account
 选择安装目录	Choose folder
 观众专属声音	Viewer voices
@@ -819,7 +735,6 @@ OBS 密码已加密保存	OBS password saved and encrypted
 放弃未保存的直播信息？	Discard unsaved stream details?
 刷新会读取 B站上的标题和分区，本页尚未保存的修改会丢失。	Refreshing reloads the title and category from Bilibili. Unsaved changes here will be lost.
 关闭后，尚未保存的标题和分区修改会丢失。	Unsaved title and category changes will be lost.
-还没有音色。	No voices yet.
 会在 OBS 当前场景放一个“弹幕姬叠加层”浏览器来源，再点一次只更新它。手动添加时，宽高填画布分辨率。	Adds a browser source to the current OBS scene; selecting it again only updates it. When adding one manually, use the canvas resolution as width and height.
 账号已登录<br>请先开通直播间	Signed in<br>Open a Bilibili live room first
 未找到本账号直播间，请先在 B站开通直播间后重新扫码	No live room was found for this account. Open one on Bilibili, then sign in again.
@@ -971,7 +886,6 @@ TA 的声音	Their voice
 地址	Address
 填写表情的完整名字，例如 [doge]。没有读法的表情只显示，不播报。	Enter the full emoticon name, such as [doge]. Emoticons without a reading appear without speech.
 填写读法，或给这位观众选一个声音。	Enter a pronunciation or choose a voice for this viewer.
-声音名称	Voice name
 备份与迁移	Backup and migration
 大约一分钟	About a minute
 好了	Done
@@ -1019,7 +933,6 @@ TA 的声音	Their voice
 添加	Add
 添加关键词	Add a keyword
 添加声音	Add a voice
-添加角色声音	Add a character voice
 添加音色链接	Add a voice link
 点一个时长就生效	Select a duration to apply
 点连接启动服务，再选择声音。	Select Connect to start the service, then choose a voice.

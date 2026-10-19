@@ -59,11 +59,6 @@ const field = (name, label, value = '', attrs = '', hint = '') => {
   return `<div class="field"><label for="${id}">${esc(label)}</label><input id="${id}" name="${esc(name)}" value="${esc(attrs.includes('type="number"') ? displayNumber(value) : value)}" ${attrs}>${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</div>`;
 };
 const presetLabel = preset => preset.provider === 'doubao' && (!preset.name || preset.name.includes(preset.voice_id)) ? voiceName(preset.voice_id) : preset.provider === 'gpt_sovits' ? String(preset.name || '').replace(/^GPT-SoVITS\s*·\s*/, '') || preset.voice_id : preset.name;
-function defaultPresetName(provider, voiceId, id) {
-  if (provider === 'doubao') return voiceName(voiceId);
-  const existing = snapshot.presets.find(item => item.id === id);
-  return (existing?.name ? presetLabel(existing) : provider === 'gpt_sovits' ? voiceId : `${providerLabel(provider)} · ${voiceId}`).slice(0, 100);
-}
 const textArea = (name, label, value = '', attrs = '', hint = '') => {
   const id = `field-${++fieldSequence}`;
   return `<div class="field"><label for="${id}">${esc(label)}</label><textarea id="${id}" name="${esc(name)}" rows="3" ${attrs}>${esc(value)}</textarea>${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</div>`;
@@ -77,11 +72,10 @@ const toggle = (name, label, checked, description = '') => `<label class="toggle
 const heading = (title, description = '') => `<h2 class="settings-page-title">${esc(title)}</h2>${description ? `<p class="settings-page-description">${esc(description)}</p>` : ''}`;
 const saveButton = (label = t('保存更改')) => `<button type="submit" class="button primary">${esc(label)}</button>`;
 const autoStatus = () => t('<div class="autosave-status" role="status" aria-live="polite" hidden><span data-autosave-label></span><button type="button" class="text-button" data-action="autosave.retry" hidden>重试</button><button type="button" class="text-button" data-action="autosave.discard" hidden>丢弃草稿</button></div>');
-const autoFormTypes = new Set(['gift-merge', 'preset', 'tts-toggle', 'rules', 'sound-words', 'audio', 'appearance', 'startup', 'service-local', 'fish-settings', 'fish-preset', 'overlay', 'obs', 'obs-link']);
-const manualSaveFormTypes = new Set(['service-fish', 'fish-voice']);
+const autoFormTypes = new Set(['gift-merge', 'tts-toggle', 'rules', 'sound-words', 'audio', 'appearance', 'startup', 'service-local', 'fish-settings', 'overlay', 'obs', 'obs-link']);
+const manualSaveFormTypes = new Set(['service-fish']);
 const autosaves = new Map();
 const formDrafts = new Map();
-const dotsSaves = new WeakMap();
 const composingInputs = new WeakSet();
 const tabEditors = new Map();
 const empty = (message) => `<p class="empty-list">${esc(message)}</p>`;
@@ -2499,14 +2493,6 @@ function collectAutosave(form) {
     if (gift_merge.maximum_seconds < gift_merge.initial_seconds) throw new Error(t('最长等待不能小于初始等待'));
     return { action: 'live.save', payload: { gift_merge } };
   }
-  if (type === 'preset') {
-    const connection = snapshot.connections.find(item => item.id === value('connection_id'));
-    if (!connection || !value('voice_id')) throw new Error(t('请选择语音服务和音色'));
-    const name = value('name') || defaultPresetName(connection.settings.provider, value('voice_id'), id);
-    const preset = { id, name, connection_id: connection.id, provider: connection.settings.provider, voice_id: value('voice_id'), speed: number('speed'), volume: number('volume'), sovits: null };
-    if (preset.provider === 'gpt_sovits') preset.sovits = { model_selection: value('model_selection'), gpt_weights_path: value('gpt_weights_path') || null, sovits_weights_path: value('sovits_weights_path') || null, reference_text: value('reference_text'), reference_text_free: checked('reference_text_free'), reference_language: value('reference_language'), text_language: value('text_language'), split: value('split'), top_k: number('top_k'), top_p: number('top_p'), temperature: number('temperature'), sample_steps: number('sample_steps'), super_sampling: checked('super_sampling'), fragment_interval_secs: number('fragment_interval_secs') };
-    return { action: 'presets.save', payload: { preset } };
-  }
   if (type === 'service-local') {
     if (!['dots', 'gpt_sovits'].includes(form.dataset.provider)) throw new Error(t('本地服务类型无效。'));
     return { action: 'local_services.save', payload: { provider: form.dataset.provider, directory: value('directory') } };
@@ -2515,11 +2501,6 @@ function collectAutosave(form) {
     const connectionId = form.dataset.connectionId;
     if (!snapshot.connections.some(item => item.id === connectionId && item.has_credential)) throw new Error(t('请先连接 Fish Audio 账号。'));
     return { action: 'fish.settings.save', payload: { connection_id: connectionId, settings: { model: value('model'), latency: value('latency'), volume_db: number('volume_db'), temperature: number('temperature'), top_p: number('top_p'), streaming: true } } };
-  }
-  if (type === 'fish-preset') {
-    const existing = snapshot.presets.find(item => item.id === id && item.provider === 'fish_audio' && item.connection_id === form.dataset.connectionId);
-    if (!existing) throw new Error(t('请重新打开音色设置。'));
-    return { action: 'presets.save', payload: { preset: { ...existing, name: value('name'), speed: number('speed'), volume: number('volume') } } };
   }
   if (type === 'tts-toggle') return { action: 'preferences.save', payload: { preferences: { tts_enabled: checked('tts_enabled') } } };
   if (type === 'rules') {
@@ -2613,16 +2594,9 @@ function copyFormDraft(form, record) {
   formDrafts.set(record.key, { html: clone.outerHTML, fields, language: getLanguage(), editor: record.editor ? { ...record.editor } : null, tab: record.tab, type: form.dataset.form });
 }
 
-function dotsDraftKey(form) { return `voices:dots-preset:${form.dataset.id || 'new'}`; }
-
-function rememberDotsDraft(form) {
-  copyFormDraft(form, { key: dotsDraftKey(form), editor, tab: 'voices' });
-}
-
 function mountAutosaves() {
   for (let form of settingsDialog.querySelectorAll('[data-form]')) {
-    const key = form.dataset.form === 'dots-preset' ? dotsDraftKey(form)
-      : `${settingsTab}:${form.dataset.form}:${form.dataset.id || form.dataset.provider || form.dataset.connectionId || 'new'}`;
+    const key = `${settingsTab}:${form.dataset.form}:${form.dataset.id || form.dataset.provider || form.dataset.connectionId || 'new'}`;
     const draft = formDrafts.get(key);
     if (draft) {
       const template = document.createElement('template'); template.innerHTML = draft.html;
@@ -2656,32 +2630,14 @@ function mountAutosaves() {
     if (draft) record.baseline = '';
     record.queue = createAutosaveQueue({
       delay: 600,
-      prepare: envelope => {
-        const prepared = structuredClone(envelope);
-        if (form.dataset.form === 'preset') prepared.payload.preset.id = form.dataset.id || '';
-        return prepared;
-      },
       save: async ({ action, payload }) => {
         if (form.dataset.form === 'service-local') return saveLocalDirectory(payload.provider, payload.directory);
         if (form.dataset.form === 'audio' && !await confirmOutputChange(form, payload)) return snapshot;
         return command(action, payload, { quiet: true, silent: true });
       },
-      onSaved: async (result, envelope) => {
+      onSaved: async (_result, envelope) => {
         const oldKey = record.key;
-        if (result.result?.id && form.dataset.form === 'preset') {
-          form.dataset.id = result.result.id;
-          record.key = `${record.tab}:${form.dataset.form}:${result.result.id}`;
-          if (record.editor) record.editor.id = result.result.id;
-          if (editor?.type === form.dataset.form) editor.id = result.result.id;
-          if (formDrafts.has(oldKey)) { formDrafts.set(record.key, formDrafts.get(oldKey)); formDrafts.delete(oldKey); }
-        }
         if (form.elements.credential && envelope.payload.credential && form.elements.credential.value.trim() === envelope.payload.credential) form.elements.credential.value = '';
-        const savedPresetId = form.dataset.form === 'preset' ? result.result?.id || form.dataset.id : null;
-        if (record.editor?.makePreferred && savedPresetId && !form.elements.model_pair) {
-          await command('presets.default', { id: savedPresetId }, { quiet: true, silent: true });
-          record.editor.makePreferred = false;
-          if (editor?.type === 'preset' && editor.id === savedPresetId) editor.makePreferred = false;
-        }
         if (record.revision === envelope.revision) {
           record.touched = false; record.invalid = ''; formDrafts.delete(record.key); formDrafts.delete(oldKey);
           try { record.baseline = JSON.stringify(collectAutosave(form)); record.lastScheduled = record.baseline; } catch { /* May become invalid only after a concurrent edit. */ }
@@ -2779,8 +2735,6 @@ function renderSettings() {
   if (keepScroll) { const content = settingsDialog.querySelector('#settings-content'); if (content) content.scrollTop = keepScroll; }
   mountAutosaves();
   for (const node of settingsDialog.querySelectorAll('[data-lake-template]')) node.innerHTML = lakeTemplateMarkup(node.closest('form').elements[`template_${node.dataset.lakeTemplate}`].value);
-  if (editor?.type === 'preset') hideLegacyVoiceFields();
-  if (editor?.type === 'preset' && !editor.id) applyModelPairToForm(false);
   updateVoiceSettings();
   updateServiceIndicators();
   updateOverlayStatus();
@@ -3627,7 +3581,6 @@ function renderVoiceManagement(presets, preferred, bodyOnly = false) {
 }
 function renderVoicesSettings() {
   if (['voice-add', 'service', 'qr'].includes(editor?.type)) return renderLakeVoiceAdd();
-  if (editor?.type === 'preset') return renderPresetEditor(editor.id);
   const presets = snapshot.presets || [];
   const preferred = presets.find(item => item.id === snapshot.rules?.default_preset_id);
   if (!presets.length) return `<div class="lake-voices-page"><section class="voice-empty"><span class="voice-empty-line" aria-hidden="true"></span><h2>${esc(t('还没有声音'))}</h2><p>${esc(t('挑一个你喜欢的声音，让弹幕有声音。'))}</p>${button(t('添加声音'), 'voice.add', { class: 'primary' })}</section><p class="voice-page-foot with-action"><span>${esc(t('不读弹幕也能照常显示。'))}</span>${button(t('播放测试音'), 'audio.test', { class: 'quiet' })}</p></div>`;
@@ -3815,8 +3768,26 @@ async function pickReferenceAudio() {
   return typeof path === 'string' ? path : '';
 }
 
-async function saveVoiceReference(preset, changes) {
-  const role = referenceRole(preset.provider, preset, null);
+// Keep changes to the same voice in order, including edits made while a save
+// is still running. Each write starts from the preceding saved profile.
+const voiceReferenceSaves = new Map();
+function saveVoiceReference(preset, changes) {
+  const previous = voiceReferenceSaves.get(preset.id) || Promise.resolve();
+  const captured = { ...changes };
+  const identity = { id: preset.id, provider: preset.provider, connection_id: preset.connection_id, role: referenceRole(preset.provider, preset, null) };
+  const operation = previous.catch(() => {}).then(() => persistVoiceReference(identity, captured));
+  voiceReferenceSaves.set(preset.id, operation);
+  return operation.finally(() => {
+    if (voiceReferenceSaves.get(preset.id) === operation) voiceReferenceSaves.delete(preset.id);
+  });
+}
+
+async function persistVoiceReference(identity, changes) {
+  // A queued recording edit must keep names and tuning saved while it waited,
+  // and must never recreate a voice deleted or moved to another role meanwhile.
+  const preset = snapshot.presets.find(item => item.id === identity.id);
+  const role = preset && referenceRole(preset.provider, preset, null);
+  if (!preset || preset.provider !== identity.provider || preset.connection_id !== identity.connection_id || JSON.stringify(role) !== JSON.stringify(identity.role)) throw new Error(t('请重新打开声音设置。'));
   if (!role) throw new Error(t('找不到这个声音的模型，请重新添加。'));
   const current = currentReference(role)?.profile || {};
   const profile = { connection_id: preset.connection_id, role, audio_path: current.audio_path || '', reference_text: current.reference_text || '', reference_language: current.reference_language || (preset.provider === 'gpt_sovits' ? 'auto' : ''), text_language: current.text_language || (preset.provider === 'gpt_sovits' ? 'auto' : ''), text_free: preset.provider === 'gpt_sovits' && !!current.text_free, ...changes };
@@ -3883,14 +3854,14 @@ async function selectLakeVoiceProvider(provider) {
 }
 
 async function handleLakeVoiceAction(action, id, target) {
-  if (action === 'voice.add' || action === 'preset.new') {
+  if (action === 'voice.add') {
     if (!await allowLeaveSettings()) return true;
     lakeVoiceEditId = '';
     await selectLakeVoiceProvider(defaultVoiceTab());
     return true;
   }
   if (action === 'voice.provider') { await selectLakeVoiceProvider(id); return true; }
-  if (action === 'voice.edit' || action === 'preset.edit' || action === 'voice.added.edit') {
+  if (action === 'voice.edit' || action === 'voice.added.edit') {
     if (!await flushAutosaves(true)) return true;
     const preset = snapshot.presets.find(item => item.id === id);
     const opening = action === 'voice.added.edit' || lakeVoiceEditId !== id;
@@ -3903,7 +3874,7 @@ async function handleLakeVoiceAction(action, id, target) {
     return true;
   }
   if (action === 'voice.preview') { if (!await flushAutosaves()) return true; if (!snapshot.presets.some(p => p.id === id)) return true; await command('audition', { preset_id: id, text: voiceAuditionDraft.text }, { success: t('试听已加入播放队列') }); return true; }
-  if (action === 'voice.default') { if (!await flushAutosaves()) return true; await command('presets.default', { id }); updateVoiceSettings(); return true; }
+  if (action === 'voice.default') { if (!await flushAutosaves()) return true; await settleVoiceAuditionChoice(); await command('presets.default', { id }); updateVoiceSettings(); return true; }
   if (action === 'voice.remove') {
     if (!await flushAutosaves()) return true;
     if (!await confirmAction(t('删除这个声音？'), t('观众绑定和播报规则仍在使用时，需要先解除引用。'), t('删除'))) return true;
@@ -4044,28 +4015,6 @@ function installLakeVoiceEvents() {
   });
 }
 
-function renderVoiceChoices(presets, preferred) {
-  const provider = preferred?.provider || voiceAuditionDraft.provider || presets[0]?.provider || 'doubao';
-  const voices = presets.filter(preset => preset.provider === provider);
-  const selected = voices.find(preset => preset.id === preferred?.id) || voices.find(preset => preset.id === voiceAuditionDraft.presetId);
-  // The empty radio keeps preset_id a group even with one voice, so "no choice" reads as ''.
-  const chips = `<input type="radio" name="preset_id" value="" hidden tabindex="-1" aria-hidden="true"${selected ? '' : ' checked'}>${voices.map(preset => `<label class="s-chip"><input type="radio" name="preset_id" value="${esc(preset.id)}"${selected?.id === preset.id ? ' checked' : ''}><span>${esc(presetLabel(preset))}</span></label>`).join('')}`;
-  const connection = serviceConnection(provider);
-  let setup = '';
-  if (!voices.length) {
-    const needsLogin = provider === 'doubao' ? !connection?.has_credential : provider === 'fish_audio' ? !connection?.has_credential : !connection;
-    const text = provider === 'doubao' ? (needsLogin ? t('扫码登录豆包后即可选择音色。') : t('这个服务还没有音色。'))
-      : provider === 'fish_audio' ? (needsLogin ? t('连接 Fish Audio 账号后即可添加音色。') : t('这个服务还没有音色。'))
-      : needsLogin ? (provider === 'dots' ? t('选择 dots.tts 的安装目录后，可以添加参考音频作为音色。') : t('选择 GPT-SoVITS 的安装目录后，可以添加角色音色。')) : t('这个服务还没有音色。');
-    const action = !needsLogin ? '' : provider === 'doubao' ? button(t('扫码登录'), 'doubao.begin', { id: connection?.id || '', class: 'small', icon: 'qr' })
-      : button(provider === 'fish_audio' ? t('连接账号') : t('选择安装目录'), 'service.configure', { id: provider, class: 'small', icon: provider === 'fish_audio' ? 'person' : 'folder' });
-    setup = `<div class="s-setup"><span>${esc(text)}</span>${action}</div>`;
-  }
-  return { provider, html: ui`<div class="s-chips" role="radiogroup" aria-label="直播首选音色">${chips}<button type="button" class="s-chip s-chip-add" data-action="voice-audition.add">${icon('plus')}添加音色</button></div>${setup}`, selected };
-}
-
-
-
 function updateVoiceAudition(form) {
   const provider = form.dataset.provider;
   const voices = (snapshot.presets || []).filter(preset => preset.provider === provider);
@@ -4143,44 +4092,6 @@ async function flushExitEdits() {
 
 
 
-function renderServiceCard(provider, preferred) {
-  const connection = serviceConnection(provider);
-  const status = providerStatus(provider, connection);
-  const isPreferred = preferred?.provider === provider;
-  return `<div class="s-tile-wrap${isPreferred ? ' preferred' : ''}" data-service-provider="${esc(provider)}"><button type="button" class="service-card-select s-tile" data-action="service.prefer" data-id="${esc(provider)}" aria-pressed="${isPreferred}" aria-label="${esc(serviceChoiceLabel(provider, status, isPreferred))}" title="${esc(status.detail || status.label)}"><strong class="service-card-name">${esc(providerLabel(provider))}</strong><span class="s-tile-status"><span class="service-light ${status.tone}" aria-hidden="true"></span><small class="service-card-status">${esc(status.label)}</small></span></button></div>`;
-}
-
-
-
-function renderPresetCore(id) {
-  const first = snapshot.connections.find(item => item.id === editor?.connectionId) || snapshot.connections[0];
-  const preset = snapshot.presets.find(item => item.id === id) || { id: '', name: '', connection_id: first?.id || '', provider: first?.settings.provider, voice_id: '', speed: 1, volume: 1, sovits: null };
-  const provider = first?.settings.provider || preset.provider;
-  const defaults = { model_selection: 'per_request_atomic', gpt_weights_path: '', sovits_weights_path: '', reference_text: '', reference_language: 'all_zh', text_language: 'all_zh', split: 'cut0', top_k: 5, top_p: 1, temperature: 1, sample_steps: 8, fragment_interval_secs: .3, ...preset.sovits };
-  const hidden = provider === 'gpt_sovits' ? Object.entries(defaults).filter(([key])=>!['reference_text_free','super_sampling'].includes(key)).map(([key,value])=>`<input type="hidden" name="${key}" value="${esc(value ?? '')}">`).join('') + `<input type="checkbox" name="reference_text_free" hidden${preset.sovits?.reference_text_free !== false?' checked':''}><input type="checkbox" name="super_sampling" hidden${preset.sovits?.super_sampling?' checked':''}>` : '';
-  const picker = provider === 'gpt_sovits' ? modelPairPicker(preset) + `<input type="hidden" name="voice_id" value="${esc(preset.voice_id)}">` : select('voice_id',t('豆包音色'),(snapshot.doubao_voices || []).map(voice=>option(voice.id,voice.name,preset.voice_id)).join(''));
-  return `<section class="lake-voices-page"><div class="voice-add-intro"><h2>${esc(t('添加角色声音'))}</h2><p>${esc(providerLabel(provider))}</p></div><form data-form="preset" data-id="${esc(id || '')}"><input type="hidden" name="connection_id" value="${esc(preset.connection_id)}">${picker}${field('name',t('声音名称'),preset.name || '',t('maxlength="100" placeholder="默认使用音色名称"'))}${voiceWaterline('speed',t('语速'),preset.speed ?? 1,.5,2,'×')}${voiceWaterline('volume',t('音量'),preset.volume ?? 1,0,2,'')}${hidden}${autoStatus()}</form></section>`;
-}
-
-function selectedModelPair(preset) {
-  const pairs = modelScan.pairs || [];
-  if (Number.isInteger(editor?.modelIndex) && pairs[editor.modelIndex]) return { pair: pairs[editor.modelIndex], index: editor.modelIndex };
-  const gpt = preset.sovits?.gpt_weights_path;
-  const sovits = preset.sovits?.sovits_weights_path;
-  const index = pairs.findIndex(pair => String(pair.gpt_path).toLowerCase() === String(gpt).toLowerCase() && String(pair.sovits_path).toLowerCase() === String(sovits).toLowerCase());
-  if (index >= 0) return { pair: pairs[index], index };
-  if (!preset.id && pairs.length) return { pair: pairs[0], index: 0 };
-  return { pair: null, index: -1 };
-}
-
-function modelPairPicker(preset) {
-  const { index } = selectedModelPair(preset);
-  const options = (modelScan.pairs || []).map((pair, number) => option(number, `${pair.name} · ${pair.version}`, index)).join('');
-  const retained = preset.sovits?.gpt_weights_path && index < 0 ? option('existing', t('当前模型（安装目录中未找到）'), 'existing') : '';
-  const placeholder = options || retained ? '' : option('', t('尚未发现成对模型'), '');
-  return `<div class="model-pair-picker">${select('model_pair', t('角色模型'), placeholder + retained + options, t('从安装目录自动配对 GPT 与 SoVITS 权重。'))}${button(t('刷新模型'), 'models.refresh', { class: 'small quiet', icon: 'refresh' })}</div>${modelScan.error ? `<p class="quiet-note status-error">${esc(modelScan.error)}</p>` : ''}${modelScan.issues?.length ? ui`<p class="quiet-note">另有 ${modelScan.issues.length} 个文件未配对或存在歧义。</p>` : ''}`;
-}
-
 function referenceRole(provider, preset, pair) {
   if (provider === 'dots') return preset.voice_id ? { kind: 'dots', role: preset.voice_id } : null;
   if (provider !== 'gpt_sovits') return null;
@@ -4197,78 +4108,6 @@ function currentReference(role) {
   return referenceProfiles.find(entry => matches(entry.profile?.role)) || null;
 }
 
-function languageOptions(selected) {
-  return [['auto', t('自动识别')], ['all_zh', t('中文')], ['en', t('英语')], ['all_ja', t('日语')], ['all_ko', t('韩语')], ['all_yue', t('粤语')]].map(([code, label]) => option(code, label, selected)).join('');
-}
-
-function renderReferenceEditor(provider, preset, pair) {
-  const role = referenceRole(provider, preset, pair);
-  const saved = currentReference(role);
-  const profile = saved?.profile || {};
-  const audioLabel = saved?.profile?.audio_path ? t('已记住音频原路径；移动或删除原文件后需要重新选择。') : t('直接使用原文件，不复制音频。');
-  const gptFields = provider === 'gpt_sovits' ? `<div class="field-grid">${select('reference_language', t('参考语言'), languageOptions(profile.reference_language || 'auto'))}${select('text_language', t('文本语言'), languageOptions(profile.text_language || 'auto'))}</div>${check('text_free', t('无参考文本模式'), profile.text_free || false)}` : '';
-  return `<section id="reference-editor" class="reference-editor">${heading(t('参考音频'))}<p class="quiet-note">${esc(audioLabel)}</p><form data-form="reference">${pathField('audio_path', t('参考音频'), profile.audio_path || '', 'reference.pick_audio', t('点击选择参考音频'), t('支持 WAV、MP3、FLAC、OGG 或 M4A'))}${textArea('reference_text', t('参考文本'), profile.reference_text ?? preset.sovits?.reference_text ?? '', 'maxlength="8192"', t('填写参考音频中实际说出的文字。'))}${gptFields}<div class="form-footer">${saveButton(t('保存参考设置'))}</div></form>${role ? '' : t('<p class="quiet-note">先填写角色名称或选择角色模型。</p>')}</section>`;
-}
-
-function renderDotsPresetEditor(id, preset, connection) {
-  const role = preset.voice_id || (editor.dotsVoiceId ||= `dots-${crypto.randomUUID()}`);
-  const saved = currentReference({ kind: 'dots', role });
-  const profile = saved?.profile || {};
-  const legacy = !!id && !profile.audio_path;
-  const hint = legacy
-    ? t('此旧音色尚未记录原文件路径，仍可沿用服务内文件名；选择原文件后会改用新路径。')
-    : t('使用原文件，不复制音频。原文件移动或删除后需重新选择。');
-  return `${heading(id ? t('编辑 dots 音色') : t('添加 dots 音色'))}<form data-form="dots-preset" data-id="${esc(id || '')}" data-connection-id="${esc(connection.id)}">${field('name', t('音色名称'), preset.name || '', t('required maxlength="100" placeholder="例如：日常播报"'))}${pathField('audio_path', t('参考音频'), profile.audio_path || '', 'reference.pick_audio', t('点击选择参考音频'), hint)}${textArea('reference_text', t('参考文本（可选）'), profile.reference_text || '', 'maxlength="8192"', t('可填写参考音频中说出的文字。'))}<div class="field-grid">${voiceWaterline('speed',t('语速'),preset.speed ?? 1,.5,2,'×')}${voiceWaterline('volume',t('音量'),preset.volume ?? 1,0,2,'')}</div><div class="form-footer">${saveButton(t('保存音色'))}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
-}
-
-function renderFishPresetEditor(id, preset, connection) {
-  const back = button(t('返回'), 'editor.cancel', { class: 'quiet' });
-  if (!id) return `${heading(t('收藏 Fish 音色'))}<form data-form="fish-voice" data-connection-id="${esc(connection.id)}">${field('id_or_url', t('音色页面链接或 ID'), '', t('required autocomplete="off" placeholder="https://fish.audio/m/… 或 32 位 ID"'))}<div class="actions">${button(t('查找官方名称'), 'fish.voice.lookup', { class: 'small quiet' })}</div><p class="quiet-note" data-fish-lookup-result role="status" hidden></p>${field('name', t('收藏名称'), '', 'maxlength="100"', t('可自行命名；留空会先读取官方名称。'))}<div class="form-footer">${saveButton(t('收藏音色'))}${back}</div></form>`;
-  return `${heading(t('编辑 Fish 音色'))}<form data-form="fish-preset" data-id="${esc(id)}" data-connection-id="${esc(connection.id)}">${field('name', t('音色名称'), preset.name, 'required maxlength="100"')}<div class="field-grid">${field('speed', t('语速'), preset.speed, 'type="number" min="0.5" max="2" step="0.05" required')}${field('volume', t('音色音量'), preset.volume, 'type="number" min="0" max="2" step="0.05" required')}</div><div class="form-footer">${autoStatus()}${button(t('试听此音色'), 'fish.audition', { id, class: 'quiet' })}${back}</div></form>`;
-}
-
-function renderPresetEditor(id) {
-  if (!id && !editor?.connectionId) {
-    return `${heading(t('添加音色'))}<div class="row-list">${snapshot.connections.map(connection => `<div class="setting-row"><div class="row-text"><div class="row-title">${esc(providerLabel(connection.settings.provider))}</div><div class="row-description">${esc(connection.name || providerLabel(connection.settings.provider))}</div></div><div class="row-actions">${button(t('选择'), 'preset.choose_service', { id: connection.id, class: 'small' })}</div></div>`).join('')}</div><div class="actions">${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div>`;
-  }
-  const first = snapshot.connections.find(item => item.id === editor?.connectionId) || snapshot.connections[0];
-  const preset = snapshot.presets.find(item => item.id === id) || { id: '', connection_id: first?.id, provider: first?.settings.provider, voice_id: '', sovits: null };
-  const connection = snapshot.connections.find(item => item.id === preset.connection_id);
-  const provider = connection?.settings.provider || preset.provider;
-  if (provider === 'dots' && connection) return renderDotsPresetEditor(id, preset, connection);
-  if (provider === 'fish_audio' && connection) return renderFishPresetEditor(id, preset, connection);
-  const selected = selectedModelPair(preset);
-  let html = renderPresetCore(id);
-  if (provider === 'gpt_sovits') html += renderReferenceEditor(provider, preset, selected.pair);
-  return html;
-}
-
-function hideLegacyVoiceFields() {
-  const form = settingsDialog.querySelector('[data-form="preset"]');
-  if (!form || !form.elements.model_pair) return;
-  for (const name of ['model_selection', 'gpt_weights_path', 'sovits_weights_path', 'reference_text', 'reference_language', 'text_language']) {
-    const container = form.elements[name]?.closest('.field');
-    if (container) container.hidden = true;
-  }
-  const textFree = form.elements.reference_text_free?.closest('.check');
-  if (textFree) textFree.hidden = true;
-}
-
-function applyModelPairToForm(save = true) {
-  const form = settingsDialog.querySelector('[data-form="preset"]');
-  const picker = form?.elements.model_pair;
-  const pair = (modelScan.pairs || [])[Number(picker?.value)];
-  if (!picker || !pair) return;
-  form.elements.gpt_weights_path.value = pair.gpt_path;
-  form.elements.sovits_weights_path.value = pair.sovits_path;
-  form.elements.model_selection.value = 'per_request_atomic';
-  if (save || !form.elements.voice_id.value.trim()) form.elements.voice_id.value = pair.name;
-  if (save) scheduleAutosave(form, true);
-  const preset = { voice_id: form.elements.voice_id.value, sovits: { gpt_weights_path: pair.gpt_path, sovits_weights_path: pair.sovits_path } };
-  const section = settingsDialog.querySelector('#reference-editor');
-  if (section) section.outerHTML = renderReferenceEditor('gpt_sovits', preset, pair);
-}
-
 let voiceEditorLoadRevision = 0;
 async function loadVoiceEditorData(connectionId) {
   const revision = ++voiceEditorLoadRevision;
@@ -4277,8 +4116,7 @@ async function loadVoiceEditorData(connectionId) {
   const opened = settingsDialog.open;
   const tab = settingsTab;
   const current = () => revision === voiceEditorLoadRevision && editor === openedEditor
-    && editor?.connectionId === selectedConnection && settingsDialog.open === opened && settingsTab === tab
-    && !settingsDialog.querySelector('[data-form="reference"][data-dirty]')?.dataset?.dirty;
+    && editor?.connectionId === selectedConnection && settingsDialog.open === opened && settingsTab === tab;
   modelScan = { pairs: [], issues: [] };
   referenceProfiles = [];
   const connection = snapshot.connections.find(item => item.id === connectionId);
@@ -5092,16 +4930,6 @@ async function allowLeaveSettings() {
   await commitLakeReadingRows(true);
   await commitLakeRoomNumber().catch(() => { /* The command already showed its error. */ });
   if (!await flushAutosaves(true)) return false;
-  const dots = settingsDialog.querySelector('[data-form="dots-preset"][data-dirty]');
-  if (dots) {
-    try { await saveDotsPresetForm(dots); }
-    catch (error) { showError(error); return false; }
-  }
-  const reference = settingsDialog.querySelector('[data-form="reference"][data-dirty]');
-  if (reference) {
-    try { await saveReferenceForm(reference); }
-    catch (error) { showError(error); return false; }
-  }
   // This app never asks to discard a draft: what saves itself is saved by now,
   // and an unfinished form is simply left behind.
   for (const form of settingsDialog.querySelectorAll('[data-form][data-dirty]')) if (manualSaveFormTypes.has(form.dataset.form)) delete form.dataset.dirty;
@@ -5248,10 +5076,10 @@ async function handleAction(action, id, target) {
     return;
   }
   if (settingsDialog.open && !['settings.close', 'settings.tab', 'editor.cancel', 'autosave.retry', 'autosave.discard', 'overlay.preview', 'overlay.copy', 'live.panel', 'obs.auto_detect'].includes(action) && !action.startsWith('dictionary.')) {
-    const replacesSettings = ['room.anonymous', 'bili.use_account', 'bili.logout', 'bili.begin', 'doubao.begin', 'fish.restore_builtin', 'service.configure', 'service.prefer', 'service.add_preset', 'voice-audition.add', 'preset.choose_service', 'preset.default', 'preset.clear-default', 'preset.delete', 'models.refresh', 'onboarding.reset'].includes(action);
+    const replacesSettings = ['room.anonymous', 'bili.use_account', 'bili.logout', 'bili.begin', 'doubao.begin', 'fish.restore_builtin', 'service.configure', 'onboarding.reset'].includes(action);
     if (!await (replacesSettings ? allowLeaveSettings() : flushAutosaves())) return;
   }
-  if (['tts.select', 'service.prefer', 'preset.default', 'preset.clear-default', 'voice-audition.add', 'fish.audition', 'settings.tab'].includes(action)) await settleVoiceAuditionChoice();
+  if (action === 'settings.tab') await settleVoiceAuditionChoice();
   if (action === 'tts.open') {
     const menu = document.querySelector('#tts-menu');
     if (!menu.hidden && !isLeaving(menu)) { closeVoicePanel(); return; }
@@ -5266,6 +5094,7 @@ async function handleAction(action, id, target) {
   if (action === 'voice.browse') { voiceBrowse = id; renderVoicePanel(); return; }
   if (action === 'voice.login') { closeVoicePanel(); return guideDoubaoLogin(rememberedPreset('doubao')?.id); }
   if (action === 'voice.pick') {
+    await settleVoiceAuditionChoice();
     const preset = snapshot.presets.find(item => item.id === id);
     if (!preset) return;
     if (preset.id === snapshot.rules?.default_preset_id) return;
@@ -5309,23 +5138,6 @@ async function handleAction(action, id, target) {
     renderLakeHistory(events, eventKeys(events));
     const scroll = document.querySelector('#chat-scroll');
     setScrollTop(scroll, 0);
-    return;
-  }
-  if (action === 'tts.select') {
-    closeVoicePanel();
-    const preset = rememberedPreset(id);
-    if (id === 'doubao' && !doubaoConnection(preset)?.has_credential) return guideDoubaoLogin(preset?.id);
-    if (!preset) {
-      if (id === 'doubao') {
-        const connection = doubaoConnection();
-        await openViewerSettings('voices', { type: 'preset', id: '', connectionId: connection.id, makePreferred: true });
-        if (!await loadVoiceEditorData(connection.id)) return;
-        renderSettings();
-        return;
-      }
-      throw new Error(t('请先在声音设置中添加这个服务的音色。'));
-    }
-    await command('presets.default', { id: preset.id }, { success: ui`已切换到 ${providerLabel(id)}` });
     return;
   }
   if (action === 'audience.open') {
@@ -5528,92 +5340,7 @@ async function handleAction(action, id, target) {
     showToast(next.result?.length ? ui`已恢复 ${next.result.length} 个内置音色` : t('内置音色已齐全'));
     return;
   }
-  if (action === 'fish.voice.lookup') {
-    const form = target.closest('[data-form="fish-voice"]');
-    const idOrUrl = form?.elements.id_or_url.value.trim();
-    const connectionId = form?.dataset.connectionId;
-    if (!idOrUrl || !connectionId) throw new Error(t('请填写音色页面链接或 32 位音色 ID。'));
-    const next = await command('fish.voice.lookup', { connection_id: connectionId, id_or_url: idOrUrl });
-    if (form.elements.id_or_url.value.trim() !== idOrUrl) return;
-    form.elements.id_or_url.value = next.result.voice_id;
-    if (!form.elements.name.value.trim()) form.elements.name.value = String(next.result.name || '').slice(0, 100);
-    const status = form.querySelector('[data-fish-lookup-result]');
-    if (status) { status.textContent = next.result.name ? ui`已找到：${next.result.name}` : t('已确认音色 ID。'); status.hidden = false; }
-    return;
-  }
-  if (action === 'fish.audition') {
-    const preset = snapshot.presets.find(item => item.id === id && item.provider === 'fish_audio');
-    if (!preset) throw new Error(t('请重新选择 Fish Audio 音色。'));
-    if (!snapshot.connections.some(connection => connection.id === preset.connection_id && connection.has_credential)) throw new Error(t('请先连接 Fish Audio 账号。'));
-    if (snapshot.rules?.default_preset_id !== preset.id) await command('presets.default', { id: preset.id }, { quiet: true });
-    await command('audition', { preset_id: preset.id, text: t('你好，欢迎来到直播间。') }, { success: t('试听已加入播放队列') });
-    return;
-  }
-  if (action === 'voice-audition.add') {
-    const form = target.closest('[data-form="voice-audition"]');
-    if (!form) throw new Error(t('请重新打开声音设置。'));
-    updateVoiceAudition(form);
-    const provider = form.dataset.provider;
-    const connection = serviceConnection(provider);
-    if (!connection || (provider === 'fish_audio' && !connection.has_credential)) {
-      editor = { type: 'service', provider, makePreferred: true };
-    } else {
-      editor = { type: 'preset', id: '', connectionId: connection.id, makePreferred: true };
-      if (!await loadVoiceEditorData(connection.id)) return;
-    }
-    renderSettings();
-    return;
-  }
   if (action === 'service.configure') { editor = { type: 'service', provider: id }; renderSettings(); return; }
-  if (action === 'service.prefer') {
-    if (id === 'doubao' && !doubaoConnection(rememberedPreset('doubao'))?.has_credential) return guideDoubaoLogin(rememberedPreset('doubao')?.id);
-    if (snapshot.presets.find(item => item.id === snapshot.rules?.default_preset_id)?.provider === id) return;
-    if (id === 'fish_audio' && !serviceConnection(id)?.has_credential) {
-      editor = { type: 'service', provider: id, makePreferred: true };
-      renderSettings();
-      showToast(t('先连接 Fish Audio 账号，验证后会设为首选'));
-      return;
-    }
-    const preset = rememberedPreset(id);
-    if (preset) { await command('presets.default', { id: preset.id }, { success: ui`${providerLabel(id)} 已设为首选` }); updateVoiceSettings(); updateServiceIndicators(); return; }
-    const connection = serviceConnection(id);
-    editor = connection ? { type: 'preset', id: '', connectionId: connection.id, makePreferred: true } : { type: 'service', provider: id, makePreferred: true };
-    if (connection) if (!await loadVoiceEditorData(connection.id)) return;
-    renderSettings();
-    showToast(connection ? t('先添加音色，保存后会设为首选') : t('先连接服务，再添加首选音色'));
-    return;
-  }
-  if (action === 'service.add_preset') {
-    const connection = serviceConnection(id);
-    if (!connection) throw new Error(t('请先设置这个语音服务。'));
-    if (id === 'fish_audio' && !connection.has_credential) {
-      editor = { type: 'service', provider: id, makePreferred: !!editor?.makePreferred || !snapshot.rules?.default_preset_id };
-      renderSettings();
-      showToast(t('请先连接 Fish Audio 账号'));
-      return;
-    }
-    editor = { type: 'preset', id: '', connectionId: connection.id, makePreferred: !!editor?.makePreferred || !snapshot.rules?.default_preset_id };
-    if (!await loadVoiceEditorData(connection.id)) return;
-    renderSettings(); return;
-  }
-  if (action === 'models.refresh') {
-    if (!await allowLeaveSettings()) return;
-    const connectionId = settingsDialog.querySelector('[data-form="preset"]')?.elements.connection_id?.value;
-    if (!connectionId) throw new Error(t('请先选择 GPT-SoVITS 服务。'));
-    editor.modelIndex = undefined;
-    if (!await loadVoiceEditorData(connectionId)) return;
-    renderSettings(); return;
-  }
-  if (action === 'reference.pick_audio') {
-    const pick = window.__TAURI__?.dialog?.open;
-    if (!pick) throw new Error(t('文件选择器不可用，请重新打开应用。'));
-    const path = await pick({ multiple: false, title: t('选择参考音频'), filters: [{ name: t('音频'), extensions: ['wav', 'mp3', 'flac', 'ogg', 'm4a'] }] });
-    if (typeof path === 'string') {
-      const input = target.closest('form').elements.audio_path;
-      setPickedPath(input, path);
-    }
-    return;
-  }
   if (action === 'service.pick_directory') {
     const pick = window.__TAURI__?.dialog?.open;
     if (!pick) throw new Error(t('目录选择器不可用，请重新打开应用。'));
@@ -5648,24 +5375,6 @@ async function handleAction(action, id, target) {
     if (editor?.type === 'qr') await cancelQr();
     editor = null; tabEditors.delete(settingsTab); renderSettings(); return;
   }
-  if (action === 'preset.choose_service') {
-    const connection = snapshot.connections.find(item => item.id === id);
-    if (!connection || editor?.type !== 'preset' || editor.id) throw new Error(t('请重新选择语音服务。'));
-    if (connection.settings.provider === 'fish_audio' && !connection.has_credential) {
-      editor = { type: 'service', provider: 'fish_audio', makePreferred: !!editor.makePreferred };
-      renderSettings();
-      showToast(t('请先连接 Fish Audio 账号'));
-      return;
-    }
-    editor.connectionId = connection.id;
-    if (!await loadVoiceEditorData(connection.id)) return;
-    renderSettings(); return;
-  }
-  if (action === 'preset.delete') {
-    if (await confirmAction(ui`删除${t('声音预设')}？`, t('删除后无法撤销。仍被使用的连接、默认预设或规则素材需要先解除引用。'), t('删除'))) { await command('presets.delete', { id, confirmed: true }); renderSettings(); }
-    return;
-  }
-  if (action === 'preset.default' || action === 'preset.clear-default') { await command('presets.default', { id: action === 'preset.clear-default' ? null : id }); if (settingsTab === 'voices' && !editor) { updateVoiceSettings(); updateServiceIndicators(); } else renderSettings(); return; }
   if (action === 'dictionary.view') {
     dictionaryView = id === 'user_words' ? 'user_words' : 'message_words';
     for (const panel of settingsDialog.querySelectorAll('.s-dict')) panel.hidden = panel.dataset.view !== dictionaryView;
@@ -5698,128 +5407,6 @@ function eventFromForm(data) {
   const uid = data.get('user_id');
   if (uid && !validUid(uid)) throw new Error(t('观众 UID 需要是有效的正整数。'));
   return { room_id: snapshot.setup?.room_id || 1, user_id: uid ? numericId(uid) : null, user_name: String(data.get('user_name')), kind: String(data.get('kind')), message: String(data.get('message') || ''), gift_name: String(data.get('gift_name') || ''), quantity: Number(data.get('quantity') || 1), price_yuan: Number(data.get('price_yuan') || 0), coin_type: String(data.get('coin_type') || 'gold'), guard_name: String(data.get('guard_name') || ''), platform_event_id: null, observed_at_ms: 0 };
-}
-
-function manualVoiceFormValues(form) {
-  const data = new FormData(form);
-  return JSON.stringify(['name', 'audio_path', 'reference_text', 'reference_language', 'text_language', 'speed', 'volume']
-    .map(key => data.get(key)).concat(data.has('text_free')));
-}
-
-async function saveDotsPresetForm(form) {
-  const inFlight = dotsSaves.get(form);
-  if (inFlight) return inFlight;
-  const openedEditor = editor;
-  const operation = (async () => {
-    let savedId;
-    do { savedId = await saveDotsPresetFormInner(form); }
-    while (form.dataset.dirty && editor === openedEditor && form.isConnected !== false);
-    return savedId;
-  })();
-  dotsSaves.set(form, operation);
-  try { return await operation; }
-  finally { dotsSaves.delete(form); }
-}
-
-async function saveDotsPresetFormInner(form) {
-  const openedEditor = editor;
-  const submitted = manualVoiceFormValues(form);
-  if (!form.checkValidity()) { form.reportValidity(); throw new Error(t('请填好音色名称、参考音频、语速和音量。')); }
-  const data = new FormData(form);
-  const name = String(data.get('name') || '').trim();
-  const audioPath = String(data.get('audio_path') || '').trim();
-  const referenceText = String(data.get('reference_text') || '').trim();
-  const speed = Number(data.get('speed'));
-  const volume = Number(data.get('volume'));
-  const connection = snapshot.connections.find(item => item.id === form.dataset.connectionId && item.settings.provider === 'dots');
-  const id = form.dataset.id || '';
-  const existing = snapshot.presets.find(item => item.id === id);
-  const voiceId = existing?.voice_id || editor?.dotsVoiceId;
-  if (!connection || !voiceId || !name) throw new Error(t('请重新选择 dots.tts 服务并填写音色名称。'));
-  if (!Number.isFinite(speed) || speed < .5 || speed > 2 || !Number.isFinite(volume) || volume < 0 || volume > 2) throw new Error(t('语速须在 0.5–2，音量须在 0–2 之间。'));
-  if (!audioPath && (!id || currentReference({ kind: 'dots', role: voiceId }))) throw new Error(t('请重新选择参考音频原文件。'));
-  form.dataset.dirty = 'true';
-  rememberDotsDraft(form);
-  const preset = { id, name, connection_id: connection.id, provider: 'dots', voice_id: voiceId, speed, volume, sovits: null };
-  const oldKey = dotsDraftKey(form);
-  const profile = audioPath
-    ? { connection_id: connection.id, role: { kind: 'dots', role: voiceId }, audio_path: audioPath, reference_text: referenceText, reference_language: '', text_language: '', text_free: false }
-    : null;
-  const result = profile
-    ? await command('dots.voice.save', { preset, profile, make_preferred: !!editor?.makePreferred }, { quiet: true, silent: true })
-    : await command('presets.save', { preset }, { quiet: true, silent: true });
-  const savedId = result.result?.id || snapshot.presets.find(item => item.connection_id === connection.id && item.voice_id === voiceId)?.id;
-  if (!savedId) throw new Error(t('无法确认音色编号；请重新打开声音设置核对。'));
-  if (!id) {
-    form.dataset.id = savedId;
-    if (openedEditor) openedEditor.id = savedId;
-  }
-  if (profile && editor === openedEditor) {
-    referenceProfiles = referenceProfiles.filter(item => item.profile?.role?.kind !== 'dots' || item.profile.role.role !== voiceId);
-    referenceProfiles.push({ profile });
-  }
-  if (openedEditor?.makePreferred && !profile) {
-    await command('presets.default', { id: savedId }, { quiet: true, silent: true });
-  }
-  if (openedEditor) openedEditor.makePreferred = false;
-  if (manualVoiceFormValues(form) !== submitted) {
-    formDrafts.delete(oldKey);
-    copyFormDraft(form, { key: dotsDraftKey(form), editor: openedEditor, tab: 'voices' });
-    return savedId;
-  }
-  delete form.dataset.dirty;
-  formDrafts.delete(oldKey);
-  formDrafts.delete(dotsDraftKey(form));
-  return savedId;
-}
-
-const referenceSaves = new WeakMap();
-async function saveReferenceForm(form) {
-  if (referenceSaves.has(form)) return referenceSaves.get(form);
-  const openedEditor = editor;
-  const operation = (async () => {
-    do { await saveReferenceFormInner(form); }
-    while (form.dataset.dirty && editor === openedEditor && form.isConnected !== false);
-  })();
-  referenceSaves.set(form, operation);
-  try { await operation; } finally { referenceSaves.delete(form); }
-}
-
-async function saveReferenceFormInner(form) {
-  const submitted = manualVoiceFormValues(form);
-  const openedEditor = editor;
-  const data = new FormData(form);
-  const value = key => String(data.get(key) ?? '').trim();
-  const checked = key => data.has(key);
-  const presetForm = settingsDialog.querySelector('[data-form="preset"]');
-  if (!presetForm || !presetForm.checkValidity()) throw new Error(t('请先填写角色名称和声音预设。'));
-  scheduleAutosave(presetForm, true);
-  await autosaves.get(presetForm)?.queue.flush();
-  const connection_id = presetForm.elements.connection_id.value;
-  const provider = snapshot.connections.find(item => item.id === connection_id)?.settings.provider;
-  const role = provider === 'dots'
-    ? { kind: 'dots', role: presetForm.elements.voice_id.value.trim() }
-    : provider === 'gpt_sovits'
-      ? { kind: 'gpt_sovits', gpt_weights_path: presetForm.elements.gpt_weights_path.value.trim(), sovits_weights_path: presetForm.elements.sovits_weights_path.value.trim() }
-      : null;
-  if (!role || (role.kind === 'gpt_sovits' && (!role.gpt_weights_path || !role.sovits_weights_path))) throw new Error(t('请先选择成对的角色模型。'));
-  const path = value('audio_path');
-  if (!path) throw new Error(t('请先选择参考音频。'));
-  if (provider === 'gpt_sovits' && !checked('text_free') && !value('reference_text')) throw new Error(t('请填写参考音频原文，或开启无参考文本模式。'));
-  const profile = { connection_id, role, audio_path: path, reference_text: value('reference_text'), reference_language: provider === 'gpt_sovits' ? value('reference_language') : '', text_language: provider === 'gpt_sovits' ? value('text_language') : '', text_free: provider === 'gpt_sovits' && checked('text_free') };
-  await command('references.save', { profile }, { quiet: true, silent: true });
-  if (openedEditor?.makePreferred) {
-    const id = presetForm.dataset.id;
-    if (!id) throw new Error(t('音色尚未创建成功，请重试。'));
-    await command('presets.default', { id }, { quiet: true, silent: true });
-    openedEditor.makePreferred = false;
-    const record = autosaves.get(presetForm);
-    if (record?.editor) record.editor.makePreferred = false;
-  }
-  const listed = await command('references.list', { connection_id }, { quiet: true });
-  if (editor === openedEditor) referenceProfiles = Array.isArray(listed.result) ? listed.result : [];
-  if (manualVoiceFormValues(form) === submitted) delete form.dataset.dirty;
-  showToast(t('角色参考设置已保存'));
 }
 
 async function handleForm(form, submitter) {
@@ -5873,48 +5460,6 @@ async function handleForm(form, submitter) {
     const settings = { model: value('model'), latency: value('latency'), volume_db: number('volume_db'), temperature: number('temperature'), top_p: number('top_p'), streaming: true };
     if (!Number.isFinite(settings.volume_db) || settings.volume_db < -20 || settings.volume_db > 20 || ![settings.temperature, settings.top_p].every(item => Number.isFinite(item) && item >= 0 && item <= 1)) throw new Error(t('合成音量须在 -20–20 dB，温度与 Top P 须在 0–1 之间。'));
     await command('fish.settings.save', { connection_id: connectionId, settings }, { success: t('Fish Audio 生成设置已保存') });
-  } else if (type === 'fish-voice') {
-    const connectionId = form.dataset.connectionId;
-    if (!snapshot.connections.some(connection => connection.id === connectionId && connection.settings.provider === 'fish_audio' && connection.has_credential)) throw new Error(t('请先连接 Fish Audio 账号。'));
-    const idOrUrl = value('id_or_url');
-    if (!idOrUrl) throw new Error(t('请填写音色页面链接或 32 位音色 ID。'));
-    let name = value('name');
-    if (!name) {
-      const found = await command('fish.voice.lookup', { connection_id: connectionId, id_or_url: idOrUrl }, { quiet: true });
-      name = String(found.result?.name || '').slice(0, 100).trim();
-      if (!name) throw new Error(t('未查到音色名称，请自行填写收藏名称。'));
-    }
-    const saved = await command('fish.voice.save', { connection_id: connectionId, id_or_url: idOrUrl, name }, { success: t('Fish 音色已收藏') });
-    if (editor?.makePreferred) await command('presets.default', { id: saved.result.id });
-    editor = null;
-  } else if (type === 'fish-preset') {
-    const existing = snapshot.presets.find(preset => preset.id === id && preset.provider === 'fish_audio' && preset.connection_id === form.dataset.connectionId);
-    if (!existing) throw new Error(t('Fish 音色不存在，请重新打开设置。'));
-    const preset = { ...existing, name: value('name'), speed: number('speed'), volume: number('volume') };
-    if (!preset.name || !Number.isFinite(preset.speed) || preset.speed < .5 || preset.speed > 2 || !Number.isFinite(preset.volume) || preset.volume < 0 || preset.volume > 2) throw new Error(t('请填写名称；语速须在 0.5–2，音量须在 0–2 之间。'));
-    await command('presets.save', { preset }, { success: t('Fish 音色已保存') });
-    editor = null;
-  } else if (type === 'preset') {
-    const connection = snapshot.connections.find(item => item.id === value('connection_id'));
-    if (!connection) throw new Error(t('请先选择有效的服务连接。'));
-    const name = value('name') || defaultPresetName(connection.settings.provider, value('voice_id'), id);
-    const preset = { id, name, connection_id: connection.id, provider: connection.settings.provider, voice_id: value('voice_id'), speed: number('speed'), volume: number('volume'), sovits: null };
-    if (preset.provider === 'gpt_sovits') preset.sovits = { model_selection: value('model_selection'), gpt_weights_path: value('gpt_weights_path') || null, sovits_weights_path: value('sovits_weights_path') || null, reference_text: value('reference_text'), reference_text_free: checked('reference_text_free'), reference_language: value('reference_language'), text_language: value('text_language'), split: value('split'), top_k: number('top_k'), top_p: number('top_p'), temperature: number('temperature'), sample_steps: number('sample_steps'), super_sampling: checked('super_sampling'), fragment_interval_secs: number('fragment_interval_secs') };
-    await command('presets.save', { preset }, { success: t('声音预设已保存') }); editor = null;
-  } else if (type === 'dots-preset') {
-    const openedEditor = editor;
-    await saveDotsPresetForm(form);
-    if (editor !== openedEditor || form.dataset.dirty) return;
-    editor = null;
-    renderSettings();
-    showToast(t('音色已保存'));
-    return;
-  } else if (type === 'reference') {
-    const openedEditor = editor;
-    await saveReferenceForm(form);
-    if (editor !== openedEditor || form.dataset.dirty) return;
-    renderSettings();
-    return;
   } else if (type === 'tts-toggle') {
     await command('preferences.save', { preferences: { tts_enabled: checked('tts_enabled') } }, { success: t('播报开关已保存') });
   } else if (type === 'rules') {
@@ -6114,8 +5659,6 @@ settingsDialog.addEventListener('compositionend', event => {
   composingInputs.delete(event.target);
   const form = event.target.closest('[data-form]');
   if (event.target.matches?.('[data-lake-template]')) form.elements[`template_${event.target.dataset.lakeTemplate}`].value = lakeTemplateText(event.target);
-  if (form?.dataset.form === 'reference') form.dataset.dirty = 'true';
-  if (form?.dataset.form === 'dots-preset') { form.dataset.dirty = 'true'; rememberDotsDraft(form); }
   if (form && manualSaveFormTypes.has(form.dataset.form)) form.dataset.dirty = 'true';
   if (form && autoFormTypes.has(form.dataset.form)) scheduleAutosave(form, false, event.target.name === 'uid');
 });
@@ -6129,8 +5672,6 @@ settingsDialog.addEventListener('input', event => {
     if (preview) preview.textContent = templatePreview(event.target.dataset.template, event.target.value);
   }
   settingsDirty = true;
-  if (form?.dataset.form === 'reference') form.dataset.dirty = 'true';
-  if (form?.dataset.form === 'dots-preset') { form.dataset.dirty = 'true'; rememberDotsDraft(form); }
   if (form && manualSaveFormTypes.has(form.dataset.form)) form.dataset.dirty = 'true';
   if (form && autoFormTypes.has(form.dataset.form)) scheduleAutosave(form, false, event.target.name === 'uid', event.isComposing || composingInputs.has(event.target));
 });
@@ -6165,34 +5706,7 @@ settingsDialog.addEventListener('change', async event => {
     return;
   }
   settingsDirty = true;
-  if (event.target.name === 'model_pair') {
-    const reference = settingsDialog.querySelector('[data-form="reference"]');
-    if (reference?.dataset.dirty) {
-      const preset = snapshot.presets.find(item => item.id === editor?.id) || { id: '' };
-      event.target.value = String(editor?.modelIndex ?? selectedModelPair(preset).index);
-      showToast(t('请先保存参考设置，再切换模型。'), true);
-      return;
-    }
-    editor.modelIndex = Number(event.target.value);
-    applyModelPairToForm();
-    return;
-  }
-  if (event.target.name === 'connection_id') {
-    const connection = snapshot.connections.find(item => item.id === event.target.value);
-    if (editor?.type === 'preset') {
-      if (editor.id) {
-        event.target.value = snapshot.presets.find(item => item.id === editor.id)?.connection_id || '';
-        showToast(t('更换语音服务请新建音色。'), true);
-        return;
-      }
-      editor.connectionId = connection?.id;
-      editor.modelIndex = undefined;
-      try { if (!await loadVoiceEditorData(connection?.id)) return; renderSettings(); } catch (error) { showError(error); }
-      return;
-    }
-  }
   const form = event.target.closest('[data-form]');
-  if (form?.dataset.form === 'dots-preset' && !form.dataset.dirty) { form.dataset.dirty = 'true'; rememberDotsDraft(form); }
   if (form && manualSaveFormTypes.has(form.dataset.form)) form.dataset.dirty = 'true';
   if (form && autoFormTypes.has(form.dataset.form)) {
     const immediate = event.target.tagName === 'SELECT' || ['checkbox', 'range'].includes(event.target.type);
