@@ -843,37 +843,6 @@ test('failed audition voice switch restores the saved default', async () => {
   assert.deepEqual(errors, ['服务暂不可用']);
 });
 
-test('manual viewer name binding saves without UID and keeps UID optional', () => {
-  const context = appContext();
-  vm.runInContext("snapshot.presets = [{ id: 'dots-voice', name: '木兰', provider: 'dots' }]; snapshot.bindings = []; editor = { type: 'binding', id: '' };", context);
-  const html = vm.runInContext("renderBindingEditor('')", context);
-  assert.match(html, /name="user_name"/);
-  assert.match(html, /name="user_id"[^>]*pattern/);
-  assert.doesNotMatch(html, /name="user_id"[^>]*required/);
-  const form = { dataset: { form: 'binding', id: '' }, fields: { user_name: '观众小花', user_id: '', preset_id: 'dots-voice', enabled: 'on' }, checkValidity: () => true };
-  context.testForm = form;
-  const binding = vm.runInContext('collectAutosave(testForm).payload.binding', context);
-  assert.equal(binding.user_id, null);
-  assert.equal(binding.user_name, '观众小花');
-  assert.equal(binding.preset_id, 'dots-voice');
-  form.fields.user_id = '42';
-  const precise = vm.runInContext('collectAutosave(testForm).payload.binding', context);
-  assert.equal(precise.user_id, 42);
-  assert.equal(precise.user_name, null);
-});
-
-test('avatar without UID can open an exact-name voice binding', async () => {
-  const context = appContext();
-  const opened = [];
-  context.mockOpen = async (tab, nextEditor) => opened.push({ tab, nextEditor });
-  vm.runInContext("snapshot.presets = [{ id: 'dots-voice', name: '木兰', provider: 'dots' }]; snapshot.bindings = []; viewerContext = { user_id: null, user_name: '观众小花' }; openViewerSettings = mockOpen", context);
-  await vm.runInContext('handleAction', context)('viewer.voice', '', null);
-  assert.equal(opened.length, 1);
-  assert.equal(opened[0].tab, 'voices');
-  assert.equal(opened[0].nextEditor.userId, null);
-  assert.equal(opened[0].nextEditor.userName, '观众小花');
-});
-
 test('saved floating-point scale selects the matching option', () => {
   const context = appContext();
   vm.runInContext(`snapshot.preferences = { appearance: 'light', scale: 1.399999976158142 }; snapshot.startup_enabled = false;`, context);
@@ -1640,127 +1609,6 @@ test('advanced message settings pin emote filtering and preserve readings and te
   assert.deepEqual(JSON.parse(JSON.stringify(saved.payload.rules.user_words)), []);
 });
 
-function aliasContext() {
-  const context = appContext();
-  const dialog = context.document.querySelector('#settings');
-  dialog.open = false;
-  dialog.showModal = () => {dialog.open = true;};
-  dialog.close = () => {dialog.open = false;};
-  const renders = [];
-  const updates = [];
-  context.mockRender = () => renders.push('settings');
-  context.mockUpdate = () => updates.push('chat');
-  context.mockCalls = [];
-  context.mockCommand = async (action, payload) => {
-    context.mockCalls.push({action,payload});
-    vm.runInContext('snapshot.rules = savedRules', Object.assign(context,{savedRules:payload.rules}));
-  };
-  vm.runInContext(`step = 'main'; settingsTab = 'voices'; editor = {type:'service',provider:'dots'};
-    snapshot.rules = {user_words:[],events:{filter_bilibili_emoticons:true},message_words:[],templates:{danmaku:'{message}'},sounds:[]};
-    snapshot.bindings = []; viewerContext = {user_name:'Alice',user_id:7};
-    renderSettings = mockRender; updateLive = mockUpdate; command = mockCommand;
-    allowLeaveSettings = async () => true; settleVoiceAuditionChoice = async () => true;
-    flushAutosaves = async () => true;`, context);
-  const form = { dataset:{form:'alias',dirty:'true'},fields:{from:'Alice',to:'小花'} };
-  return {context,dialog,form,renders,updates};
-}
-
-test('viewer alias save returns to chat and restores previous settings navigation', async () => {
-  const {context,dialog,form,updates} = aliasContext();
-  await vm.runInContext('handleAction', context)('viewer.alias','',null);
-  assert.equal(dialog.open, true);
-  assert.equal(vm.runInContext('settingsTab', context), 'readings');
-  await vm.runInContext('handleForm', context)(form);
-  assert.equal(dialog.open, false);
-  assert.equal(updates.length, 1);
-  assert.equal(vm.runInContext('settingsTab', context), 'voices');
-  assert.equal(vm.runInContext('editor.type', context), 'service');
-  assert.equal(vm.runInContext('aliasReturnContext', context), null);
-  assert.equal(vm.runInContext('tabEditors.get("rules")', context), undefined);
-  assert.equal(context.mockCalls.length, 1);
-  assert.equal(context.mockCalls[0].payload.rules.user_words[0].to, '小花');
-  assert.equal(context.mockCalls[0].payload.rules.events.filter_bilibili_emoticons, true);
-  await vm.runInContext('openSettings', context)('voices');
-  assert.equal(vm.runInContext('editor.type', context), 'service');
-});
-
-test('viewer alias cancel and close return to chat without stale editor on repeated opens', async () => {
-  for (const action of ['editor.cancel','settings.close']) {
-    const {context,dialog} = aliasContext();
-    for (let i=0;i<2;i++) {
-      await vm.runInContext('handleAction', context)('viewer.alias','',null);
-      const current = vm.runInContext('editor', context);
-      await vm.runInContext('handleAction', context)('viewer.alias','',null);
-      assert.equal(vm.runInContext('editor', context), current, 'repeat click keeps origin');
-      await vm.runInContext('handleAction', context)(action,'',null);
-      assert.equal(dialog.open, false);
-      assert.equal(vm.runInContext('editor.type', context), 'service');
-      assert.equal(vm.runInContext('tabEditors.get("rules")', context), undefined);
-    }
-    assert.equal(context.mockCalls.length, 0);
-  }
-});
-
-test('alias validation and failed save keep the form and return context', async () => {
-  const {context,dialog,form} = aliasContext();
-  await vm.runInContext('handleAction', context)('viewer.alias','',null);
-  form.fields.to = '';
-  await assert.rejects(vm.runInContext('handleForm', context)(form), /请填写播报别名/);
-  assert.equal(context.mockCalls.length, 0);
-  form.fields.to = '小花';
-  context.rejectCommand = async () => {throw new Error('save failed');};
-  vm.runInContext('command = rejectCommand', context);
-  await assert.rejects(vm.runInContext('handleForm', context)(form), /save failed/);
-  assert.equal(dialog.open, true);
-  assert.equal(vm.runInContext('editor.type', context), 'alias');
-  assert.equal(vm.runInContext('aliasReturnContext.tab', context), 'voices');
-  vm.runInContext('allowLeaveSettings = async () => false', context);
-  await vm.runInContext('handleAction', context)('editor.cancel','',null);
-  assert.equal(dialog.open, true, 'declining discard keeps form');
-});
-
-test('alias managed inside settings saves and cancels within settings', async () => {
-  for (const save of [true,false]) {
-    const {context,dialog,form} = aliasContext();
-    dialog.open = true;
-    await vm.runInContext('openViewerSettings', context)('rules',{type:'alias',userName:'Alice'});
-    assert.equal(vm.runInContext('aliasReturnContext', context), null);
-    if(save) await vm.runInContext('handleForm', context)(form);
-    else await vm.runInContext('handleAction', context)('editor.cancel','',null);
-    assert.equal(dialog.open, true);
-    assert.equal(vm.runInContext('settingsTab', context), 'readings');
-    assert.equal(vm.runInContext('editor', context), null);
-  }
-});
-
-test('late alias save cannot close or replace a newly opened form', async () => {
-  const {context,dialog,form} = aliasContext();
-  await vm.runInContext('handleAction', context)('viewer.alias','',null);
-  let complete;
-  context.pendingSave = () => new Promise(resolve => {complete=resolve;});
-  vm.runInContext('command = pendingSave', context);
-  const pending = vm.runInContext('handleForm', context)(form);
-  await vm.runInContext('closeSettings()', context);
-  await vm.runInContext('handleAction', context)('viewer.alias','',null);
-  const fresh = vm.runInContext('editor', context);
-  complete(); await pending;
-  assert.equal(dialog.open, true);
-  assert.equal(vm.runInContext('editor', context), fresh);
-  assert.equal(vm.runInContext('editor.type', context), 'alias');
-});
-
-test('leaving viewer alias for another settings tab discards the temporary return context', async () => {
-  const {context,dialog} = aliasContext();
-  const target = context.document.querySelector('#settings-content');
-  target.focus = () => {};
-  await vm.runInContext('handleAction', context)('viewer.alias','',null);
-  await vm.runInContext('handleAction', context)('settings.tab','general',null);
-  assert.equal(dialog.open, true);
-  assert.equal(vm.runInContext('aliasReturnContext', context), null);
-  assert.equal(vm.runInContext('editor', context), null);
-  assert.equal(vm.runInContext('tabEditors.get("rules")', context), undefined);
-});
-
 test('main screen speech switch, queue jump and spotlight use real queue data', async () => {
   const context = appContext();
   const calls = [];
@@ -2067,7 +1915,7 @@ test('face verification opens its own panel instead of claiming the room is live
   context.calls.length = 0;
   vm.runInContext('settingsDialog.open = true', context);
   await vm.runInContext('startBroadcast', context)();
-  assert.deepEqual(context.calls.filter(call => call.panel), [], 'Settings keeps its own face section');
+  assert.deepEqual(context.calls.filter(call => call.panel), [], 'with settings open the face sheet stays closed; a toast asks instead');
   assert.deepEqual(context.calls.filter(call => call.toast).map(call => call.toast), ['请先扫码完成人脸验证']);
   assert.equal(vm.runInContext('snapshot.broadcast.room.live_status', context), 0);
 });
@@ -2121,33 +1969,6 @@ test('OBS connection and overlay actions retain their separate command scopes', 
   assert.deepEqual(context.calls.filter(call => call.toast).map(call => call.toast), ['OBS 已启动并连上', 'OBS 连接正常 · 未在推流', '已添加到 OBS · “游戏场景” · 2560 × 1440']);
   assert.equal(vm.runInContext('obsBusy', context), '');
 });
-
-test('broadcast settings show a preview until enabled and never print push credentials', () => {
-  const context = appContext();
-  context.view = broadcastSnapshot({ room: { ...broadcastSnapshot().room, live_status: 1, live_since: 1 }, has_stream_key: true });
-  const body = { dataset: {}, innerHTML: '', querySelector: () => null, querySelectorAll: () => [] };
-  context.body = body;
-  vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 }; snapshot.preferences = { broadcast_console: false };
-    settingsDialog.open = true; settingsDialog.querySelector = selector => selector === '[data-broadcast-body]' ? body : null;
-    refreshBroadcast = async () => {}; startOnAirClocks = () => {};`, context);
-  const page = vm.runInContext('renderBroadcastPanel()', context);
-  assert.match(page, /data-broadcast-enable/);
-  assert.doesNotMatch(page, /data-broadcast-enable checked/);
-  vm.runInContext('updateBroadcastSettings()', context);
-  assert.match(body.innerHTML, /s-onair-preview/);
-  assert.doesNotMatch(body.innerHTML, /data-push-key/);
-  vm.runInContext('snapshot.preferences.broadcast_console = true;', context);
-  vm.runInContext('updateBroadcastSettings()', context);
-  assert.match(body.innerHTML, /data-push-key type="password"/);
-  assert.match(body.innerHTML, /data-onair-since="1"/);
-  assert.match(body.innerHTML, /data-action="broadcast.stop"/);
-  assert.doesNotMatch(body.innerHTML, /rtmp:|stream_key/);
-  body.dataset.signature = '';
-  vm.runInContext('snapshot.account = { user_id: null };', context);
-  vm.runInContext('updateBroadcastSettings()', context);
-  assert.match(body.innerHTML, /data-id="room"/);
-});
-
 
 test('a failed voice choice is consumed so a second close can finish', async () => {
   const context = appContext();

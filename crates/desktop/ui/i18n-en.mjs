@@ -19,7 +19,6 @@ B站只公开部分在线观众	Bilibili lists only some of the viewers online
 没有匹配的用户	No matching viewers
 总督	Governor
 提督	Admiral
-刷新开播状态	Refresh broadcast status
 请先扫码登录哔哩哔哩，再管理自己的直播间。	Sign in to Bilibili by QR code to manage your own room.
 未开播	Offline
 轮播中	Replaying
@@ -27,8 +26,6 @@ B站只公开部分在线观众	Bilibili lists only some of the viewers online
 直播分区	Category
 直播子分区	Subcategory
 开播人脸验证二维码	Broadcast face verification QR code
-推流码	Stream key
-复制推流码	Copy stream key
 请填写 1 到 40 字的标题，并选择直播子分区。	Enter a title of 1 to 40 characters and choose a subcategory.
 请先扫码完成人脸验证	Complete face verification by scanning the QR code
 直播标题与分区已更新	Broadcast title and category updated
@@ -58,7 +55,6 @@ B站只公开部分在线观众	Bilibili lists only some of the viewers online
 清空待播队列	Clear pending queue
 初次设置	Initial setup
 登录凭据仅加密保存在这台电脑	Login credentials are encrypted and stored on this computer only
-首次设置	First-time setup
 连接直播间	Connect to a live room
 使用哔哩哔哩 App 扫码	Scan with the Bilibili app
 自动找到你的直播间	Find your live room automatically
@@ -114,7 +110,6 @@ B站只公开部分在线观众	Bilibili lists only some of the viewers online
 音效素材	Sound effects
 音频输出	Audio output
 外观与启动	Appearance & startup
-数据与迁移	Data & migration
 关于	About
 服务已就绪	Service ready
 正在检查	Checking
@@ -143,21 +138,16 @@ B站只公开部分在线观众	Bilibili lists only some of the viewers online
 本地服务类型无效。	Invalid local service type.
 请先连接 Fish Audio 账号。	Connect your Fish Audio account first.
 请重新打开音色设置。	Reopen voice settings.
-请填写观众用户名或 UID	Enter a viewer username or UID
-请输入有效的观众 UID	Enter a valid viewer UID
-请先选择声音预设	Choose a voice preset first
 暂时无法保存此项设置，请重新打开页面	Unable to save this setting. Reopen the page
 已恢复未保存的修改，请重试保存	Unsaved changes restored. Try saving again
 已恢复未完成的修改，请补全	Incomplete changes restored. Complete the fields
 · 草稿已保留	· Draft preserved
 请先完成输入法选字，再切换或退出设置	Finish composing text before switching or leaving settings
 部分更改未能保存，修改已保留在设置中	Some changes could not be saved. Your edits are preserved in settings
-还有未完成的内容	 has an unfinished draft
 服务连接	Service connection
 声音预设	Voice preset
 dots 音色	dots voice
 观众声音	Viewer voice
-继续填写	Continue editing
 丢弃	Discard
 设置分类	Settings category
 关闭设置	Close settings
@@ -332,21 +322,7 @@ https://fish.audio/m/… 或 32 位 ID	https://fish.audio/m/… or a 32-characte
 编辑 Fish 音色	Edit Fish voice
 试听此音色	Preview this voice
 选择	Select
-按用户名精确匹配，同名账号会共用声音；填写 UID 时优先按 UID 匹配。	Matches the exact username; accounts with the same name share a voice. If provided, UID takes priority.
-编辑观众声音	Edit viewer voice
-指定观众声音	Assign viewer voice
-旧配置用户名：	Legacy configuration username:\u0020
-。请确认后手动填写用户名或 UID。	. Verify it, then enter the username or UID manually.
-观众用户名	Viewer username
-输入观众当前用户名	Enter the viewer's current username
 观众 UID（选填）	Viewer UID (optional)
-启用此绑定	Enable this binding
-添加播报别名	Add speech alias
-这位观众的用户名会在播报时替换为别名。	This viewer's username is replaced by the alias when read aloud.
-原用户名	Original username
-播报别名	Speech alias
-输入播报时使用的名字	Enter the name to use in speech
-保存别名	Save alias
 触发词	Trigger
 原文字	Original text
 替换为	Replace with
@@ -414,36 +390,7 @@ B站官方表情已过滤	Bilibili standalone emote filtered
 开机启动	Start with Windows
 重新打开引导	Restart setup
 当前数据目录	Current data folder
-导出配置	Export configuration
-从旧版导入	Import from a previous app
-清除应用数据	Clear app data
-删除本机保存的账号、语音服务凭据、设置、音效和备份，然后重新开始设置。	Delete locally saved accounts, speech service credentials, settings, sounds, and backups, then start setup again.
-保存为	Save as
-旧 config.json 的完整路径	Full path to the old config.json
-先读取预览，再由你选择要导入的内容。不会自动导入账号凭据。	Read a preview, then choose what to import. Account credentials are not imported automatically.
-读取导入预览	Read import preview
-选择要导入的内容	Choose what to import
-直播间：	Live room:\u0020
-；服务	; services:
-个；待确认用户绑定	; pending viewer bindings:
-条；音效	; sounds:
-个。	.
-查看规则与服务内容	View rules and service settings
-替换已有设置	Replace existing settings
-确认导入前会自动备份当前数据库。名字绑定必须补充 UID 才会生效。	The current database is backed up before import. Legacy name bindings need a confirmed UID to take effect.
 未设置	Not set
-播报规则和词典	Speech rules and dictionaries
-直播间设置	Live room settings
-服务连接与声音预设	Service connections and voice presets
-待确认 UID 的用户声音绑定	Viewer voice bindings awaiting UID confirmation
-选择要复制的音效文件	Choose sound files to copy
-可导入	Ready to import
-文件或预览校验不可用	File or preview verification unavailable
-允许覆盖当前播报规则	Allow replacing current speech rules
-允许覆盖当前直播间设置	Allow replacing current live room settings
-需要注意的内容（	Items to review (
-确认所选内容	Confirm selection
-取消导入	Cancel import
 确认	Confirm
 取消	Cancel
 Fish Audio 账号已验证并连接	Fish Audio account verified and connected
@@ -500,10 +447,6 @@ Fish Audio 账号已验证并连接	Fish Audio account verified and connected
 重新打开初次设置？	Restart initial setup?
 已有声音、规则和素材会保留。	Existing voices, rules, and sounds are kept.
 重新设置	Restart setup
-清除全部应用数据？	Clear all app data?
-将删除本机保存的账号和语音服务凭据、声音预设、播报规则、界面设置、已导入的音效及应用备份。	Deletes locally saved accounts and speech service credentials, voice presets, speech rules, interface settings, imported sounds, and app backups.
-当前接收和播报会停止，随后回到首次设置。	Message reception and speech stop, then the app returns to first-time setup.
-应用数据已清除	App data cleared
 观众 UID 需要是有效的正整数。	Viewer UID must be a valid positive integer.
 请填好音色名称、参考音频、语速和音量。	Complete the voice name, reference audio, speed, and volume.
 请重新选择 dots.tts 服务并填写音色名称。	Select a dots.tts service again and enter a voice name.
@@ -533,10 +476,7 @@ Fish 音色已保存	Fish voice saved
 请先选择有效的服务连接。	Choose a valid service connection first.
 声音预设已保存	Voice preset saved
 音色已保存	Voice saved
-观众声音已保存	Viewer voice saved
 播报开关已保存	Speech preference saved
-请填写播报别名。	Enter a speech alias.
-播报别名已保存	Speech alias saved
 播报规则已保存	Speech rules saved
 关键词音效已保存	Keyword sounds saved
 已过滤：	Filtered:\u0020
@@ -544,28 +484,12 @@ Fish 音色已保存	Fish voice saved
 没有可播报的文字	No text to read aloud
 未指定默认声音	No default voice assigned
 同名旧绑定待确认 UID，尚未应用。	The legacy binding for this name awaits UID confirmation and has not been applied.
-替换这份音效？	Replace this sound?
-今后的播报使用新音频；已经排队的消息仍可能使用旧文件。	Future speech uses the new audio. Already queued messages may still use the old file.
-素材已替换	Sound replaced
-素材已导入	Sound imported
 应用新的音频输出？	Apply the new audio output?
 当前播放和待播队列会停止。	Current playback and the pending queue will stop.
 应用并停止播放	Apply and stop playback
 音频设置已保存	Audio settings saved
 外观已保存	Appearance saved
 启动选项已保存	Startup preference saved
-配置已导出，不含登录凭据	Configuration exported without login credentials
-导出完成	Export complete
-导入音效时，请同时勾选播报规则和词典。	Select speech rules and dictionaries when importing sound effects.
-请至少选择一项要导入的内容。	Select at least one item to import.
-待确认 UID 的绑定	Bindings awaiting UID confirmation
-确认导入这些内容？	Import these items?
-，以及	, plus
-个音效文件。	sound files.
-会先备份当前数据库，不导入登录凭据。	The current database will be backed up first. Login credentials are not imported.
-已选择允许覆盖当前对应设置。	You have allowed replacing the corresponding current settings.
-备份并导入	Back up and import
-导入完成，请查看结果	Import complete. Review the results
 请先保存参考设置，再切换模型。	Save reference settings before switching models.
 更换语音服务请新建音色。	Create a new voice to change speech services.
 退出前停止播报失败：	Could not stop speech before exit:\u0020
@@ -660,7 +584,6 @@ Fish 音色已保存	Fish voice saved
 还没有音效素材，先导入一段音频。	No sound files yet. Import one first.
 测试与重连	Test and reconnect
 在直播界面底部调节	Adjust at the bottom of the live screen
-导入旧配置	Import old config
 更新	Updates
 项目主页	Project
 许可信息见 GitHub 仓库 NOTICE。	See NOTICE in the GitHub repository for license details.
@@ -672,7 +595,6 @@ Fish 音色已保存	Fish voice saved
 数据与关于	Data & about
 请改用主播 UID	Use a streamer UID instead
 接收 B 站直播弹幕，用你喜欢的声音读出来。	Receive Bilibili live chat and hear it in the voice you like.
-开始设置	Get started
 选择接收弹幕的方式，之后也可以在设置里更改。	Choose how to receive messages. You can change this later in settings.
 推荐	Recommended
 用哔哩哔哩 App 扫码，自动找到你的直播间。	Scan with the Bilibili app to find your live room automatically.
@@ -744,7 +666,6 @@ OBS 叠加层	OBS overlay
 正数向下，负数向上；填 0 恢复原位。	Positive moves down, negative moves up; enter 0 to reset.
 位置偏移需为 -8192 到 8192 之间的整数	Position offsets must be whole numbers from -8192 to 8192
 左上	Top left
-右上	Top right
 左下	Bottom left
 右下	Bottom right
 大小	Size
@@ -804,8 +725,6 @@ OBS 已连接 · 	OBS connected ·\u0020
 直播中	Live
 继续开播	Continue
 人脸验证	Face verification
-开播前需要人脸验证	Face verification is required before going live
-用哔哩哔哩 App 扫码完成验证，然后点「继续开播」。	Scan with the Bilibili app to verify, then select Continue.
 已开播，请在 OBS 中开始推流	You're live. Start streaming in OBS.
 已开播，OBS 已开始推流	You're live. OBS started streaming.
 已开播，OBS 正在开始推流	You're live. OBS is starting the stream.
@@ -882,74 +801,36 @@ OBS 密码已加密保存	OBS password saved and encrypted
 请填写 OBS 所在电脑的地址，例如 127.0.0.1	Enter the address of the computer running OBS, such as 127.0.0.1
 端口需在 1 到 65535 之间	Port must be between 1 and 65535
 在弹幕姬里开播、下播，随时改标题和分区。画面和声音仍由 OBS 推流。	Go live, end the stream and change the title or category from here. OBS still sends the video and audio.
-一键开播、下播	Go live in one click
-主界面右上角出现开播台，直播时显示已开播时长。	A broadcast console appears at the top right of the main screen and shows how long you've been live.
-随时改标题和分区	Change title and category anytime
-点标题即可修改，保存后立刻在 B站生效。	Select the title to edit it. Saved changes apply on Bilibili right away.
 推流码一键复制	Copy stream details in one click
 开播后直接复制到 OBS，不用再打开直播姬。	Copy them straight into OBS once you're live, without opening Bilibili's streaming app.
-主播的直播间	Your live room
-今晚一起听歌	Songs tonight
-娱乐 · 视频唱见	Entertainment · Singing
-先登录自己的 B站账号	Sign in to your own Bilibili account first
-开播管理只作用于扫码登录账号自己的直播间。	The console only manages the room of the account you signed in with.
-去扫码登录	Scan to sign in
-离线测试窗口不能管理直播间。	The offline test window can't manage a live room.
 正在读取开播状态…	Reading broadcast status…
 读取开播状态失败	Couldn't read broadcast status
 登录 B站账号后即可开播	Sign in to Bilibili to go live
 修改直播标题和分区	Change the title and category
-直播信息	Stream details
-保存后立刻在 B站生效	Saved changes apply on Bilibili right away
 保存到 B站	Save to Bilibili
-开播时如有未保存的修改，会先保存再开播。	Unsaved changes are saved before going live.
 分区	Category
 子分区	Subcategory
-推流到 OBS	Stream to OBS
 直播间已打开，等待 OBS 推流	The room is open and waiting for OBS
 服务器	Server
 复制	Copy
-复制服务器	Copy server
 显示	Show
 隐藏	Hide
 清除	Clear
-仅保存在本次运行的内存中	Kept in memory for this session only
-打开 OBS「设置 → 直播」	In OBS, open Settings → Stream
-服务选「自定义」	Set Service to Custom
-粘贴服务器和推流码，再点「开始直播」	Paste the server and stream key, then select Start Streaming
-推流码只保存在本次运行的内存里。需要时可以重新获取。	The stream key is kept in memory for this session only. You can fetch it again when needed.
-开播后，这里会给出 OBS 需要的服务器和推流码。	Once you're live, the server and stream key for OBS appear here.
-重新获取推流码	Get stream key again
-服务器已复制，请粘贴到 OBS	Server copied. Paste it into OBS.
-推流码已复制，请粘贴到 OBS	Stream key copied. Paste it into OBS.
 放弃未保存的直播信息？	Discard unsaved stream details?
 刷新会读取 B站上的标题和分区，本页尚未保存的修改会丢失。	Refreshing reloads the title and category from Bilibili. Unsaved changes here will be lost.
 关闭后，尚未保存的标题和分区修改会丢失。	Unsaved title and category changes will be lost.
-已启用开播台，主界面右上角可以开播和下播	Broadcast console is on. Go live from the top right of the main screen.
-已关闭开播台	Broadcast console is off
-开播只打开 B站直播间；画面和声音由 OBS 推送。退出弹幕姬不会自动下播。启用期间，弹幕姬约每分钟读取一次自己房间的开播状态。	Going live only opens the Bilibili room; OBS sends the video and audio. Exiting this app doesn't end the stream. While the console is on, the app reads your room's status about once a minute.
 还没有音色。	No voices yet.
-不包含登录凭据、音效文件和聊天记录。	Excludes login credentials, sound files, and chat history.
-清除应用数据会删除本机保存的账号、语音服务凭据、设置、音效和备份，然后重新开始设置。	Clearing app data removes the saved accounts, voice service credentials, settings, sounds and backups on this computer, then starts setup again.
 会在 OBS 当前场景放一个“弹幕姬叠加层”浏览器来源，再点一次只更新它。手动添加时，宽高填画布分辨率。	Adds a browser source to the current OBS scene; selecting it again only updates it. When adding one manually, use the canvas resolution as width and height.
-直播详情	Stream details
 账号已登录<br>请先开通直播间	Signed in<br>Open a Bilibili live room first
 未找到本账号直播间，请先在 B站开通直播间后重新扫码	No live room was found for this account. Open one on Bilibili, then sign in again.
 请扫码登录哔哩哔哩后接收弹幕	Sign in to Bilibili by QR code before receiving chat
 放弃未保存的直播详情？	Discard unsaved stream details?
 关闭后，尚未保存的直播信息、码率和叠加层标题修改会丢失。	Closing discards unsaved room details, bitrate and overlay heading changes.
-OBS 视频码率	OBS video bitrate
-正在读取 OBS 码率…	Reading OBS bitrate…
-保存到 OBS 当前配置文件	Saves to the current OBS profile
-保存到 OBS 当前配置文件，下次开播生效。	Saves to the current OBS profile. Applies the next time streaming starts.
 请先停止 OBS 推流和录制，再修改码率。	Stop OBS streaming and recording before changing the bitrate.
-保存码率	Save bitrate
 OBS 叠加层主标题	OBS overlay heading
 最多 12 个字，保存后叠加层立即更新。	Up to 12 characters. The overlay updates immediately after saving.
 保存主标题	Save heading
-码率需在 100 到 100000 Kbps 之间	Bitrate must be between 100 and 100000 Kbps
 请填写 1 到 12 字的叠加层主标题	Enter an overlay heading of 1 to 12 characters
-OBS 码率已保存	OBS bitrate saved
 叠加层主标题已保存	Overlay heading saved
 已开播，但 OBS 没能自动推流，请检查「设置 → OBS 与开播」：	Live room opened, but OBS could not start streaming. Check Settings → OBS & broadcast:
 直播间管理	Room moderation
@@ -981,8 +862,6 @@ OBS 码率已保存	OBS bitrate saved
 已加入直播间黑名单	User blocked in the room
 已解除直播间拉黑	User unblocked in the room
 发送弹幕	Send chat
-弹幕发送与用户管理	Chat and room moderation
-在主界面发送弹幕和表情，点头像管理禁言、直播黑名单和房管。	Send chat and emoticons from the main screen. Select an avatar to manage mutes, live-room blocks and moderators.
 发送到自己的直播间	Send to your own live room
 表情包	Emoticons
 发送	Send

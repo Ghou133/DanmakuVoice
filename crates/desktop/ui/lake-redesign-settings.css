@@ -37,7 +37,7 @@ body.lake-settings-open #titlebar{z-index:65}
 #settings.lake-settings input:focus,#settings.lake-settings textarea:focus{outline:0;border-bottom-color:var(--lk-lilac)}
 #settings.lake-settings .select-trigger{border:0;border-bottom:1px solid var(--lk-line2);border-radius:0;background:transparent;color:var(--lk-ink);box-shadow:none}
 #settings.lake-settings .select-menu{background:var(--lv-pop);color:var(--lk-ink)}
-#settings.lake-settings .s-card,#settings.lake-settings .s-hero,#settings.lake-settings .editor{background:transparent;border:0;border-radius:0;box-shadow:none;padding:0}
+#settings.lake-settings .s-card{background:transparent;border:0;border-radius:0;box-shadow:none;padding:0}
 #settings.lake-settings .s-row{padding:13px 0;min-height:48px;gap:10px;border-color:var(--lk-line)}
 #settings.lake-settings .s-row .s-text{font-size:13px;color:var(--lk-ink)}
 #settings.lake-settings .s-switch{width:34px;height:20px;min-width:34px;background:var(--lk-line2);border:0;border-radius:10px;flex:0 0 34px}

@@ -77,8 +77,8 @@ const toggle = (name, label, checked, description = '') => `<label class="toggle
 const heading = (title, description = '') => `<h2 class="settings-page-title">${esc(title)}</h2>${description ? `<p class="settings-page-description">${esc(description)}</p>` : ''}`;
 const saveButton = (label = t('保存更改')) => `<button type="submit" class="button primary">${esc(label)}</button>`;
 const autoStatus = () => t('<div class="autosave-status" role="status" aria-live="polite" hidden><span data-autosave-label></span><button type="button" class="text-button" data-action="autosave.retry" hidden>重试</button><button type="button" class="text-button" data-action="autosave.discard" hidden>丢弃草稿</button></div>');
-const autoFormTypes = new Set(['gift-merge', 'preset', 'binding', 'tts-toggle', 'rules', 'sound-words', 'audio', 'appearance', 'startup', 'service-local', 'fish-settings', 'fish-preset', 'overlay', 'obs', 'obs-link']);
-const manualSaveFormTypes = new Set(['service-fish', 'fish-voice', 'alias', 'asset', 'migration-apply', 'broadcast-room', 'onair-bitrate']);
+const autoFormTypes = new Set(['gift-merge', 'preset', 'tts-toggle', 'rules', 'sound-words', 'audio', 'appearance', 'startup', 'service-local', 'fish-settings', 'fish-preset', 'overlay', 'obs', 'obs-link']);
+const manualSaveFormTypes = new Set(['service-fish', 'fish-voice']);
 const autosaves = new Map();
 const formDrafts = new Map();
 const dotsSaves = new WeakMap();
@@ -99,7 +99,6 @@ const templatePreview = (key, text) => {
   return String(text || '').replace(/\{(\w+)\}/g, (whole, field) => sample[field] ?? whole);
 };
 let dictionaryView = 'message_words';
-let dataPanel = null;
 let snapshot = null;
 let updateInfo = null;
 let updateBusy = false;
@@ -110,7 +109,6 @@ let setupTts = true;
 let settingsTab = 'voices';
 let settingsDirty = false;
 let editor = null;
-let migrationPreview = null;
 let disposed = false;
 let pendingCommands = 0;
 let qrGeneration = 0;
@@ -147,7 +145,6 @@ let audiencePinned = false;
 let audienceSignature = '';
 let audienceReturn = false;
 const audienceEntries = new Map();
-let aliasReturnContext = null;
 let volumeDraft = null;
 const voiceAuditionDraft = { provider: '', presetId: '', text: '你好，欢迎来到直播间。', customText: false };
 let voiceAuditionRevision = 0;
@@ -602,7 +599,7 @@ function acceptSnapshot(next) {
   if (languageChanged && settingsDialog.open) renderSettings();
   if (snapshot.onboarding_done && !replaySetup && step !== 'main') { stopQrPolling(); step = 'main'; renderApp(); }
   if (step === 'main') updateLive();
-  if (settingsDialog.open) { updateVoiceSettings(); updateServiceIndicators(); updateOverlayStatus(); updateBroadcastSettings(); }
+  if (settingsDialog.open) { updateVoiceSettings(); updateServiceIndicators(); updateOverlayStatus(); updateObsSettings(); }
   updateQr();
 }
 
@@ -2524,14 +2521,6 @@ function collectAutosave(form) {
     if (!existing) throw new Error(t('请重新打开音色设置。'));
     return { action: 'presets.save', payload: { preset: { ...existing, name: value('name'), speed: number('speed'), volume: number('volume') } } };
   }
-  if (type === 'binding') {
-    const userId = value('user_id');
-    const userName = value('user_name');
-    if (!userId && !userName) throw new Error(t('请填写观众用户名或 UID'));
-    if (userId && !validUid(userId)) throw new Error(t('请输入有效的观众 UID'));
-    if (!value('preset_id')) throw new Error(t('请先选择声音预设'));
-    return { action: 'bindings.save', payload: { id, binding: { platform: 'bilibili', user_id: userId ? numericId(userId) : null, user_name: userId ? null : userName || null, legacy_user_name: snapshot.bindings.find(item => item.id === id)?.binding.legacy_user_name || null, preset_id: value('preset_id'), enabled: checked('enabled') } } };
-  }
   if (type === 'tts-toggle') return { action: 'preferences.save', payload: { preferences: { tts_enabled: checked('tts_enabled') } } };
   if (type === 'rules') {
     const rules = structuredClone(snapshot.rules);
@@ -2670,7 +2659,6 @@ function mountAutosaves() {
       prepare: envelope => {
         const prepared = structuredClone(envelope);
         if (form.dataset.form === 'preset') prepared.payload.preset.id = form.dataset.id || '';
-        if (form.dataset.form === 'binding') prepared.payload.id = form.dataset.id || '';
         return prepared;
       },
       save: async ({ action, payload }) => {
@@ -2680,7 +2668,7 @@ function mountAutosaves() {
       },
       onSaved: async (result, envelope) => {
         const oldKey = record.key;
-        if (result.result?.id && ['preset', 'binding'].includes(form.dataset.form)) {
+        if (result.result?.id && form.dataset.form === 'preset') {
           form.dataset.id = result.result.id;
           record.key = `${record.tab}:${form.dataset.form}:${result.result.id}`;
           if (record.editor) record.editor.id = result.result.id;
@@ -2769,10 +2757,6 @@ function unmountAutosaves() {
   autosaves.clear();
 }
 
-function draftNotices() {
-  return [...formDrafts.entries()].filter(([key, draft]) => key.startsWith('voices:') && draft.editor && !draft.editor.id).map(([key, draft]) => ui`<div class="draft-notice"><span>${esc({ connection: t('服务连接'), preset: t('声音预设'), 'dots-preset': t('dots 音色'), binding: t('观众声音') }[draft.type])}还有未完成的内容</span><div class="actions">${button(t('继续填写'), 'draft.resume', { id: key, class: 'small' })}${button(t('丢弃'), 'draft.discard', { id: key, class: 'small quiet' })}</div></div>`).join('');
-}
-
 function renderSettings() {
   closeSelect();
   unmountAutosaves();
@@ -2801,7 +2785,7 @@ function renderSettings() {
   updateServiceIndicators();
   updateOverlayStatus();
   updateOverlayPreview();
-  updateBroadcastSettings();
+  updateObsSettings();
   mountSelects(settingsDialog);
   updateQr();
 }
@@ -2959,71 +2943,7 @@ let broadcastObservedAccount = '';
 let onAirPanelMode = '';
 let onAirClockTimer = null;
 let onAirSignature = '';
-let onAirBitrate = null;
-let onAirBitrateBusy = false;
-let onAirBitrateError = '';
-let onAirBitrateSequence = 0;
-let settingsBitrateExpanded = false;
 const onAirDrafts = new Map();
-
-async function readOnAirBitrate() {
-  const sequence = ++onAirBitrateSequence;
-  onAirBitrateBusy = true;
-  onAirBitrateError = '';
-  renderOnAirPanel();
-  renderSettingsBitrate();
-  try {
-    const next = await command('obs.bitrate.get', {}, { quiet: true, silent: true });
-    if (sequence === onAirBitrateSequence) onAirBitrate = next.result;
-  } catch (error) {
-    if (sequence === onAirBitrateSequence) { onAirBitrate = null; onAirBitrateError = errorMessage(error); }
-  } finally {
-    if (sequence === onAirBitrateSequence) { onAirBitrateBusy = false; renderOnAirPanel(); renderSettingsBitrate(); }
-  }
-}
-
-function onAirDetailsFields() {
-  const view = onAirBitrate;
-  const canEdit = !!view?.editable && !onAirBitrateBusy;
-  const note = onAirBitrateError ? localizeDiagnostic(onAirBitrateError) : onAirBitrateBusy ? t('正在读取 OBS 码率…') : view?.reason ? localizeDiagnostic(view.reason) : t('保存到 OBS 当前配置文件，下次开播生效。');
-  const bitrate = `<form data-form="onair-bitrate" class="onair-info" novalidate><div class="onair-field"><label for="onair-bitrate">${esc(t('OBS 视频码率'))}</label><span class="onair-input onair-bitrate-input"><input id="onair-bitrate" name="bitrate_kbps" type="number" min="100" max="100000" step="1" required value="${esc(view?.bitrate_kbps ?? '')}"${canEdit ? '' : ' disabled'}><span>Kbps</span></span><small class="onair-note" role="status">${esc(note)}</small></div><div class="onair-panel-foot"><button type="button" class="onair-text-button" data-action="onair.bitrate.refresh"${onAirBitrateBusy ? ' disabled' : ''}>${esc(t('刷新'))}</button><button type="submit" class="onair-save"${canEdit ? '' : ' disabled'}>${esc(t('保存码率'))}</button></div></form>`;
-  return bitrate;
-}
-
-function renderSettingsBitrate() {
-  const host = settingsDialog.open ? settingsDialog.querySelector('#settings-obs-bitrate') : null;
-  if (!host || !settingsBitrateExpanded) return;
-  host.hidden = false;
-  const current = host.querySelector('form[data-form="onair-bitrate"]');
-  const dirty = current?.dataset.dirty === 'true';
-  const value = dirty ? current.elements.bitrate_kbps.value : null;
-  const focused = current?.contains(document.activeElement) && document.activeElement?.name;
-  const markup = onAirDetailsFields();
-  if (markupCache.get(host) === markup) return;
-  patchMarkup(host, markup);
-  const form = host.querySelector('form');
-  if (dirty) { form.elements.bitrate_kbps.value = value; form.dataset.dirty = 'true'; }
-  if (focused) form.elements[focused]?.focus({ preventScroll: true });
-}
-
-async function saveOnAirForm(form) {
-  if (!form.reportValidity()) return;
-  if (form.dataset.form === 'onair-bitrate') {
-    const sequence = ++onAirBitrateSequence;
-    const bitrate_kbps = Number(form.elements.bitrate_kbps.value);
-    if (!Number.isInteger(bitrate_kbps) || bitrate_kbps < 100 || bitrate_kbps > 100000) throw new Error(t('码率需在 100 到 100000 Kbps 之间'));
-    const next = await command('obs.bitrate.set', { bitrate_kbps }, { quiet: true });
-    if (sequence === onAirBitrateSequence) onAirBitrate = next.result;
-    showToast(t('OBS 码率已保存'));
-  }
-  delete form.dataset.dirty;
-  onAirDrafts.delete(form.dataset.form);
-  document.querySelector(`#onair-panel form[data-form="${form.dataset.form}"]`)?.removeAttribute('data-dirty');
-  const panel = document.querySelector('#onair-panel');
-  if (panel) panel.dataset.signature = '';
-  renderOnAirPanel();
-  renderSettingsBitrate();
-}
 
 const broadcastEnabled = () => !!snapshot?.preferences?.broadcast_console;
 const broadcastAccount = () => String(snapshot?.account?.user_id || '');
@@ -3039,10 +2959,7 @@ function syncBroadcastAccount() {
     broadcastRefreshError = '';
     broadcastRefreshing = false;
     if (onAirPanelMode) closeOnAirPanel();
-    else { onAirDrafts.clear(); ++onAirBitrateSequence; onAirBitrateBusy = false; }
-    onAirBitrate = null;
-    onAirBitrateError = '';
-    settingsBitrateExpanded = false;
+    else onAirDrafts.clear();
   }
   return account;
 }
@@ -3104,7 +3021,7 @@ const onAirClock = room => broadcastLive(room) && room.live_since ? `<span class
 async function refreshBroadcast(force = false) {
   const account = syncBroadcastAccount();
   if (!broadcastEnabled() || !account || snapshot.network_disabled || broadcastBusy || broadcastRefreshing || snapshot.broadcast?.busy) return;
-  const visible = (step === 'main' && !settingsDialog.open) || (settingsDialog.open && settingsTab === 'live' && livePanel === 'broadcast');
+  const visible = step === 'main' && !settingsDialog.open;
   if (!visible || !uiIsActive(nativeActive, windowFocused, document.hidden)) return;
   const due = force || broadcastRefreshAccount !== account || Date.now() - broadcastRefreshAt > BROADCAST_REFRESH_MS;
   if (!due) return;
@@ -3134,17 +3051,7 @@ async function refreshBroadcast(force = false) {
 
 function updateBroadcastViews() {
   updateOnAir();
-  updateBroadcastSettings();
-}
-
-function hidePushCredentials(root = document) {
-  const all = selector => [...(root?.querySelectorAll?.(selector) || [])];
-  for (const input of all('[data-push-address], [data-push-key]')) input.value = '';
-  for (const key of all('[data-push-key]')) key.type = 'password';
-  for (const button of all('[data-action="broadcast.hide"]')) {
-    button.dataset.action = 'broadcast.reveal';
-    button.innerHTML = `${icon('eye')}${esc(t('显示'))}`;
-  }
+  updateObsSettings();
 }
 
 async function runBroadcastAction(action, payload = {}, options = {}) {
@@ -3258,63 +3165,19 @@ async function stopBroadcast() {
   cancelLakeFaceWait();
   closeOnAirPanel();
   const next = await runBroadcastAction('stop', { confirmed: true });
-  hidePushCredentials();
   const obs = next?.result?.obs;
   if (obs?.error) { showToast(`${t('已下播，但 OBS 没能停止推流，请在 OBS 里手动停止：')}${errorMessage(obs.error)}`, true); return; }
   showToast(t(obs?.outcome === 'stopped' ? '已下播，OBS 已停止推流' : obs?.outcome === 'stopping' ? '已下播，OBS 正在停止推流' : '已下播'));
 }
 
-async function revealOrCopyCredentials(action, target) {
-  if (broadcastBusy) return;
-  const account = snapshot.account?.user_id;
-  // Do not put credentials in the retained application snapshot or drafts.
-  const next = await invoke('dispatch', { action: 'bili.broadcast.credentials', payload: { confirmed: true } });
-  const credentials = next.result; delete next.result; acceptSnapshot(next);
-  try {
-    if (snapshot.account?.user_id !== account || !snapshot.broadcast?.has_stream_key) return;
-    if (action === 'broadcast.reveal') {
-      const scope = target.closest('[data-broadcast-scope]') || document;
-      const address = scope.querySelector('[data-push-address]');
-      const key = scope.querySelector('[data-push-key]');
-      if (address && key) { address.value = credentials.address; key.value = credentials.stream_key; key.type = 'text'; }
-      target.dataset.action = 'broadcast.hide'; target.innerHTML = `${icon('eye')}${esc(t('隐藏'))}`;
-    } else {
-      await copyText(action === 'broadcast.copy.address' ? credentials.address : credentials.stream_key);
-      showToast(t(action === 'broadcast.copy.address' ? '服务器已复制，请粘贴到 OBS' : '推流码已复制，请粘贴到 OBS'));
-      const row = target.closest('.onair-push-row, .s-onair-push-row');
-      if (row && motionAllowed()) { row.classList.remove('copied'); row.getBoundingClientRect(); row.classList.add('copied'); }
-    }
-  } finally { if (credentials) { credentials.address = ''; credentials.stream_key = ''; } }
-}
-
 // Shared markup ---------------------------------------------------------------------------
 let broadcastFieldSequence = 0;
-function broadcastInfoFields(view, room) {
-  const areas = view.areas || [];
-  const parent = areas.find(item => item.children.some(child => child.id === room.area_id)) || areas.find(item => item.id === room.parent_area_id) || areas[0];
-  const children = parent?.children || [];
-  const id = `broadcast-title-${++broadcastFieldSequence}`;
-  const length = Array.from(room.title || '').length;
-  return ui`<div class="onair-field"><label for="${id}">直播标题</label><span class="onair-input"><input id="${id}" name="title" value="${esc(room.title)}" maxlength="40" required autocomplete="off" spellcheck="false"><output class="onair-count" data-title-count>${length}/40</output></span></div><div class="onair-areas"><label class="onair-field"><span>分区</span><select name="parent_area_id" aria-label="${esc(t('直播分区'))}">${areas.map(item => option(item.id, item.name, parent?.id)).join('')}</select></label><label class="onair-field"><span>子分区</span><select name="area_id" aria-label="${esc(t('直播子分区'))}" required>${children.map(child => option(child.id, child.name, room.area_id)).join('')}</select></label></div>`;
-}
-
 function lakeBroadcastInfoFields(view, room) {
   const areas = view.areas || [];
   const parent = areas.find(item => item.children.some(child => child.id === room.area_id)) || areas.find(item => item.id === room.parent_area_id) || areas[0];
   const id = `broadcast-title-${++broadcastFieldSequence}`;
   return `<div class="onair-field"><label class="sr-only" for="${id}">${esc(t('直播标题'))}</label><span class="onair-input"><input id="${id}" name="title" value="${esc(room.title)}" maxlength="40" required autocomplete="off" spellcheck="false"><output class="onair-count" data-title-count><span data-count-number>${Array.from(room.title || '').length}</span><i> / 40</i></output></span></div><div class="onair-areas"><span>${esc(t('分区'))}</span><select name="parent_area_id" aria-label="${esc(t('直播分区'))}">${areas.map(item => option(item.id, item.name, parent?.id)).join('')}</select><span class="lake-area-slash">/</span><select name="area_id" aria-label="${esc(t('直播子分区'))}" required>${(parent?.children || []).map(child => option(child.id, child.name, room.area_id)).join('')}</select></div>`;
 }
-
-function broadcastPushRows(view, room) {
-  if (!view.has_stream_key) {
-    const live = broadcastLive(room);
-    return ui`<p class="onair-push-empty">${live ? t('推流码只保存在本次运行的内存里。需要时可以重新获取。') : t('开播后，这里会给出 OBS 需要的服务器和推流码。')}</p>${live ? button(t('重新获取推流码'), 'broadcast.start', { class: 'small', icon: 'key' }) : ''}`;
-  }
-  const row = (label, attrs, action, copyLabel) => `<div class="onair-push-row"><span class="onair-push-label">${esc(label)}</span><input class="onair-push-value" ${attrs} readonly autocomplete="off" spellcheck="false" placeholder="••••••••••••" aria-label="${esc(label)}"><button type="button" class="onair-copy-btn" data-action="${action}" title="${esc(copyLabel)}" aria-label="${esc(copyLabel)}">${icon('copy')}<span>${esc(t('复制'))}</span></button></div>`;
-  return `${row(t('服务器'), 'data-push-address', 'broadcast.copy.address', t('复制服务器'))}${row(t('推流码'), 'data-push-key type="password"', 'broadcast.copy.key', t('复制推流码'))}<ol class="onair-steps">${ui`<li>打开 OBS「设置 → 直播」</li><li>服务选「自定义」</li><li>粘贴服务器和推流码，再点「开始直播」</li>`}</ol><div class="onair-push-tools">${`<button type="button" class="onair-text-button" data-action="broadcast.reveal">${icon('eye')}${esc(t('显示'))}</button><button type="button" class="onair-text-button" data-action="broadcast.forget">${icon('trash')}${esc(t('清除'))}</button>`}<span>${esc(t('仅保存在本次运行的内存中'))}</span></div>`;
-}
-
-const broadcastFace = view => ui`<div class="onair-face"><span class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></span><div><strong>开播前需要人脸验证</strong><p>用哔哩哔哩 App 扫码完成验证，然后点「继续开播」。</p></div></div>`;
 
 // Main screen -------------------------------------------------------------------------------
 function onAirGoButton(room, view, label = '') {
@@ -3390,10 +3253,8 @@ function renderOnAirPanel() {
   const view = snapshot.broadcast || {};
   const room = view.room;
   if (!panel || !room) return;
-  const content = onAirPanelMode === 'details'
-    ? [onAirBitrate, onAirBitrateBusy, onAirBitrateError]
-    : onAirPanelMode === 'info' ? [room.title, room.parent_area_id, room.area_id, view.areas]
-      : onAirPanelMode === 'obs' ? [lakeObsTitle()]
+  const content = onAirPanelMode === 'info' ? [room.title, room.parent_area_id, room.area_id, view.areas]
+    : onAirPanelMode === 'obs' ? [lakeObsTitle()]
       : [view.face_image, room.live_status, view.busy, broadcastBusy, lakeFaceError];
   const signature = JSON.stringify([onAirPanelMode, content, getLanguage()]);
   if (panel.dataset.signature === signature && !panel.hidden) return;
@@ -3403,15 +3264,12 @@ function renderOnAirPanel() {
     onAirDrafts.set(form.dataset.form, Object.fromEntries([...form.elements].filter(field => field.name).map(field => [field.name, field.value])));
   }
   panel.dataset.signature = signature;
-  const head = (title, note = '') => `<header class="onair-panel-head"><div><strong>${esc(title)}</strong>${note ? `<small>${esc(note)}</small>` : ''}</div><button type="button" class="onair-close" data-action="onair.close" aria-label="${esc(t('关闭'))}" title="${esc(t('关闭'))}">${icon('close')}</button></header>`;
   if (onAirPanelMode === 'info') {
     panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="broadcast-room" class="onair-info lake-title-form" novalidate><span class="lake-edit-kicker">TONIGHT’S TITLE<em>— ${esc(t('B站直播间'))}</em></span>${lakeBroadcastInfoFields(view, room)}<div class="onair-panel-foot"><button type="button" class="onair-text-button" data-action="onair.close">${esc(t('取消'))}</button><button type="submit" class="onair-save">${esc(t('好了'))}</button></div></form>`;
   } else if (onAirPanelMode === 'obs') {
     panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="overlay-title" class="onair-info lake-title-form" novalidate>${lakeOverlayTitleFields()}</form>`;
   } else if (onAirPanelMode === 'face' && view.face_image) {
     panel.innerHTML = `<span class="lake-face-kicker">FACE CHECK</span><h3>${esc(t('开播前需要验证本人'))}</h3><div class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></div><p class="lake-face-note">${esc(t('用哔哩哔哩 App 扫一扫，完成验证后会自动开播。'))}</p><div class="onair-panel-foot">${lakeFaceError ? `<span role="alert">${esc(lakeFaceError)}</span><button type="button" class="onair-text-button" data-action="broadcast.start">${esc(t('重试'))}</button>` : `<span class="lake-face-waiting" role="status">${esc(t('等待验证…'))}</span>`}</div>`;
-  } else if (onAirPanelMode === 'details') {
-    panel.innerHTML = `${head(t('直播详情'))}${onAirDetailsFields()}`;
   }
   panel.dataset.mode = onAirPanelMode;
   for (const form of panel.querySelectorAll('form')) {
@@ -3443,16 +3301,13 @@ function openOnAirPanel(mode) {
   if (!panel || !snapshot.broadcast?.room) return;
   closeVoicePanel(); closeQueuePanel();
   if (!panel.hidden && onAirPanelMode === mode) return handleAction('onair.close', '', null);
-  if (!panel.hidden) hidePushCredentials(panel);
   onAirPanelMode = mode;
   panel.dataset.signature = '';
   renderOnAirPanel();
   panel.hidden = false;
   document.querySelector('#live-shell')?.classList.toggle('lake-editing', mode === 'info' || mode === 'obs');
   document.querySelector('#live-shell')?.classList.toggle('lake-editing-obs', mode === 'obs');
-  document.querySelector('[data-action="onair.details"]')?.setAttribute('aria-expanded', String(mode === 'details'));
   if (mode === 'info' || mode === 'obs') panel.querySelector('input[name="title"]')?.focus({ preventScroll: true });
-  if (mode === 'details') { onAirBitrate = null; void readOnAirBitrate(); }
   if (mode === 'face') { renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); updateOnAir(); }
 }
 
@@ -3462,80 +3317,15 @@ function closeOnAirPanel(focus = false) {
   if (wasFace) cancelLakeFaceWait();
   onAirPanelMode = '';
   document.querySelector('#live-shell')?.classList.remove('lake-editing', 'lake-editing-obs');
-  ++onAirBitrateSequence;
-  onAirBitrateBusy = false;
   onAirDrafts.clear();
   if (!panel || panel.hidden) { updateLakePopScrim(); return; }
   closeSelect();
-  hidePushCredentials(panel);
   panel.hidden = true;
   updateLakePopScrim();
   panel.innerHTML = '';
   if (panel.dataset) panel.dataset.signature = '';
-  document.querySelector('[data-action="onair.details"]')?.setAttribute('aria-expanded', 'false');
   if (focus) document.querySelector('#onair .onair-go')?.focus();
   if (wasFace) { renderLakeTranscript(normalizedEvents(snapshot), eventKeys(normalizedEvents(snapshot))); updateOnAir(); }
-}
-
-// Settings page -----------------------------------------------------------------------------
-// The 开播台 panel of OBS 与开播. Its body follows the room state; the OBS link form is
-// rendered with the page so autosave owns it.
-function renderBroadcastPanel() {
-  const enabled = broadcastEnabled();
-  const id = `field-${++fieldSequence}`;
-  return ui`<div class="s-live-panel-body" data-broadcast-scope="settings"><div class="s-live-head"><div class="s-live-head-text"><h3>开播台</h3></div><label class="s-ovl-enable" for="${id}"><span>启用</span><input id="${id}" class="s-switch" type="checkbox" role="switch" data-broadcast-enable${enabled ? ' checked' : ''}></label></div><div class="s-onair-body" data-broadcast-body></div><div class="s-onair-body" data-obs-link-body${enabled ? '' : ' hidden'}>${renderObsLinkSection()}</div></div>`;
-}
-
-function broadcastPreview() {
-  const sample = ui`<div class="s-onair-preview" aria-hidden="true"><div class="s-onair-stage"><div class="s-onair-mast"><span class="s-onair-mini-kicker"><i></i>LIVE</span><strong>主播的直播间</strong><i class="s-onair-mini-rule"></i></div><div class="onair s-onair-mini" data-state="live"><div class="onair-copy"><span class="onair-kicker"><i class="onair-dot"></i><span>ON AIR</span><span class="onair-clock">01:24:10</span></span><span class="onair-title static"><span>今晚一起听歌</span></span><span class="onair-area">娱乐 · 视频唱见</span></div><div class="onair-actions"><span class="onair-key ready">${icon('key')}</span><span class="onair-go live"><i></i><span>下播</span></span></div></div><div class="s-onair-lines"><i></i><i></i><i></i></div></div></div>`;
-  const points = ui`<ul class="s-onair-points"><li><strong>一键开播、下播</strong><span>主界面右上角出现开播台，直播时显示已开播时长。</span></li><li><strong>随时改标题和分区</strong><span>点标题即可修改，保存后立刻在 B站生效。</span></li><li><strong>弹幕发送与用户管理</strong><span>在主界面发送弹幕和表情，点头像管理禁言、直播黑名单和房管。</span></li></ul>`;
-  return `${sample}${points}`;
-}
-
-function updateBroadcastSettings() {
-  updateObsSettings();
-  const account = syncBroadcastAccount();
-  const body = settingsDialog.open ? settingsDialog.querySelector('[data-broadcast-body]') : null;
-  if (!body) return;
-  void refreshBroadcast();
-  const enabled = broadcastEnabled();
-  const view = snapshot.broadcast || {};
-  const toggle = settingsDialog.querySelector('[data-broadcast-enable]');
-  if (toggle && !toggle.disabled && toggle.checked !== enabled) toggle.checked = enabled;
-  const busy = broadcastBusy || !!view.busy;
-  for (const button of body.querySelectorAll('.onair-go')) {
-    button.classList.toggle('working', busy);
-    button.disabled = busy || !!snapshot.network_disabled;
-  }
-  const signature = JSON.stringify([enabled, account, view.room, view.areas, view.has_stream_key, view.face_image, !view.room && [broadcastRefreshing, broadcastRefreshError], getLanguage(), !!snapshot.network_disabled]);
-  const changedAccount = body.dataset.account !== account;
-  if (!changedAccount && (broadcastBusy || body.querySelector('form[data-dirty]') || body.querySelector('[data-push-key][type="text"]'))) return;
-  if (body.dataset.signature === signature) return;
-  body.dataset.signature = signature; body.dataset.account = account;
-  const room = view.room;
-  if (!enabled) { body.innerHTML = broadcastPreview(); return; }
-  if (snapshot.network_disabled) { body.innerHTML = `<div class="s-card"><div class="s-row"><span class="s-text"><small>${esc(t('离线测试窗口不能管理直播间。'))}</small></span></div></div>`; return; }
-  if (!account) {
-    body.innerHTML = ui`<section class="s-hero s-onair-signin"><span class="s-hero-glow" aria-hidden="true"></span><span class="s-onair-signin-mark" aria-hidden="true">${icon('navBroadcast')}</span><div class="s-account-text"><strong>先登录自己的 B站账号</strong><span>开播管理只作用于扫码登录账号自己的直播间。</span></div><div class="s-hero-actions">${button(t('去扫码登录'), 'settings.tab', { id: 'room', class: 'primary small', icon: 'qr' })}</div></section>`;
-    return;
-  }
-  if (!room) {
-    const failed = broadcastRefreshError && !broadcastRefreshing;
-    body.innerHTML = `<div class="s-card"><div class="s-row s-wrap"><span class="s-text"><span>${esc(failed ? t('读取开播状态失败') : t('正在读取开播状态…'))}</span>${failed ? `<small class="field-error">${esc(broadcastRefreshError)}</small>` : ''}</span>${failed ? button(t('重试'), 'broadcast.refresh', { class: 'small', icon: 'refresh' }) : '<span class="spinner" aria-hidden="true"></span>'}</div></div>`;
-    return;
-  }
-  const live = broadcastLive(room);
-  const stateText = live ? t('直播中') : room.live_status === 2 ? t('轮播中') : t('未开播');
-  const area = broadcastAreaPath(view, room);
-  const hero = ui`<section class="s-hero s-onair-hero" data-state="${live ? 'live' : 'off'}"><span class="s-hero-glow" aria-hidden="true"></span><div class="s-onair-state"><span class="onair-kicker"><i class="onair-dot" aria-hidden="true"></i><span>${live ? 'ON AIR' : room.live_status === 2 ? 'REPLAY' : 'OFF AIR'}</span></span><strong>${esc(stateText)}${live && room.live_since ? `<span class="s-onair-clock" data-onair-since="${esc(room.live_since)}">${onAirElapsed(room.live_since)}</span>` : ''}</strong><small>房间 <span class="s-num">${esc(room.room_id)}</span>${area ? ` · ${esc(area)}` : ''}</small></div><div class="s-onair-hero-actions"><span class="s-onair-tools">${iconButton('refresh', t('刷新开播状态'), 'broadcast.refresh')}${iconButton('external', t('打开直播间'), 'external.open', 'bili_broadcast_room')}</span>${onAirGoButton(room, view)}</div></section>`;
-  const info = ui`<section class="s-section">${sLabel(t('直播信息'), `<span class="s-label-note">${esc(t('保存后立刻在 B站生效'))}</span>`)}<form data-form="broadcast-room" class="s-card s-onair-info" novalidate>${broadcastInfoFields(view, room)}<div class="s-onair-info-foot"><small>${esc(t('开播时如有未保存的修改，会先保存再开播。'))}</small><button type="submit" class="button small">${esc(t('保存到 B站'))}</button></div></form></section>`;
-  const face = view.face_image ? `<section class="s-section">${sLabel(t('人脸验证'))}<div class="s-card s-onair-face-card">${broadcastFace(view)}</div></section>` : '';
-  const push = ui`<section class="s-section">${sLabel(t('推流到 OBS'), button(t('OBS 视频码率'), 'settings.bitrate', { class: 'small quiet' }))}<div class="s-card onair-push s-onair-push">${broadcastPushRows(view, room)}</div><div id="settings-obs-bitrate" class="s-card s-onair-info"${settingsBitrateExpanded ? '' : ' hidden'}></div></section>`;
-  const note = `<p class="s-note">${esc(t('开播只打开 B站直播间；画面和声音由 OBS 推送。退出弹幕姬不会自动下播。启用期间，弹幕姬约每分钟读取一次自己房间的开播状态。'))}</p>`;
-  body.innerHTML = `${hero}${face}${info}${push}${note}`;
-  renderSettingsBitrate();
-  mountSelects(body);
-  startOnAirClocks();
 }
 
 // ---- OBS 与开播 (experimental) ----
@@ -3838,7 +3628,6 @@ function renderVoiceManagement(presets, preferred, bodyOnly = false) {
 function renderVoicesSettings() {
   if (['voice-add', 'service', 'qr'].includes(editor?.type)) return renderLakeVoiceAdd();
   if (editor?.type === 'preset') return renderPresetEditor(editor.id);
-  if (editor?.type === 'binding') return renderBindingEditor(editor.id);
   const presets = snapshot.presets || [];
   const preferred = presets.find(item => item.id === snapshot.rules?.default_preset_id);
   if (!presets.length) return `<div class="lake-voices-page"><section class="voice-empty"><span class="voice-empty-line" aria-hidden="true"></span><h2>${esc(t('还没有声音'))}</h2><p>${esc(t('挑一个你喜欢的声音，让弹幕有声音。'))}</p>${button(t('添加声音'), 'voice.add', { class: 'primary' })}</section><p class="voice-page-foot with-action"><span>${esc(t('不读弹幕也能照常显示。'))}</span>${button(t('播放测试音'), 'audio.test', { class: 'quiet' })}</p></div>`;
@@ -4112,13 +3901,6 @@ async function handleLakeVoiceAction(action, id, target) {
     renderSettings();
     if (opening) settingsDialog.querySelector(`[data-voice-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
     return true;
-  }
-  if (action === 'voice.reference.edit') {
-    if (!await allowLeaveSettings()) return true;
-    const preset = snapshot.presets.find(item => item.id === id); if (!preset) return true;
-    editor = { type: 'preset', id, connectionId: preset.connection_id };
-    if (!await loadVoiceEditorData(preset.connection_id)) return true;
-    renderSettings(); return true;
   }
   if (action === 'voice.preview') { if (!await flushAutosaves()) return true; if (!snapshot.presets.some(p => p.id === id)) return true; await command('audition', { preset_id: id, text: voiceAuditionDraft.text }, { success: t('试听已加入播放队列') }); return true; }
   if (action === 'voice.default') { if (!await flushAutosaves()) return true; await command('presets.default', { id }); updateVoiceSettings(); return true; }
@@ -4517,18 +4299,6 @@ async function loadVoiceEditorData(connectionId) {
   return current();
 }
 
-function renderBindingEditor(id) {
-  const record = snapshot.bindings.find(item => item.id === id);
-  const binding = record?.binding || { user_id: editor?.userId || '', user_name: editor?.userName || '', preset_id: snapshot.presets[0]?.id, enabled: true };
-  return ui`${heading(id ? t('编辑观众声音') : t('指定观众声音'))}<form data-form="binding" data-id="${esc(id || '')}">${record?.binding.legacy_user_name ? ui`<p class="notice">旧配置用户名：${esc(record.binding.legacy_user_name)}。请确认后手动填写用户名或 UID。</p>` : ''}${field('user_name', t('观众用户名'), binding.user_name || '', t('maxlength="100" placeholder="输入观众当前用户名"'))}${field('user_id', t('观众 UID（选填）'), binding.user_id || '', 'inputmode="numeric" pattern="[1-9][0-9]*"')}${select('preset_id', t('声音预设'), snapshot.presets.map(preset => option(preset.id, presetLabel(preset), binding.preset_id)).join(''))}<p class="quiet-note">按用户名精确匹配，同名账号会共用声音；填写 UID 时优先按 UID 匹配。</p>${check('enabled', t('启用此绑定'), binding.enabled)}<div class="form-footer">${autoStatus()}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
-}
-
-function renderAliasEditor() {
-  const name = editor?.userName || '';
-  const existing = snapshot.rules.user_words.find(row => row.from === name);
-  return `${heading(t('添加播报别名'), t('这位观众的用户名会在播报时替换为别名。'))}<form data-form="alias">${field('from', t('原用户名'), name, 'readonly required')}${field('to', t('播报别名'), existing?.to || '', t('required maxlength="100" placeholder="输入播报时使用的名字"'))}<div class="form-footer">${saveButton(t('保存别名'))}${button(t('返回'), 'editor.cancel', { class: 'quiet' })}</div></form>`;
-}
-
 function dictionaryRows(type, rows) {
   if (type === 'sounds') return `<div class="s-sound-grid" data-dictionary="sounds">${rows.map(row => dictionaryRow(type, row)).join('')}</div><p class="s-sound-empty">${esc(t('还没有关键词音效。'))}</p>`;
   return `<div class="s-card s-dict-card"><div data-dictionary="${type}">${rows.map(row => dictionaryRow(type, row)).join('')}</div><div class="s-row s-dict-add">${button(t('添加词条'), `dictionary.add.${type}`, { class: 'small dashed', icon: 'plus' })}</div></div>`;
@@ -4618,8 +4388,6 @@ const lakeReadingKinds = [['user_words', '观众', '添加观众'], ['message_wo
 const lakeReadingCommits = new WeakMap();
 
 function renderLakeReadings() {
-  if (editor?.type === 'alias') return renderAliasEditor();
-  if (editor?.type === 'binding') return renderBindingEditor(editor.id);
   const rows = lakeReadingRows();
   const intro = rows.length ? '' : `<div class="lake-readings-empty"><h3>${esc(t('还没有记住的读法'))}</h3><p>${esc(t('教它几个名字、词和表情，下次就会这样读。'))}</p><div aria-hidden="true"><span>Kinoko7</span>→<strong>${esc(t('蘑菇七'))}</strong><span>yyds</span>→<strong>${esc(t('永远的神'))}</strong><span>☺ doge</span>→<strong>${esc(t('狗头'))}</strong></div></div>`;
   const groups = lakeReadingKinds.map(([kind, label, add]) => {
@@ -5296,19 +5064,6 @@ async function changeLanguage(language) {
   showToast(t('语言已保存'));
 }
 
-function renderDataSettings() {
-  const panel = migrationPreview ? 'import' : dataPanel;
-  const tab = (id, label) => `<button type="button" class="button${panel === id ? ' active' : ''}" data-action="data.panel" data-id="${id}" aria-expanded="${panel === id}">${esc(label)}</button>`;
-  const exportForm = ui`<form data-form="export" class="s-card s-import"><div class="s-import-title">导出配置</div>${field('path', t('保存为'), '', t('required placeholder="例如：E:\\Backups\\danmakuvoice.json"'), t('不包含登录凭据、音效文件和聊天记录。'))}<div class="form-footer">${saveButton(t('导出配置'))}</div></form>`;
-  const importForm = ui`<form data-form="migration-preview" class="s-card s-import"><div class="s-import-title">从旧版导入</div>${field('path', t('旧 config.json 的完整路径'), '', 'required', t('先读取预览，再由你选择要导入的内容。不会自动导入账号凭据。'))}<div class="form-footer">${saveButton(t('读取导入预览'))}</div></form>`;
-  return ui`<section class="s-section">${sLabel(t('数据与迁移'))}<div class="s-button-row">${tab('import', t('导入旧配置'))}${tab('export', t('导出配置'))}${button(t('清除应用数据'), 'data.clear', { class: 'danger' })}</div>${panel === 'export' ? exportForm : panel === 'import' ? importForm : ''}<div id="migration-preview">${migrationPreview ? renderMigrationPreview() : ''}</div><div id="operation-result" class="form-result"></div><p class="s-note">清除应用数据会删除本机保存的账号、语音服务凭据、设置、音效和备份，然后重新开始设置。</p></section>`;
-}
-
-function renderMigrationPreview() {
-  const preview = migrationPreview;
-  return ui`<form data-form="migration-apply" class="editor"><h3>选择要导入的内容</h3><p class="quiet-note">直播间：${esc(preview.room_id || t('未设置'))}；服务 ${preview.provider_settings?.length || 0} 个；待确认用户绑定 ${preview.voice_bindings?.length || 0} 条；音效 ${preview.sounds?.length || 0} 个。</p>${check('import_rules', t('播报规则和词典'))}${check('import_live_settings', t('直播间设置'))}${check('import_connections', t('服务连接与声音预设'))}${check('import_pending_bindings', t('待确认 UID 的用户声音绑定'))}<details class="details"><summary>查看规则与服务内容</summary><pre class="code-output">${esc(JSON.stringify({ rules: preview.rules, provider_settings: preview.provider_settings, model_references: preview.model_references, gift_merge: preview.gift_merge }, null, 2))}</pre></details>${preview.sounds?.length ? ui`<details class="details" open><summary>选择要复制的音效文件</summary><div class="migration-sounds">${preview.sounds.map(sound => { const ready = sound.path_state === 'present' && Boolean(sound.source_sha256) && Number.isSafeInteger(sound.source_bytes); return `<label class="check"><input type="checkbox" name="selected_sound_ids" value="${esc(sound.preview_asset_id)}"${ready ? '' : ' disabled'}><span>${esc(sound.trigger)}<small>${esc(sound.source_path)} · ${ready ? t('可导入') : t('文件或预览校验不可用')}</small></span></label>`; }).join('')}</div></details>` : ''}<details class="details"><summary>替换已有设置</summary>${check('replace_existing_rules', t('允许覆盖当前播报规则'))}${check('replace_existing_live_settings', t('允许覆盖当前直播间设置'))}</details>${preview.warnings?.length ? ui`<details class="details" open><summary>需要注意的内容（${preview.warnings.length}）</summary><div class="code-output">${preview.warnings.map(warning => ui`${esc(warning.path)}：${esc(warning.message)}`).join('\n')}</div></details>` : ''}<p class="quiet-note">确认导入前会自动备份当前数据库。名字绑定必须补充 UID 才会生效。</p><div class="form-footer">${saveButton(t('确认所选内容'))}${button(t('取消导入'), 'migration.cancel', { class: 'quiet' })}</div></form>`;
-}
-
 async function confirmAction(title, message, label = t('确认'), danger = true) {
   if (confirmationDialog.open) return false;
   return new Promise(resolve => {
@@ -5356,9 +5111,7 @@ async function allowLeaveSettings() {
 async function closeSettings() {
   if (!await allowLeaveSettings()) return;
   if (!await settleVoiceAuditionChoice()) return;
-  hidePushCredentials(settingsDialog);
   closeSelect();
-  if (aliasReturnContext && editor?.type === 'alias') { restoreAliasNavigation(); return; }
   if (editor?.type === 'qr') await cancelQr();
   if (editor?.type === 'qr') editor = null;
   tabEditors.set(settingsTab, editor);
@@ -5420,25 +5173,11 @@ async function openSettings(tab) {
   void refreshLocalServices(true);
 }
 
-function restoreAliasNavigation() {
-  const origin = aliasReturnContext;
-  if (!origin) return;
-  aliasReturnContext = null;
-  settingsTab = origin.tab; editor = origin.editor;
-  settingsDirty = false;
-  closeSelect();
-  closeSettingsDialog(() => { if (step === 'main') updateLive(); });
-}
-
 async function openViewerSettings(tab, nextEditor) {
   finishSettingsLeave();
-  if (nextEditor?.type === 'alias' && aliasReturnContext && settingsDialog.open) return;
-  if (nextEditor?.type === 'alias' && !settingsDialog.open) {
-    aliasReturnContext = { tab: settingsTab, editor };
-  }
   if (qrProvider) await cancelQr();
   tabEditors.set(settingsTab, editor);
-  settingsTab = nextEditor?.type === 'alias' || nextEditor?.type === 'binding' ? 'readings' : settingsTabId(tab);
+  settingsTab = settingsTabId(tab);
   editor = nextEditor;
   renderSettings();
   if (!settingsDialog.open) settingsDialog.show();
@@ -5508,9 +5247,8 @@ async function handleAction(action, id, target) {
     finally { updateBusy = false; updateLakeVersionRows(); }
     return;
   }
-  if (settingsDialog.open && !['settings.close', 'settings.tab', 'editor.cancel', 'autosave.retry', 'autosave.discard', 'draft.discard', 'overlay.preview', 'overlay.copy', 'live.panel', 'obs.auto_detect'].includes(action) && !action.startsWith('dictionary.')) {
-    const replacesSettings = ['room.anonymous', 'bili.use_account', 'bili.logout', 'bili.begin', 'doubao.begin', 'fish.restore_builtin', 'service.configure', 'service.prefer', 'service.add_preset', 'voice-audition.add', 'preset.choose_service', 'preset.default', 'preset.clear-default', 'asset.replace', 'models.refresh', 'onboarding.reset', 'migration.cancel'].includes(action)
-      || /^(preset|binding)\.(new|edit|delete)$/.test(action) || action === 'asset.delete';
+  if (settingsDialog.open && !['settings.close', 'settings.tab', 'editor.cancel', 'autosave.retry', 'autosave.discard', 'overlay.preview', 'overlay.copy', 'live.panel', 'obs.auto_detect'].includes(action) && !action.startsWith('dictionary.')) {
+    const replacesSettings = ['room.anonymous', 'bili.use_account', 'bili.logout', 'bili.begin', 'doubao.begin', 'fish.restore_builtin', 'service.configure', 'service.prefer', 'service.add_preset', 'voice-audition.add', 'preset.choose_service', 'preset.default', 'preset.clear-default', 'preset.delete', 'models.refresh', 'onboarding.reset'].includes(action);
     if (!await (replacesSettings ? allowLeaveSettings() : flushAutosaves())) return;
   }
   if (['tts.select', 'service.prefer', 'preset.default', 'preset.clear-default', 'voice-audition.add', 'fish.audition', 'settings.tab'].includes(action)) await settleVoiceAuditionChoice();
@@ -5653,28 +5391,12 @@ async function handleAction(action, id, target) {
     viewerContext = null; viewerOpenIdentity = ''; audienceReturn = false; renderViewerDrawer();
     return openSettings('voices');
   }
-  if (action === 'viewer.voice' || action === 'viewer.alias') {
-    const item = viewerContext;
-    if (!item) return;
-    if (action === 'viewer.voice') {
-      const hasUid = validUid(item.user_id);
-      if (!hasUid && !String(item.user_name || '').trim()) throw new Error(t('这条弹幕没有可用用户名或 UID，无法指定声音。'));
-      if (!snapshot.presets?.length) { await openViewerSettings('voices', null); showToast(t('请先添加一个声音预设')); return; }
-      const record = snapshot.bindings.find(entry => hasUid
-        ? String(entry.binding.user_id) === String(item.user_id)
-        : !entry.binding.user_id && entry.binding.user_name === item.user_name);
-      return openViewerSettings('voices', { type: 'binding', id: record?.id || '', userId: hasUid ? item.user_id : null, userName: item.user_name });
-    }
-    return openViewerSettings('rules', { type: 'alias', userName: item.user_name });
-  }
   if (action === 'autosave.retry') { const form = target.closest('form'); scheduleAutosave(form, true); await autosaves.get(form)?.queue.flush(); return; }
   if (action === 'autosave.discard') {
     const form = target.closest('form'); const record = autosaves.get(form);
     if (record) { record.touched = false; record.queue.cancel(); await record.queue.flush(); formDrafts.delete(record.key); renderSettings(); }
     return;
   }
-  if (action === 'draft.discard') { formDrafts.delete(id); renderSettings(); return; }
-  if (action === 'draft.resume') { const draft = formDrafts.get(id); if (draft) { editor = draft.editor; renderSettings(); } return; }
   if (action === 'settings.open' || action === 'settings.room') {
     closeVoicePanel();
     const aliasSaved = !viewerContext || await flushViewerAlias();
@@ -5732,29 +5454,9 @@ async function handleAction(action, id, target) {
   }
   if (action === 'broadcast.start') return startBroadcast();
   if (action === 'broadcast.stop') return stopBroadcast();
-  if (action === 'broadcast.hide') { hidePushCredentials(target.closest('[data-broadcast-scope]') || document); return; }
-  if (action === 'broadcast.forget') { hidePushCredentials(); return runBroadcastAction('forget'); }
-  if (action === 'broadcast.reveal' || action.startsWith('broadcast.copy.')) return revealOrCopyCredentials(action, target);
   if (action === 'onair.info') return openOnAirPanel('info');
   if (action === 'onair.obs') return openOnAirPanel('obs');
-  if (action === 'onair.details') return openOnAirPanel('details');
-  if (action === 'settings.bitrate') {
-    settingsBitrateExpanded = true;
-    renderSettingsBitrate();
-    return readOnAirBitrate();
-  }
-  if (action === 'onair.bitrate.refresh') return readOnAirBitrate();
-  if (action === 'onair.close') {
-    // A finished bitrate is applied on the way out instead of asking to discard it.
-    const form = onAirPanelMode === 'details' ? document.querySelector('#onair-panel form[data-form="onair-bitrate"][data-dirty]') : null;
-    const bitrate = form ? Number(form.elements.bitrate_kbps?.value) : NaN;
-    closeOnAirPanel(true);
-    if (Number.isInteger(bitrate) && bitrate >= 100 && bitrate <= 100000 && bitrate !== onAirBitrate?.bitrate_kbps) {
-      const next = await command('obs.bitrate.set', { bitrate_kbps: bitrate }, { quiet: true });
-      onAirBitrate = next.result; renderSettingsBitrate(); showToast(t('OBS 码率已保存'));
-    }
-    return;
-  }
+  if (action === 'onair.close') return closeOnAirPanel(true);
   if (action === 'overlay.preview') {
     const [key, choice] = String(id).split('=');
     if (key in overlayPreview) overlayPreview[key] = choice;
@@ -5777,7 +5479,6 @@ async function handleAction(action, id, target) {
     if (editor?.type === 'qr') await cancelQr();
     tabEditors.delete(settingsTab);
     tabEditors.delete(settingsTabId(id));
-    aliasReturnContext = null;
     chooseLivePanel(id);
     settingsTab = settingsTabId(id); editor = null; renderSettings();
     void refreshLocalServices(true);
@@ -5812,7 +5513,6 @@ async function handleAction(action, id, target) {
     if (await confirmAction(action === 'queue.clear' ? t('清空待播队列？') : t('断开直播并停止全部播报？'), action === 'queue.clear' ? t('尚未播放的消息会被移除，当前播报继续。') : t('将断开直播间、停止当前播放并清空待播消息。重新接收需再次连接。'), t('确认停止'))) await command(action);
     return;
   }
-  if (action === 'data.panel') { dataPanel = dataPanel === id ? null : id; if (!dataPanel) migrationPreview = null; renderSettings(); return; }
   if (action === 'room.anonymous' || action === 'setup.uid') throw new Error(t('请扫码登录哔哩哔哩后接收弹幕'));
   if (action === 'bili.use_account') { await command(action, {}, { success: t('已切换到你的直播间') }); editor = null; renderSettings(); return; }
   if (action === 'bili.logout') { if (await confirmAction(t('退出哔哩哔哩账号？'), t('将清除本机保存的账号凭据。'))) { await command(action, { confirmed: true }); renderSettings(); } return; }
@@ -5944,25 +5644,9 @@ async function handleAction(action, id, target) {
     await cancelQr(); editor = { type: 'qr', provider: action === 'bili.begin' ? 'bilibili' : 'doubao', id }; renderSettings(); return startQr(editor.provider, id || undefined);
   }
   if (action === 'editor.cancel') {
-    if (aliasReturnContext && editor?.type === 'alias') return closeSettings();
     if (!await allowLeaveSettings()) return;
     if (editor?.type === 'qr') await cancelQr();
     editor = null; tabEditors.delete(settingsTab); renderSettings(); return;
-  }
-  if (/^(preset|binding)\.(new|edit)$/.test(action)) {
-    editor = { type: action.split('.')[0], id: id || '', connectionId: !id && snapshot.connections.length === 1 ? snapshot.connections[0].id : undefined };
-    if (editor.type === 'preset') {
-      const connectionId = snapshot.presets.find(item => item.id === id)?.connection_id || editor.connectionId;
-      const connection = snapshot.connections.find(item => item.id === connectionId);
-      if (!id && connection?.settings.provider === 'fish_audio' && !connection.has_credential) {
-        editor = { type: 'service', provider: 'fish_audio', makePreferred: !snapshot.rules?.default_preset_id };
-        renderSettings();
-        showToast(t('请先连接 Fish Audio 账号'));
-        return;
-      }
-      if (connectionId) if (!await loadVoiceEditorData(connectionId)) return;
-    }
-    renderSettings(); return;
   }
   if (action === 'preset.choose_service') {
     const connection = snapshot.connections.find(item => item.id === id);
@@ -5977,14 +5661,11 @@ async function handleAction(action, id, target) {
     if (!await loadVoiceEditorData(connection.id)) return;
     renderSettings(); return;
   }
-  if (/^(preset|binding|asset)\.delete$/.test(action)) {
-    const type = action.split('.')[0];
-    const label = ({ preset: t('声音预设'), binding: t('用户声音绑定'), asset: t('音效素材') })[type];
-    if (await confirmAction(ui`删除${label}？`, t('删除后无法撤销。仍被使用的连接、默认预设或规则素材需要先解除引用。'), t('删除'))) { await command(`${type === 'asset' ? 'assets' : `${type}s`}.delete`, { id, confirmed: true }); renderSettings(); }
+  if (action === 'preset.delete') {
+    if (await confirmAction(ui`删除${t('声音预设')}？`, t('删除后无法撤销。仍被使用的连接、默认预设或规则素材需要先解除引用。'), t('删除'))) { await command('presets.delete', { id, confirmed: true }); renderSettings(); }
     return;
   }
   if (action === 'preset.default' || action === 'preset.clear-default') { await command('presets.default', { id: action === 'preset.clear-default' ? null : id }); if (settingsTab === 'voices' && !editor) { updateVoiceSettings(); updateServiceIndicators(); } else renderSettings(); return; }
-  if (action === 'asset.replace') { if (!await allowLeaveSettings()) return; editor = { type: 'asset', id }; renderSettings(); return; }
   if (action === 'dictionary.view') {
     dictionaryView = id === 'user_words' ? 'user_words' : 'message_words';
     for (const panel of settingsDialog.querySelectorAll('.s-dict')) panel.hidden = panel.dataset.view !== dictionaryView;
@@ -6009,16 +5690,6 @@ async function handleAction(action, id, target) {
   if (action === 'onboarding.reset') {
     if (!await confirmAction(t('重新打开初次设置？'), t('已有声音、规则和素材会保留。'), t('重新设置'), false)) return;
     await cancelQr(); await command(action); settingsDialog.close(); editor = null; setStep('welcome'); return;
-  }
-  if (action === 'migration.cancel') { await command(action); migrationPreview = null; renderSettings(); return; }
-  if (action === 'data.clear') {
-    if (!await confirmAction(t('清除全部应用数据？'), t('将删除本机保存的账号和语音服务凭据、声音预设、播报规则、界面设置、已导入的音效及应用备份。\n当前接收和播报会停止，随后回到首次设置。'), t('清除应用数据'))) return;
-    stopQrPolling();
-    await command('data.clear', { confirmed: true });
-    unmountAutosaves(); formDrafts.clear(); tabEditors.clear(); viewerAliasSave.cancel(); viewerAliasDrafts.clear();
-    editor = null; migrationPreview = null; settingsTab = 'voices'; settingsDirty = false; setupTts = true;
-    settingsDialog.close(); settingsDialog.replaceChildren();
-    showToast(t('应用数据已清除')); setStep('welcome'); return;
   }
   if (action === 'reconnect') return boot();
 }
@@ -6155,7 +5826,6 @@ async function handleForm(form, submitter) {
   const type = form.dataset.form;
   if (type === 'chat-send') return sendChatMessage();
   if (type === 'broadcast-room') return saveBroadcastForm(form);
-  if (type === 'onair-bitrate') return saveOnAirForm(form);
   if (type === 'obs-password') {
     const input = form.elements.password;
     if (!input.value) throw new Error(t('请输入 OBS WebSocket 密码'));
@@ -6245,28 +5915,8 @@ async function handleForm(form, submitter) {
     if (editor !== openedEditor || form.dataset.dirty) return;
     renderSettings();
     return;
-  } else if (type === 'binding') {
-    const envelope = collectAutosave(form);
-    await command(envelope.action, envelope.payload, { success: t('观众声音已保存') }); editor = null;
   } else if (type === 'tts-toggle') {
     await command('preferences.save', { preferences: { tts_enabled: checked('tts_enabled') } }, { success: t('播报开关已保存') });
-  } else if (type === 'alias') {
-    const aliasEditor = editor;
-    const from = value('from');
-    const to = value('to');
-    if (!from || !to) throw new Error(t('请填写播报别名。'));
-    const rules = structuredClone(snapshot.rules);
-    const index = rules.user_words.findIndex(row => row.from === from);
-    if (index >= 0) rules.user_words[index] = { from, to };
-    else rules.user_words.push({ from, to });
-    await command('rules.save', { rules }, { success: t('播报别名已保存') });
-    // A late save must not close a newly opened editor or change its page.
-    if (editor === aliasEditor && settingsDialog.open) {
-      delete form.dataset.dirty;
-      if (aliasReturnContext) restoreAliasNavigation();
-      else { editor = null; tabEditors.delete(settingsTab); settingsDirty = false; renderSettings(); }
-    }
-    return;
   } else if (type === 'rules') {
     const rules = structuredClone(snapshot.rules);
     for (const key of ['danmaku_on', 'filter_bilibili_emoticons', 'gift_on', 'free_gift_on', 'super_chat_on', 'guard_on']) rules.events[key] = checked(key);
@@ -6285,9 +5935,6 @@ async function handleForm(form, submitter) {
     const node = document.querySelector('#preview-result');
     node.innerHTML = `<div class="notice">${preview.filtered_reason ? ui`已过滤：${esc(t(preview.filtered_reason))}` : ui`${esc(preview.final_text || t('没有可播报的文字'))}<br>声音：${esc(preview.voice?.name || t('未指定默认声音'))}${preview.pending_legacy_binding ? t('<br>同名旧绑定待确认 UID，尚未应用。') : ''}`}</div><pre class="code-output">${esc(JSON.stringify(preview.parts, null, 2))}</pre>`;
     return;
-  } else if (type === 'asset') {
-    if (id && !await confirmAction(t('替换这份音效？'), t('今后的播报使用新音频；已经排队的消息仍可能使用旧文件。'), t('替换'))) return;
-    await command(id ? 'assets.replace' : 'assets.import', id ? { id, path: value('path'), confirmed: true } : { path: value('path'), name: value('name') }, { success: id ? t('素材已替换') : t('素材已导入') }); editor = null;
   } else if (type === 'audio') {
     const output = value('output') ? { named: value('output') } : 'default';
     const needsConfirm = JSON.stringify(output) !== JSON.stringify(snapshot.preferences.output);
@@ -6297,18 +5944,6 @@ async function handleForm(form, submitter) {
     await command('preferences.save', { preferences: { appearance: value('appearance'), scale: number('scale') } }, { success: t('外观已保存') });
   } else if (type === 'startup') {
     await command('startup.set', { enabled: checked('enabled') }, { success: t('启动选项已保存') });
-  } else if (type === 'export') {
-    const next = await command('configuration.export', { path: value('path') }, { success: t('配置已导出，不含登录凭据') }); renderResult('#operation-result', next.result || t('导出完成')); settingsDirty = false; return;
-  } else if (type === 'migration-preview') {
-    const next = await command('migration.preview', { path: value('path') }); migrationPreview = next.result; settingsDirty = false; document.querySelector('#migration-preview').innerHTML = renderMigrationPreview(); return;
-  } else if (type === 'migration-apply') {
-    const options = { selected_sound_ids: data.getAll('selected_sound_ids') };
-    for (const key of ['import_rules', 'import_live_settings', 'import_connections', 'import_pending_bindings', 'replace_existing_rules', 'replace_existing_live_settings']) options[key] = checked(key);
-    if (!options.import_rules && options.selected_sound_ids.length) throw new Error(t('导入音效时，请同时勾选播报规则和词典。'));
-    if (!options.import_rules && !options.import_live_settings && !options.import_connections && !options.import_pending_bindings) throw new Error(t('请至少选择一项要导入的内容。'));
-    const selected = [['import_rules', t('播报规则和词典')], ['import_live_settings', t('直播间设置')], ['import_connections', t('服务连接与声音预设')], ['import_pending_bindings', t('待确认 UID 的绑定')]].filter(([key]) => options[key]).map(([, label]) => label);
-    if (!await confirmAction(t('确认导入这些内容？'), ui`${selected.join(t('、'))}，以及 ${options.selected_sound_ids.length} 个音效文件。\n${options.replace_existing_rules || options.replace_existing_live_settings ? t('已选择允许覆盖当前对应设置。\n') : ''}会先备份当前数据库，不导入登录凭据。`, t('备份并导入'), false)) return;
-    const next = await command('migration.apply', { confirmed: true, options }); migrationPreview = null; renderSettings(); renderResult('#operation-result', next.result); showToast(t('导入完成，请查看结果')); return;
   }
   settingsDirty = false;
   renderSettings();
@@ -6325,7 +5960,7 @@ document.addEventListener('click', async event => {
   const onAirPanel = document.querySelector('#onair-panel');
   if (onAirPanel && !onAirPanel.hidden && !onAirPanel.contains(event.target) && !event.target.closest('.select-menu, #onair, #lake-title, #confirmation')) {
     if (onAirPanelMode === 'obs') void saveOverlayTitleForm(onAirPanel.querySelector('form[data-form="overlay-title"]')).catch(showError);
-    else if (onAirPanelMode !== 'face' && (onAirPanelMode !== 'details' || !onAirPanel.querySelector('form[data-dirty]'))) closeOnAirPanel();
+    else if (onAirPanelMode !== 'face') closeOnAirPanel();
   }
   const target = event.target.closest('[data-action]');
   if (!target || target.disabled) { updateLakePopScrim(); return; }
@@ -6355,8 +5990,6 @@ document.addEventListener('compositionend', event => {
 
 document.addEventListener('input', event => {
   if (event.target.id === 'chat-message') { chatMessageDraft = event.target.value; return; }
-  const detailsForm = event.target.closest?.('form[data-form="onair-bitrate"]');
-  if (detailsForm) { detailsForm.dataset.dirty = 'true'; return; }
   const overlayTitleForm = event.target.closest?.('form[data-form="overlay-title"]');
   if (overlayTitleForm) {
     overlayTitleForm.dataset.dirty = 'true';
@@ -6502,19 +6135,6 @@ settingsDialog.addEventListener('input', event => {
   if (form && autoFormTypes.has(form.dataset.form)) scheduleAutosave(form, false, event.target.name === 'uid', event.isComposing || composingInputs.has(event.target));
 });
 settingsDialog.addEventListener('change', async event => {
-  if (event.target.closest('[data-form="broadcast-room"]')) return;
-  if (event.target.matches?.('[data-broadcast-enable]')) {
-    const toggle = event.target;
-    const enabled = toggle.checked;
-    toggle.disabled = true;
-    try {
-      broadcastRefreshAccount = ''; broadcastRefreshError = '';
-      await command('preferences.save', { preferences: { broadcast_console: enabled } }, { quiet: true });
-      showToast(t(enabled ? '已启用开播台，主界面右上角可以开播和下播' : '已关闭开播台'));
-    } catch (error) { showError(error); }
-    finally { toggle.disabled = false; toggle.checked = broadcastEnabled(); updateBroadcastSettings(); }
-    return;
-  }
   if (event.target.name === 'language') {
     const selected = event.target.value;
     const radios = event.target.type === 'radio' ? [...event.target.closest('form').querySelectorAll('input[name="language"]')] : [event.target];
