@@ -1387,3 +1387,13 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - 最终 Release 构建：`RUSTFLAGS=-C target-feature=+crt-static`、`cargo build --release --offline --locked -p danmakuvoice`，成功用时 2m02s，版本仍为 0.3.3。可运行副本 `dist/claude-local-20261020/DanmakuVoice.exe`，19,771,392 字节，SHA-256 `78361e6effc05663ee8c991b365a66e0c6533c9f919288d01fef7f6fadc9aaae`。同目录保留校验和及构建元数据。
 - 对最终 EXE 运行 `smoke-portable.ps1 -ObserveSeconds 8` 通过：独立临时数据、禁用网络、限制 PATH、仅单 EXE，SQLite/WebView2 初始化与固定哈希内置 FFmpeg 解压成功。27 个生产前端/叠加层资源的哈希在验证与编译期间未变化，清单为 `production-manifest.json`。
 - 证据目录为 `target/claude-cleanup-20261020/`。浏览器使用隔离虚构 IPC；原生检查仅为本地启动。真实 WebView2 手感、四服务在线合成/物理音频、直播间切换与真实 OBS 推流仍待实际验收，不能由上述构建与离线测试代替。本轮没有更新已安装商店版，没有推送或发布。
+
+## 2026-10-20 Microsoft Store 0.3.4 / 1.3.4.0 更新准备
+
+用户授权更新到微软商店。本次包含已合入 main 的 `eefde2a`、`d9b84c6`、`f24cef5`、`ce4dcae`：OBS 单表情与可读性、主标题原地编辑、记住的读法/房间号自动保存、旧页面清理，以及参考音频排队保存保护。
+
+- 应用版本同步到 0.3.4（Cargo.toml、Cargo.lock 两个本地包、tauri.conf.json），映射商店 MSIX 1.3.4.0；产品身份与 runFullTrust 权限保持原样。
+- 中英文“版本新增内容”和审核对应源码链接已更新到 `store-v1.3.4.0`。按原有规则，商店公开字段与图片不出现此前引起搜索词问题的第三方品牌词。
+- 本地 fmt、严格 Clippy、Node 198/198、Python 28/28 通过。前一节 19 套界面回归保持为当前功能代码的证据；本轮仅改版本与商店文案。Rust 四项本机符号链接特权失败等待独立 Windows CI 复核，不能写成全量通过。
+- 以当前生产页面重新生成中英文各 9 张 1920×1080 商店图，位于忽略目录 `Claude outputs/store-screenshots-0.3.4-20261020/`。生成脚本的外网阻断、品牌词与英文界面检查通过，并目视核对读法与 OBS 新界面；这些图片使用隔离虚构 IPC，不代表真实账号、在线语音或原生 WebView2 的验收。
+- 正式构建与精确源码将在本次冻结提交上通过 Windows CI 验证，再发布配对源码并上传 Partner Center；此时尚未声称新版送审、认证或上架。验证与打包日志集中在 `target/release-0.3.4-20261020/`，先前所有本地构建与失败证据保留。
