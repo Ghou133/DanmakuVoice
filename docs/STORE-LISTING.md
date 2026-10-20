@@ -2,9 +2,9 @@
 
 产品：超绝可爱弹幕姬（DanmakuVoice）；Store ID：9P4DFD8HGN03；商店发布者显示名称：CurePrism。
 
-2026-10-20 更新准备：应用 0.3.4 / MSIX 1.3.4.0，包含原地自动保存、OBS 主标题编辑、单表情显示与可读性改进，以及旧设置页面清理。构建、完整源码公开及 Partner Center 提交结果记录在 PROGRESS.md；本段不是已送审或已上架声明。
+2026-10-20 状态：应用 0.3.4 / MSIX 1.3.4.0（构建提交 `2f908fe9`）已以 Submission 5（`1152921505702175885`）正式送审。后台显示 Update in certification，提交完成、预处理进行中，认证和发布尚未开始；通过认证后自动发布。中英文 0.3.4 更新说明、18 张新截图及审核说明已保存核对。[独立 Windows CI](https://github.com/Ghou133/DanmakuVoice/actions/runs/39353795931) 全部成功，[对应完整源码 store-v1.3.4.0](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.4.0) 已公开；尚未确认新版认证通过或上架。构建校验和及验收边界见 PROGRESS.md。
 
-2026-10-18 状态：应用 0.3.3 / MSIX 1.3.3.0（构建提交 `ba89d579`）已完成中英文文案、18 张截图和审核说明更新，并以 Submission 4 正式送审。后台为“正在认证更新”，预处理进行中，审核通过后自动发布；尚未确认认证通过或新版上架。对应完整源码已公开于 [store-v1.3.3.0](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.3.0)，应用发行说明见 [v0.3.3](https://github.com/Ghou133/DanmakuVoice/releases/tag/v0.3.3)。
+此前版本：应用 0.3.3 / MSIX 1.3.3.0（构建提交 `ba89d579`）于 2026-10-18 以 Submission 4 送审；2026-10-20 本轮在 Partner Center 实际核对，该提交已处于当前商店在售状态。对应完整源码见 [store-v1.3.3.0](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.3.0)，应用发行说明见 [v0.3.3](https://github.com/Ghou133/DanmakuVoice/releases/tag/v0.3.3)。
 
 以下文案按 Partner Center“商店一览”的字段整理，可直接复制。上传前请在 Partner Center 中核对各字段的当前字数限制。截图素材见文末“截图”一节。
 
@@ -196,7 +196,7 @@ Licensed under the GNU Affero General Public License v3.0 only. Complete source 
 
 ## 截图
 
-商店截图位于 `Claude outputs/store-screenshots/`（该目录不进入公开提交），每种语言 9 张，1920×1080 PNG，文件名顺序即上传顺序，与上面的“截图说明”一一对应：`store-zh-CN-01…09`、`store-en-01…09`。README 用的首图和功能图在 `docs/images/`。
+本次 0.3.4 商店截图位于 `Claude outputs/store-screenshots-0.3.4-20261020/`（该目录不进入公开提交），每种语言 9 张，1920×1080 PNG，文件名顺序即上传顺序，与上面的“截图说明”一一对应：`store-zh-CN-01…09`、`store-en-01…09`。默认生成目录仍为 `Claude outputs/store-screenshots/`，可用 `DV_STORE_OUTPUT` 指定独立目录。README 用的首图和功能图在 `docs/images/`。
 
 重新生成：
 

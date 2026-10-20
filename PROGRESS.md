@@ -1397,3 +1397,21 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - 本地 fmt、严格 Clippy、Node 198/198、Python 28/28 通过。前一节 19 套界面回归保持为当前功能代码的证据；本轮仅改版本与商店文案。Rust 四项本机符号链接特权失败等待独立 Windows CI 复核，不能写成全量通过。
 - 以当前生产页面重新生成中英文各 9 张 1920×1080 商店图，位于忽略目录 `Claude outputs/store-screenshots-0.3.4-20261020/`。生成脚本的外网阻断、品牌词与英文界面检查通过，并目视核对读法与 OBS 新界面；这些图片使用隔离虚构 IPC，不代表真实账号、在线语音或原生 WebView2 的验收。
 - 正式构建与精确源码将在本次冻结提交上通过 Windows CI 验证，再发布配对源码并上传 Partner Center；此时尚未声称新版送审、认证或上架。验证与打包日志集中在 `target/release-0.3.4-20261020/`，先前所有本地构建与失败证据保留。
+
+### 构建与商店草稿验证
+
+- 冻结源码提交 `2f908fe9b7078e43dde8b1f1c5ffd316113c79e5` 已同步至 GitHub main。正式打包通过干净源码审计、EXE/源码配对、第三方许可证逐字节核对、独立临时目录原生启动检查与 MakeAppx 完整语义/包内容验证。构建产物位于 `dist/release-0.3.4-20261020/`，未公开上传 EXE 或未签名 MSIX。
+- 待提交 MSIX 为 `store/DanmakuVoice-store-submission.msix`，11,953,997 字节，SHA-256 `684e73804516390e8a262787484f9ec336843ae4a5a27a0cdc4a5952030b6116`；配对完整源码 `DanmakuVoice-source.zip` 为 131,973,604 字节，SHA-256 `e28049bf566c2b0e755b7ea4c550f7533c7ddf6fd472757add08276a15c5cd58`。
+- 从实际 MSIX 清单核对：版本 1.3.4.0，Identity `CurePirsm.334999D231AD4`、Publisher CN 保持原值；仅 `runFullTrust`，StartupTask 默认关闭，没有 `unvirtualizedResources`、文件/注册表虚拟化例外或 `broadFileSystemAccess`。
+- Partner Center 实际确认此前 Submission 4 已上架；本次创建 Submission 5（`1152921505702175885`），1.3.4.0 x64 Desktop 包已上传、验证并保存，替代同设备范围的 1.3.3.0。中英文 0.3.4 更新说明、18 张新截图和认证测试说明已保存；重新打开两语言页面后，截图顺序、1920×1080 尺寸、加载状态以及完整 data URL 的长度/双校验值均与本地素材匹配。认证说明重新打开后保留新版本、源码提交及校验和，未填写任何审核凭据。
+- 自动发布设置保持“认证通过后发布”。上述为已保存草稿的证据，正式送审和 CI 最终结果在后续记录；当前不能据此声称 1.3.4.0 已认证或已上架。
+
+### 独立 CI 与对应完整源码
+
+- [Windows 验证与 MSIX 打包 39353795931](https://github.com/Ghou133/DanmakuVoice/actions/runs/39353795931) 对冻结提交全部成功：fmt、严格 Clippy、Node 198/198、Python 28/28、Rust 545 通过/0 失败/10 忽略、真实最小 FFmpeg 解码、原生隔离启动、源码配对、第三方许可证核对，以及空 Cargo 缓存中从完整源码 ZIP 离线重新构建和 MakeAppx 完整包验证。四项本机因符号链接特权失败的测试在独立 Windows CI 通过；本机原始失败日志仍保留。日志为 `target/release-0.3.4-20261020/ci-full.log`。
+- [store-v1.3.4.0 对应源码](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.4.0) 已公开，标签指向 `2f908fe9b7078e43dde8b1f1c5ffd316113c79e5`。仅提供配对完整源码 ZIP 和校验和文件，GitHub 资产摘要与本地上述源码 SHA-256 一致；未使用账号会话的源码资产 HEAD 请求返回 HTTP 200。公开源码不包含本地操作笔记、账号信息或凭据。
+
+### 正式送审结果
+
+- 2026-10-20 完成 Partner Center 正式提交。实际后台显示 `Update in certification` / `Product update: In certification`，对应 Submission 5（`1152921505702175885`）：Submission 完成，Pre-processing 进行中，Certification 与 Publishing 尚未开始。页面明确显示通过认证后自动发布；当前商店在售仍为此前的 Submission 4，不能将本次 1.3.4.0 写为已上架。
+- 原始页面状态和截图保存在本机忽略目录 `target/release-0.3.4-20261020/store-submitted-dom.txt` 与 `store-submitted-confirmed.jpg`。本次验证覆盖构建、离线测试、原生隔离启动、素材和提交状态；真实签名商店包更新、SAC、物理音频、四服务在线合成、真实直播间及 OBS 推流仍需分别验收，不能由 CI 或送审成功代替。前述两项旧浏览器回归失败继续保留，不因 CI 成功而记成通过。
