@@ -77,7 +77,7 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 
 ### 版本新增内容
 
-- 改进开播身份识别，减少重复的人脸验证提示
+- 改进开播与身份验证流程
 - 支持播报普通观众进入直播间，可在设置中开启，默认关闭
 - 改进入场事件处理与播报队列的稳定性
 
@@ -166,7 +166,7 @@ danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 
 ### What's new in this version
 
-- Improve broadcast identity handling to reduce repeated face-verification prompts
+- Improve the broadcast and identity-verification flow
 - Optionally announce ordinary viewers entering the live room; this is off by default
 - Improve entry-event processing and speech queue reliability
 
