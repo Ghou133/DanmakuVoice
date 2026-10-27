@@ -107,6 +107,8 @@ pub enum EventKind {
     Gift,
     SuperChat,
     Guard,
+    /// Ordinary room entry; independent of paid entrance effects.
+    Entry,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]

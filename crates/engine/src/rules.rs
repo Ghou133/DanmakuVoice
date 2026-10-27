@@ -28,6 +28,11 @@ pub struct SoundRule {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventRules {
     pub danmaku_on: bool,
+    /// Ordinary room entries have their own switch, off unless explicitly
+    /// enabled (including for old rules saved before entries were supported):
+    /// there is no settings UI for it yet.
+    #[serde(default = "default_entry_on")]
+    pub entry_on: bool,
     /// Retained for compatibility with old exports. Platform emote names are
     /// always suppressed unless an explicit emote_words reading is configured.
     #[serde(default = "default_filter_bilibili_emoticons")]
@@ -44,6 +49,7 @@ impl Default for EventRules {
     fn default() -> Self {
         Self {
             danmaku_on: true,
+            entry_on: false,
             filter_bilibili_emoticons: true,
             gift_on: true,
             free_gift_on: false,
@@ -59,9 +65,19 @@ fn default_filter_bilibili_emoticons() -> bool {
     true
 }
 
+fn default_entry_on() -> bool {
+    false
+}
+
+fn default_entry_template() -> String {
+    "{user_name}进入了直播间".into()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EventTemplates {
     pub danmaku: String,
+    #[serde(default = "default_entry_template")]
+    pub entry: String,
     pub gift: String,
     pub super_chat: String,
     pub guard: String,
@@ -71,6 +87,7 @@ impl Default for EventTemplates {
     fn default() -> Self {
         Self {
             danmaku: "\"{user_name}\"说:\"{message}\"".into(),
+            entry: default_entry_template(),
             gift: "\"{user_name}\"赠送了{gift_num}个{gift_name}".into(),
             super_chat: "\"{user_name}\"发送了一条醒目留言，他说\"{message}\"".into(),
             guard: "感谢\"{user_name}\"赠送的{guard_name}".into(),
@@ -428,6 +445,7 @@ impl RuleSet {
         }
         if [
             &self.templates.danmaku,
+            &self.templates.entry,
             &self.templates.gift,
             &self.templates.super_chat,
             &self.templates.guard,
@@ -469,6 +487,7 @@ impl RuleSet {
         }
         for (event, template) in [
             ("弹幕", &self.templates.danmaku),
+            ("进场", &self.templates.entry),
             ("礼物", &self.templates.gift),
             ("醒目留言", &self.templates.super_chat),
             ("舰长", &self.templates.guard),
@@ -503,6 +522,7 @@ impl RuleSet {
     pub fn filter_reason(&self, event: &LiveEvent) -> Option<&'static str> {
         match event.kind {
             EventKind::Danmaku if !self.events.danmaku_on => Some("弹幕播报已关闭"),
+            EventKind::Entry if !self.events.entry_on => Some("进场播报已关闭"),
             EventKind::Danmaku
                 if event.is_bilibili_emoticon
                     && !self.emote_words.iter().any(|alias| {
@@ -605,6 +625,7 @@ impl RuleSet {
         }
         let template = match event.kind {
             EventKind::Danmaku => &self.templates.danmaku,
+            EventKind::Entry => &self.templates.entry,
             EventKind::Gift => &self.templates.gift,
             EventKind::SuperChat => &self.templates.super_chat,
             EventKind::Guard => &self.templates.guard,
@@ -670,6 +691,112 @@ mod tests {
             volume: 1.0,
             sovits: None,
         }
+    }
+
+    #[test]
+    fn old_rules_default_to_disabled_entry_announcements_and_the_welcome_template() {
+        assert!(!RuleSet::default().events.entry_on);
+        let mut json = serde_json::to_value(RuleSet::default()).unwrap();
+        json["events"].as_object_mut().unwrap().remove("entry_on");
+        json["templates"].as_object_mut().unwrap().remove("entry");
+
+        let restored: RuleSet = serde_json::from_value(json).unwrap();
+        assert!(!restored.events.entry_on);
+        assert_eq!(restored.templates.entry, "{user_name}进入了直播间");
+        restored.validate().unwrap();
+
+        let mut configured = restored;
+        configured.events.entry_on = true;
+        configured.templates.entry = "{user_name}来啦".into();
+        let round_trip: RuleSet =
+            serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
+        assert!(round_trip.events.entry_on);
+        assert_eq!(round_trip.templates.entry, "{user_name}来啦");
+    }
+
+    #[test]
+    fn entry_switch_is_independent_of_other_event_switches() {
+        let mut rules = RuleSet::default();
+        rules.events.entry_on = true;
+        rules.events.danmaku_on = false;
+        rules.events.gift_on = false;
+        rules.events.free_gift_on = false;
+        rules.events.super_chat_on = false;
+        rules.events.guard_on = false;
+        let mut event = LiveEvent::danmaku(1, Some(7), "普通观众", "");
+        event.kind = EventKind::Entry;
+
+        assert_eq!(rules.filter_reason(&event), None);
+        let preview = rules.preview(&event, &[], &[]).unwrap();
+        assert_eq!(preview.final_text, "普通观众进入了直播间");
+        assert!(preview.has_playable_audio());
+        assert_eq!(preview.event, event);
+
+        rules.events.entry_on = false;
+        let preview = rules.preview(&event, &[], &[]).unwrap();
+        assert_eq!(preview.filtered_reason.as_deref(), Some("进场播报已关闭"));
+        assert!(preview.parts.is_empty());
+        assert!(!preview.has_playable_audio());
+        rules.events.danmaku_on = true;
+        assert_eq!(
+            rules.filter_reason(&LiveEvent::danmaku(1, Some(7), "普通观众", "你好")),
+            None
+        );
+    }
+
+    #[test]
+    fn entry_uses_username_readings_and_uid_binding_or_default_voice() {
+        let mut rules = RuleSet {
+            user_words: vec![Replacement {
+                from: "Alice".into(),
+                to: "小爱".into(),
+            }],
+            default_preset_id: Some("default".into()),
+            ..Default::default()
+        };
+        rules.events.entry_on = true;
+        let presets = vec![sample_voice("default"), sample_voice("uid")];
+        let bindings = vec![VoiceBinding {
+            platform: "bilibili".into(),
+            user_id: Some(7),
+            user_name: None,
+            legacy_user_name: None,
+            preset_id: "uid".into(),
+            enabled: true,
+        }];
+        let mut event = LiveEvent::danmaku(1, Some(7), "Alice", "");
+        event.kind = EventKind::Entry;
+        let preview = rules.preview(&event, &presets, &bindings).unwrap();
+        assert_eq!(preview.final_text, "小爱进入了直播间");
+        assert_eq!(preview.event.user_name, "Alice");
+        assert_eq!(preview.voice.as_ref().unwrap().id, "uid");
+        assert_eq!(preview.default_voice.as_ref().unwrap().id, "default");
+        assert!(preview.voice_from_binding);
+        assert!(preview.needs_tts());
+
+        event.user_id = Some(8);
+        let preview = rules.preview(&event, &presets, &bindings).unwrap();
+        assert_eq!(preview.voice.as_ref().unwrap().id, "default");
+        assert!(!preview.voice_from_binding);
+    }
+
+    #[test]
+    fn invalid_and_oversized_entry_templates_are_rejected_before_saving() {
+        let mut rules = RuleSet::default();
+        for invalid in ["欢迎{unknown}", "欢迎{user_name", "欢迎user_name}"] {
+            rules.templates.entry = invalid.into();
+            assert!(
+                matches!(
+                    rules.validate(),
+                    Err(RuleError::InvalidTemplate {
+                        event: "进场", ..
+                    })
+                ),
+                "{invalid:?}"
+            );
+        }
+        rules.templates.entry = "字".repeat(MAX_TEMPLATE_BYTES / "字".len() + 1);
+        assert_eq!(rules.validate(), Err(RuleError::TooLarge("播报模板")));
     }
 
     #[test]

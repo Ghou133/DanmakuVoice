@@ -289,6 +289,7 @@ SoVITS 模型路径	SoVITS model path
 弹幕	Chat message
 礼物	Gift
 大航海	Membership
+观众进场	Viewer entries
 观众名字	Viewer name
 输入用于预览的名字	Enter a name for the preview
 金额（元）	Amount (CNY)
@@ -941,6 +942,8 @@ TA 的声音	Their voice
 现在	Now
 用哔哩哔哩 App 扫一扫	Scan with the Bilibili app
 用哔哩哔哩 App 扫一扫，完成验证后会自动开播。	Scan with the Bilibili app. Streaming starts automatically after verification.
+用哔哩哔哩 App 扫一扫，完成验证后点击继续开播。	Scan with the Bilibili app, then select Continue streaming after verification.
+验证后仍需确认，请完成验证并重试开播。	Further verification is required. Complete it and try starting again.
 用过的音效	Recent sounds
 登录和密钥不会导出。音效文件需要另行保留。	Logins and keys are excluded. Keep a separate copy of your sound files.
 登录和密钥只存在这台电脑上，不会跟着备份导出。	Logins and keys stay on this computer and are excluded from backups.

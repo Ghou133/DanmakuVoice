@@ -44,6 +44,8 @@ use crate::audience::{AudienceSnapshot, run_audience};
 use crate::diagnostics::{self, DiagnosticCode};
 use crate::model::{EventKind, LiveEmote, LiveEvent};
 
+mod entry;
+
 const USER_AGENT_VALUE: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const LIVE_API: &str = "https://api.live.bilibili.com/";
 const ACCOUNT_API: &str = "https://api.bilibili.com/";
@@ -221,6 +223,16 @@ impl BiliSession {
             cookie.push_str(buvid3);
         }
         cookie
+    }
+
+    /// The same login as presented by the desktop client, whose cookie names
+    /// its installation's device as `buvid3` (`buvid3={0}; DedeUserID={1}` in
+    /// `bililive_secret.dll`) rather than a browser value from the QR login.
+    pub(crate) fn desktop_cookie_header(&self, device: &str) -> String {
+        format!(
+            "SESSDATA={}; bili_jct={}; DedeUserID={}; buvid3={device}",
+            self.sessdata, self.bili_jct, self.user_id
+        )
     }
 
     pub(crate) fn csrf(&self) -> &str {
@@ -1598,12 +1610,14 @@ pub fn decode_live_events(
     Ok(events)
 }
 
-/// Maps raw `DANMU_MSG`, `SEND_GIFT`, `SUPER_CHAT_MESSAGE` and `GUARD_BUY`
-/// payloads. Unknown commands are deliberately ignored.
+/// Maps supported chat, gift, guard and ordinary room-entry payloads.
+/// Entry effects, follows, shares and unknown commands are deliberately ignored.
 pub fn parse_live_event(room_id: u64, observed_at_ms: u64, value: &Value) -> Option<LiveEvent> {
     let cmd = value.get("cmd")?.as_str()?.split(':').next()?;
     let data = value.get("data");
     let mut event = match cmd {
+        "INTERACT_WORD" => entry::parse_json(room_id, data?)?,
+        "INTERACT_WORD_V2" => entry::parse_protobuf(room_id, data?)?,
         "DANMU_MSG" => {
             let info = value.get("info")?.as_array()?;
             let message = info.get(1)?.as_str()?;

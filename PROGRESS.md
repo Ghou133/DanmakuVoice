@@ -1,5 +1,79 @@
 # 唯一进度记录
 
+## 2026-10-27：开播反复人脸验证调查
+
+- 复核当前 `crates/engine/src/broadcast.rs`：开播使用 `pc_link`、动态获取直播姬版本与签名，调用 `room/v1/Room/startLive`；只有服务端返回 60024/60043 时进入人脸验证处理。该实现原本参考 Zarosmm/obs-bilibili-stream；上游目前同样调用此接口并处理人脸验证，不能据此声称其解决了重复验证。上游用户也曾报告插件要求验证而手机开播不要求：https://github.com/Zarosmm/obs-bilibili-stream/issues/12 。
+- 当前界面等待验证时最多两分钟、每五秒重新发起开播请求，返回新的验证信息会替换当前二维码；是否影响验证有效期或后续场次风控尚无服务端证据。此前 2026-10-03 的手动重试描述不代表现行界面行为。（**更正**：本轮重读 `crates/desktop/src/broadcast.rs` 与 `ui/app.js`，等待期间界面调用的是 `bili.broadcast.face.check`，即只轮询 `IsUserIdentifiedByFaceAuth`，不会每五秒重新调用 `startLive`；上述“每五秒重新发起开播请求”的说法不成立，保留原文以记录该更正。）
+- B站开放平台提供直播 OAuth 接入，但直播能力须单独申请报备：https://bilibili.apifox.cn/doc-7499516 。公开文档未证明它免除人脸验证。本次未修改开播协议或验证流程，也未使用真实账号开播、关播或验证；原因尚未确认，需相同账号、分区和环境下对比实际返回码及验证结果，避免收集 Cookie、推流码或验证链接。
+- 同轮补查发现 `Radekyspec/StartLive` 曾发布降低频繁扫脸的临时方案（请求参数、buvid、重新登录；作者仅报告两个账号短期改善），并在 1.1.0 发布说明列出新版 `v_voucher` 人脸识别支持：https://github.com/Radekyspec/StartLive/releases/tag/1.1.0 。这提供了继续对照开源实现的方向，不能概括为其他项目均无处理方案，也不能认定必须分析直播姬。具体源码差异和对本项目的实际效果仍待核实。
+
+### 2026-10-27 续二：审计后重做设备标识（取代下一节的实现部分）
+
+审计结论：下一节记录的实现有三个问题。一是它把 `finger/spi` 取到的**网页** buvid3（`…infoc`）配上直播姬 UA 发出去，而 StartLive 0.8.4 用的是应用形态 buvid，并且每个请求都加 `buvid` 请求头，这个头它没有发。二是它把标识存在账号会话里，登出、会话过期后重新扫码就会换成新设备。三是网络偶发失败会把回退值永久固定下来。另外，下一节说“调用序列与官方一致、只差客户端身份”，这个前提并不成立：`bililive_secret.dll` 里有 `passport.bilibili.com/api/v2/oauth2/access_token`、`data.token_info.access_token`，它的 Cookie 模板 `buvid3={0}; DedeUserID={1}` 里没有 SESSDATA，说明官方用 OAuth access_token 认证，本项目用的是网页扫码得到的 SESSDATA 加空 `access_key`。
+
+本轮修改：
+
+- 已撤回上一轮的会话级设备逻辑：`finger/spi` 请求、`BiliSession.buvid4`、`has/set_device_buvid`、`generated_device_buvid`、`ensure_bili_device`（启动、登录、开播前三处调用）及其测试。`bilibili.rs`、`app.rs`、`app_tests.rs` 只剩本会话之前就有的入场发言改动。
+- `crates/engine/src/broadcast.rs` 新增 `LivehimeDevice`：每个数据目录在本地生成一次，形态为 `<大写带连字符 UUID><PID>user`（即 `%s%duser`，与 StartLive `gen_buvid` 相同），不发任何注册请求。解析时严格校验格式，`Debug` 输出脱敏。
+- `crates/engine/src/storage.rs` 新增 `load_or_create_livehime_device()`：以 DPAPI 保护存入 `protected_secrets('livehime_device')`，与 B 站会话分开保存。登出（`clear_bili_session`）不会删除它；只有“清除全部数据”才会重置。存储值损坏时报 `DV-S49`，不会悄悄换成新值。配置导出与备份不包含它，沿用 `protected_secrets` 的既有规则。
+- 以直播姬身份发出的请求（startLive、人脸状态查询）现在带：`User-Agent: LiveHime/<版本> … build/<build> osVer/10.0_x86_64`、`buvid: <设备标识>` 请求头，以及 `Cookie: SESSDATA; bili_jct; DedeUserID; buvid3=<设备标识>`，不带 Origin/Referer，也不带扫码得到的网页 buvid3。网页身份的请求（房间信息、分区、改标题、下播、版本查询）和弹幕 WebSocket 不变。
+- 进程内还没有版本号时（例如重启后直接查人脸状态），会先查一次版本，因此直播姬身份的请求不会再落回 Chrome UA。版本缓存改成可注入：生产环境共用进程级缓存，每个测试夹具有自己的槽位，测试之间不再互相影响。
+- startLive 参数补上 StartLive 所带的 `type=2`，签名参数集合与其 `START_LIVE_AUTH_CSRF=True` 路径一致。
+
+验证（均在本机实际运行）：
+
+- `cargo fmt --all -- --check` 和 `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` 均通过。
+- `cargo test --offline --locked --workspace`：桌面 220 通过 / 4 忽略，引擎 349 通过 / 3 忽略，代理集成 1 通过，0 失败。照例按名称跳过 4 个需要创建符号链接的测试（本机进程缺少 `SeCreateSymbolicLinkPrivilege`）。桌面比上一轮少 3 个，是撤回的会话级设备测试。
+- 新增或改写的测试：
+  - `broadcast::tests::desktop_identity_reaches_the_face_check_with_the_announced_version_and_device`：startLive 和人脸查询逐字带 `buvid` 头、`buvid3=<设备>` Cookie 和 LiveHime UA，不带 Origin/Referer，也不泄出网页 buvid3；网页身份请求不带设备标识；人脸查询复用开播时取得的版本，不重复查询。
+  - `broadcast::tests::device_identity_is_the_desktop_clients_generated_shape`：生成值的形态，以及小写、无连字符、缺 PID、PID 过长、分号、全角数字等非法值都被拒绝。
+  - `broadcast::tests::face_status_uses_existing_room_and_never_starts_or_creates_a_challenge`：冷启动时先查一次版本，之后 4 次查询都用 LiveHime UA。
+  - `broadcast::tests::signed_start_fetches_current_version_and_returns_redacted_secrets`：增加对 `type=2` 和 `platform=pc_link` 的断言。
+  - `storage::tests::livehime_device_is_created_once_and_outlives_the_bili_session`：设备标识只生成一次，重开数据库和登出后不变，存储值损坏时报 `DV-S49`。
+- 没有用真实账号做任何验证，也没有重新构建 release。
+
+仍未解决：没有用真实账号开播。如果实播后仍每次返回 60024，可以基本排除设备标识这个原因；下一步应评估改用直播姬式的 OAuth access_token 登录。那是另一项较大的改动（登录流程、令牌刷新和存储都要变），本轮没有做。
+
+### 2026-10-27 续三：合并前审查与进场播报设置
+
+- 进场播报（2026-10-20 的后端改动）改为**默认关闭**：`events.entry_on` 默认值、以及旧配置缺少该字段时的默认值都改为 `false`；默认文案改为 `{user_name}进入了直播间`。设置 → 高级 → “播报哪些消息”新增“观众进场”开关，“播报模板”新增“观众进场”一行，可以自由编辑，并能一键恢复默认；“恢复默认”也会把这个开关关掉。英文文案为 “Viewer entries”。
+- 审查了今天上午其他 Agent 写的 60024 人脸状态轮询（`face.check`、`face_kind`、界面等待/重试、60043 改为手动继续）。Rust 端只在存在当前 60024 挑战且二维码还在时才查询，查询结果不改动房间状态，登出时会清空，未发现问题。界面端：重新渲染、切换面板、换分区都会取消旧的自动续播，查询通过后才重新开播，查询失败时清掉旧二维码并显示错误。`scripts/test-ui-broadcast.cjs` 在上午的改动后一直没跑通：其中“人脸面板打开时改分区”这一步需要点击被人脸面板遮住的标题，界面上做不到这个操作，因此删除了这一步，代码中对应的分区保护保留不动。上午那一节（“开播反复人脸验证调查”）写的“本次未修改开播协议或验证流程”，与这批实际代码不符，以本条为准。
+- 验证：`cargo fmt --all -- --check`、clippy `-D warnings`、`git diff --check` 均通过。Rust 全量测试（照例跳过 4 个符号链接测试）桌面 220、引擎 349、代理 1 通过，0 失败；`node --test` 198/198 通过。浏览器 UI 测试 `test-ui-broadcast` 15/15、`test-ui-lake-settings`（新增进场开关与模板断言）、`test-ui-lake-redesign` 13、`test-ui-lake` 21 全部通过。没有真实直播间、真实账号或物理出声的验证。
+
+### 2026-10-27 续：设备标识差异与本轮修改
+
+> 本节的实现部分已被上一节“续二”取代并撤回，这里只保留证据和当时的记录。
+
+**证据（静态与对照，均为本机实际取得）**
+
+- 直播姬 7.30.0.9821（`C:\Program Files\bililive\livehime`，以下为只读字符串/偏移证据）：`bililive_secret.dll` 中存在 `LiveHime/{0} os/Windows pc_app/livehime build/{1} osVer/{2}_{3}`（0xA8B250）作为其 HTTP User-Agent；`buvid3={0}; DedeUserID={1}`（0xAC94C8）、`Failed to read buvid from file`（0xAC93C8）、`Making a user-generated buvid`（0xAC94E8）、`%s%duser`（0xAC9508）表明它把 buvid **持久化到文件**、读不到时才用“UUID+PID+user”格式生成一次，并在 API Cookie 中带上 `buvid3`。同一 DLL 还含 `getHomePageLiveVersion`、`room/v1/Room/startLive`、`prelive/IsUserIdentifiedByFaceAuth`、`prelive/ReportFaceRecognition`、`prelive/PreCheck`、`set-area-tags`、`open-live-room`（解析 `data.need_face_auth`、`data.qr`）等，说明官方客户端的开播、验证流程与我们的调用序列一致，差异在**客户端身份**而非接口。
+- StartLive 0.8.4 的发布说明与 diff（`https://api.github.com/repos/Radekyspec/StartLive/compare/0.8.3...0.8.4`）：新增持久化 `app_settings.app_buvid = gen_buvid()`（`uuid4().upper()+pid+"user"`），每个请求加 `buvid` 头，并把 User-Agent 换成 `LiveHime/<版本> os/Windows pc_app/livehime build/<build> osVer/...`；发布说明称这是“降低频繁扫脸”的临时方案，并给出“扫脸→开播→立即下播→等 1–5 分钟→重复”的步骤，作者仅报告两个账号短期改善。
+- Zarosmm/obs-bilibili-stream（`src/bilibili_api.cpp`）与我们改动前一致：`Origin/Referer: link.bilibili.com` + Chrome UA、无 `buvid`、参数集为 room_id/area_v2/platform/backup_stream/csrf/csrf_token/build/version/ts；三参数对照说明本项目与之同源同缺口。
+- 实测匿名设备标识接口可用：`GET https://api.bilibili.com/x/frontend/finger/spi` 返回 `data.b_3`/`data.b_4`；本轮新增的在线只读探针 `bilibili::tests::device_buvid_online_probe` 通过，实际取得 buvid3 46 字符、buvid4 76 字符（只打印长度，不打印标识值）。
+
+**推断（未证实）**：B站把“已人脸核验”的豁免与账号+设备标识关联。本项目此前只从扫码响应的 Set-Cookie 偶然取 `buvid3`，多数情况下一个都没有，于是每次开播都被当作新设备；官方直播姬与 StartLive 都长期复用同一个 buvid，所以不会每次要求验证。该推断无法在离线环境证伪，需要真实账号实播验证。
+
+**本轮实际修改（离线可验证部分）**
+
+- `crates/engine/src/bilibili.rs`：`BiliSession` 增加 `buvid4`；新增 `has_device_buvid`/`set_device_buvid`（写入 Cookie 前重新校验长度与字符）、`QrLoginClient::device_buvid` 读取 `finger/spi`、`parse_device_buvid`、以及官方同形的 `generated_device_buvid()`（`<UUID 大写><PID>user`）；`cookie_header` 现在带 `buvid3` 与 `buvid4`；扫码 Set-Cookie 也会收集 `buvid4`。设备标识随会话进入既有 DPAPI 密文，不新增明文文件、不导出。
+- `crates/desktop/src/app.rs`：新增 `ensure_bili_device()`，在启动与登录后的 `refresh_bili_profile()` 中调用；会话已有标识时立即返回，缺失时优先取 `finger/spi`，该请求失败（离线/5 秒超时）时改用本地生成格式并照常持久化，因此不会停留在“每次都是新设备”。
+- `crates/desktop/src/broadcast.rs`：开播前再兜底调用一次 `ensure_bili_device()`，覆盖启动时离线、之后联网开播的情况。
+- `crates/engine/src/broadcast.rs`：`startLive` 与人脸状态查询改以 `ClientIdentity::Desktop` 发送 `LiveHime/<动态版本> os/Windows pc_app/livehime build/<动态 build> osVer/10.0_x86_64`，并且不再带浏览器的 `Origin/Referer`；`room/v1` 的房间信息、分区、改标题、下播与版本查询仍用原有网页身份。版本/构建立即缓存，供同一次开播流程的人脸轮询复用。签名参数补上官方签名器始终携带的空 `access_key` 字段。
+
+**验证（实际执行）**
+
+- `cargo fmt --all -- --check` 通过；`cargo clippy --offline --locked --workspace --all-targets -- -D warnings` 通过。
+- `cargo test --offline --locked --workspace`：桌面 223 通过、引擎 350 通过、代理集成 1 通过，0 失败；另有 4 个依赖创建符号链接的测试因当前进程缺少 `SeCreateSymbolicLinkPrivilege`（Win32 1314）在准备阶段失败，与本次改动无关，已按名称跳过并单独记录，不能用它们的状态推断产品行为。
+- 新增回归：`broadcast::tests::desktop_identity_header_reaches_the_face_check_with_the_announced_version`（断言 startLive 与人脸轮询都带动态 LiveHime UA、不带 Origin/Referer、仍带 Cookie；版本查询保持网页身份）、`broadcast::tests::announced_version_reaches_a_client_created_for_a_later_command`（每个开播命令各自新建客户端，人脸轮询仍使用启动时公布的版本）、`bilibili::tests::device_identity_is_validated_persisted_and_sent_as_cookies`、`bilibili::tests::fetched_and_generated_device_identities_stay_bounded`、`app::tests::stored_device_identity_is_reused_instead_of_registered_again`（已有标识时不再注册、不覆盖）、`app::tests::unreachable_device_endpoint_still_stores_one_stable_identity`（接口不可用时仍只保存一个生成标识，第二次不再改写）、`app::tests::late_device_reply_cannot_identify_a_logged_out_account`（登出后迟到的设备回复不会写回会话）。
+- 与本次改动同时保留的既有失败/受限记录：`app::broadcast` 的 OBS 夹具在整机并行测试时曾出现一次固定端口绑定失败，单独重跑 3 次均通过，属于测试夹具端口竞争，未改产品代码。
+- 本机 `cargo build --offline --locked --release -p danmakuvoice` 成功（2 分 23 秒），产物 `target/release/danmakuvoice.exe`，19,779,584 字节，SHA-256 `6812259B8C755EA271572590068E6955D8AD82E302CB736C03FA3C63BC14A074`。只是本机自测构建，未签名、未打包、未发布。
+
+**仍未完成（不能声称已解决）**
+
+- 没有用真实账号开播/关播，也没有验证服务端是否因此停止返回 60024。预期是升级后第一次开播仍可能需要扫脸一次（新设备标识首次出现），此后不应每次再要求；这只是待验证的预期。
+- 若实播仍每次返回 60024，下一步需要同一账号下的对照证据：开播前后端返回码、是否 60024/60043、是否带 `v_voucher`，以及直播姬同一时段是否也被要求验证。不要在 Issue 或日志中贴 Cookie、推流码或验证链接。
+- 60043（`v_voucher`，`/x/gaia-vgate/v2/validatePreCheck` + `dm_track`）仍未实现，遇到时仍提示改用官方直播姬；这与“每次都要验证”的问题不同，未在本轮处理。
+
 最新：2026-10-14 仓库维护与全面审查，见文末同名章节（含 Git 基线对齐、本轮修复与待办清单）。
 
 更新：2026-10-07（北京时间；UTC 2026-10-06）。本轮以本机最新未提交工作树为基线，在隔离副本完成审查、修复和测试，随后按用户要求安全合回 `E:\AITTS\DanmakuVoice`。用户既有修改和 Git index 保留，未覆盖既有发行包或个人配置，未提交、推送或发布。当前结果不是正式发行或实播验收。
@@ -1415,3 +1489,17 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 
 - 2026-10-20 完成 Partner Center 正式提交。实际后台显示 `Update in certification` / `Product update: In certification`，对应 Submission 5（`1152921505702175885`）：Submission 完成，Pre-processing 进行中，Certification 与 Publishing 尚未开始。页面明确显示通过认证后自动发布；当前商店在售仍为此前的 Submission 4，不能将本次 1.3.4.0 写为已上架。
 - 原始页面状态和截图保存在本机忽略目录 `target/release-0.3.4-20261020/store-submitted-dom.txt` 与 `store-submitted-confirmed.jpg`。本次验证覆盖构建、离线测试、原生隔离启动、素材和提交状态；真实签名商店包更新、SAC、物理音频、四服务在线合成、真实直播间及 OBS 推流仍需分别验收，不能由 CI 或送审成功代替。前述两项旧浏览器回归失败继续保留，不因 CI 成功而记成通过。
+
+## 2026-10-20 B站普通用户进场播报后端
+
+用户要求先实现普通用户进入直播间的播报，明确不改 OBS 叠加层 UI，并允许只读参考本机 `C:\Program Files\bililive\livehime`。本轮只改 Rust 后端、测试和现有文档，桌面与 OBS 的前端资源与本轮开始时一致；没有提交、推送、发布或替换已安装程序。
+
+- 协议依据：只读检查官方直播姬 `7.30.0.9821/bililive.dll` 内嵌的 `entry_effect.proto`、`user_basic.proto` 描述，核对 `InteractWord` 的 uid/uname/msg_type/timestamp/trigger_time/is_mystery/uinfo 字段编号及公共用户资料结构。DLL SHA-256 为 `c2dc9d34fe888dd2526d2b5734eb5692a5aa0d170fc75bcc2a6ca21fb7a7faf9`。程序有独立的 `INTERACT_WORD_V2` 与 `ENTRY_EFFECT` 命令，以及 `voice_broadcast_enter`、attention、guard 设置名。`data.pb` 的 base64 包装和 msg_type 语义另与公开 `blive-message-listener` 源码交叉核对。简短字段、偏移、来源链接证据在 `target/entry-backend-20261020/livehime-protocol-source.txt`；未访问账号文件、凭据或运行进程内存，未修改直播姬。
+- `EventKind::Entry` 独立于弹幕、礼物、醒目留言和上舰。`bilibili.rs` 接入旧 `INTERACT_WORD` 和新 `INTERACT_WORD_V2`，仅接受 `msg_type=1`；不要求勋章、大航海、消费或进场特效，关注、分享、`ENTRY_EFFECT` 等不生成进场语音。新 `bilibili/entry.rs` 只解码必要 protobuf 字段，沿用现有 base64 依赖，无新增依赖；限制为 64 KiB 解码体和固定嵌套层级，拒绝畸形长度、varint、wire type、UTF-8、控制字符和超长数据，未知字段安全跳过。直传、zlib、brotli 都进入现有收包链。
+- 公共资料优先使用受控显示字段，不读取 `origin_info` 回填原始身份。匿名、风控事件清除 UID 和身份事件 ID；稀疏风控资料不回填未遮罩的姓名或头像，缺少可用匿名姓名时用“神秘观众”。只有可靠 UID 加平台 trigger_time/timestamp 才生成稳定事件 ID，不按显示名伪造身份。
+- 规则新增 `events.entry_on`（默认 true，包括旧配置缺字段）和 `templates.entry`（默认 `欢迎{user_name}进入直播间`）。独立开关、模板长度/语法校验、保存和加载均已接通；欢迎语复用姓名读法、用户声音绑定和默认声音，仍受总 TTS 开关及现有调度队列控制。旧前端发送的 `rules.save` 若缺这两个字段，会保留已保存值，显式字段则正常更新；没有新增设置 UI，后续界面可通过现有 rules IPC 接入。
+- 防重复：同一房间的同一可靠 UID 在 30 秒内只接受一次进场（不因重复事件滑动延长）；稳定平台事件 ID 沿用 120 秒有界去重。未知 UID 不按相同名字合并。暂停期间的进场仍登记已见身份，恢复不补播旧消息；停止会话清空队列和会话去重状态。进场不参与礼物合并，也不会触发普通弹幕的空正文过滤。
+- OBS 隔离：Entry 不生成 overlay item 或 reading 状态；初次 Cards/Spine/SC 回放配额排除 Entry。内部 `recent_results` 按进场/其他事件各保留最多 100 条、总量最多 200，维持处理顺序，防止大量进场挤掉可恢复的弹幕历史。原始 `recent_events` 仍为 100 条，完整运行时历史机制不变。
+- 验证：新增 **24 项测试全部通过**，涵盖新旧协议、匿名/风控、压缩帧、畸形输入、独立开关、旧配置兼容、名字/音色、UID 冷却、暂停/停止、缓存边界及 OBS 回放隔离。协议定向 40/40、规则定向 21/21、事件管线定向 7/7；最终 `cargo fmt --all --check`、`cargo clippy --offline --locked --workspace --all-targets -- -D warnings`、`git diff --check` 通过，Node **198/198**。
+- 完整 `cargo test --offline --locked --workspace --no-fail-fast` 为 **565 通过、4 失败、10 忽略、0 筛除**。失败仍是 `embedded_ffmpeg::cache_directory_redirection_is_rejected`、`local_service::service_log_redirection_is_rejected_and_rotation_preserves_link_targets`、`diagnostics::redirected_log_file_is_rejected_before_open_or_clear`、`voice_library::linked_version_roots_are_not_scanned` 创建符号链接返回 Windows 1314；已核对这四个源文件与 HEAD 无差异。未跳过失败或更改权限来宣称全量通过。日志保存在 `target/entry-backend-20261020/` 的 `rust-workspace.log`、`clippy.log`、`fmt.log`、`node-tests.log` 和聚焦日志。
+- 验收边界：本次为静态协议来源核对及离线夹具/队列/IPC 验证，**尚未验证真实直播间入场推送、在线 TTS 或物理出声**，也没有重新构建 Release。只能播报 B站实际推送的入场事件，不从观众计数推断入场，也不保证平台为每一个进入者完整发送事件。本次不改线上版本或商店送审状态。

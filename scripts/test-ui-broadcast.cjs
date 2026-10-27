@@ -24,7 +24,7 @@ const state = {
   queue: { current: null, pending: [], history: [] }, rules: { default_preset_id: null, preferred_presets: {}, user_words: [] },
   connections: [], presets: [], bindings: [], assets: [], devices: [], local_services: {},
   account: { user_id: 42, name: '虚构主播' }, qr: { status: 'idle' }, status: {},
-  broadcast: { room: null, areas: [], has_stream_key: false, busy: false, face_image: null },
+  broadcast: { room: null, areas: [], has_stream_key: false, busy: false, face_image: null, face_kind: null },
   obs: { settings: { enabled: false, host: '127.0.0.1', port: 4455, auto_launch: true, executable: null }, has_password: false, status: { state: 'idle' }, detected: 'C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe', local: true },
   overlay: { settings: { enabled: true, style: 'spine', corner: 'top_left', scale: 1, vignette: .6, title: '今晚的弹幕', tagline: '', show_danmaku: true, show_gift: true, show_super_chat: true, show_guard: true, names: 'special', merge_duplicates: true, linger_seconds: 14, port: 47823, token: '0123456789abcdef0123456789abcdef' }, running: true, port: 47823, url: 'http://127.0.0.1:47823/overlay?token=0123456789abcdef0123456789abcdef', error: null, clients: [] },
 };
@@ -33,6 +33,9 @@ const calls = [];
 const checks = [];
 let failUpdate = false;
 let requireFace = false;
+let faceVerified = false;
+let faceKind = 60024;
+let failNextStart = false;
 let obsFailStart = false;
 let bitrate = 6000;
 let bitrateMode = "simple";
@@ -85,10 +88,19 @@ const until = async (predicate, timeout = 5000) => {
       } else if (action === 'bili.broadcast.start') {
         assert.equal(payload.confirmed, true);
         assert.equal(payload.area_id, state.broadcast.room.area_id);
+        if (failNextStart) {
+          failNextStart = false;
+          state.broadcast.has_stream_key = false; state.broadcast.face_image = null; state.broadcast.face_kind = null;
+          throw new Error('虚构开播连接失败 [DV-B01]');
+        }
         state.broadcast.has_stream_key = !requireFace;
         state.broadcast.face_image = requireFace ? 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS1sAAAAASUVORK5CYII=' : null;
+        state.broadcast.face_kind = requireFace ? faceKind : null;
         if (!requireFace) Object.assign(state.broadcast.room, { live_status: 1, live_since: Math.floor(Date.now() / 1000) - 3725 });
         if (!requireFace && state.obs.settings.enabled) result = { obs: obsFailStart ? { error: '无法连接 OBS（连接被拒绝）：请确认 OBS 已打开，并在「工具 → WebSocket 服务器设置」中开启服务器，端口与弹幕姬一致 [DV-OB01]' } : { outcome: 'started' } };
+      } else if (action === 'bili.broadcast.face.check') {
+        assert.equal(state.broadcast.face_kind, 60024);
+        result = { verified: faceVerified };
       } else if (action === 'bili.broadcast.credentials') {
         assert.equal(payload.confirmed, true);
         assert.equal(state.broadcast.has_stream_key, true);
@@ -230,14 +242,80 @@ const until = async (predicate, timeout = 5000) => {
     assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeCancel);
     assert.doesNotMatch(await page.locator('#onair').textContent(), /GOING LIVE/);
     check('closing face verification cancels its pending automatic continuation');
+
+    faceVerified = false;
+    await startFromPreparation();
+    await page.locator('#onair-panel .onair-face-qr img').waitFor();
+    const startsBeforeLanguageChange = actions().filter(action => action === 'bili.broadcast.start').length;
+    state.preferences.language = 'en'; state.config_revision++;
+    await page.waitForFunction(() => document.documentElement.lang === 'en');
+    faceVerified = true;
+    await page.waitForTimeout(5500);
+    assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeLanguageChange, 'rendering a new language cancels the old automatic start');
+    assert.equal(state.broadcast.room.live_status, 0);
+    state.preferences.language = 'zh-CN'; state.config_revision++;
+    await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');
+    check('changing language while a face challenge is open cancels the pending automatic start');
+
+    faceVerified = false;
+    await startFromPreparation();
+    await page.locator('#onair-panel .onair-face-qr img').waitFor();
+    const startsBeforeFailedRetry = actions().filter(action => action === 'bili.broadcast.start').length;
+    requireFace = false; failNextStart = true; faceVerified = true;
+    await page.locator('#toast.error').filter({ hasText: 'DV-B01' }).waitFor({ timeout: 10000 });
+    await page.locator('#onair-panel').waitFor({ state: 'hidden' });
+    assert.equal(await page.locator('#onair-panel .onair-face-qr img').count(), 0, 'old QR must be removed after a failed retry');
+    assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeFailedRetry + 1);
+    await page.waitForTimeout(5500);
+    assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeFailedRetry + 1, 'failed retry must not restart automatically');
+    assert.equal(state.broadcast.room.live_status, 0);
+    check('failed automatic retry clears its old QR, displays the error and does not keep retrying');
+
+    requireFace = true; faceVerified = false;
     await startFromPreparation();
     await page.locator('#onair-panel .onair-face-qr img').waitFor();
     const startsBeforeVerification = actions().filter(action => action === 'bili.broadcast.start').length;
+    const checksBeforeVerification = actions().filter(action => action === 'bili.broadcast.face.check').length;
+    const qrBeforeVerification = await page.locator('#onair-panel .onair-face-qr img').getAttribute('src');
+    await until(() => actions().filter(action => action === 'bili.broadcast.face.check').length > checksBeforeVerification, 8000);
+    assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeVerification);
+    assert.equal(await page.locator('#onair-panel .onair-face-qr img').getAttribute('src'), qrBeforeVerification);
     requireFace = false;
+    faceVerified = true;
     await page.locator('#onair[data-state="live"]').waitFor({ timeout: 10000 });
     await page.locator('#onair-panel').waitFor({ state: 'hidden' });
     assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeVerification + 1);
-    check('face verification waits with a QR and automatically continues after completion');
+    check('face verification keeps its QR, checks status without restarting and continues after completion');
+
+    await page.locator('#onair [data-action="broadcast.stop"]').click();
+    await page.locator('#onair[data-state="off"]').waitFor();
+    requireFace = true; faceVerified = true; faceKind = 60024;
+    await startFromPreparation();
+    await page.locator('#onair-panel .onair-face-qr img').waitFor();
+    const startsBeforeRepeatedChallenge = actions().filter(action => action === 'bili.broadcast.start').length;
+    await page.locator('#onair-panel [role="alert"]').filter({ hasText: '仍需确认' }).waitFor({ timeout: 10000 });
+    assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeRepeatedChallenge + 1);
+    await page.waitForTimeout(5500);
+    assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeRepeatedChallenge + 1);
+    requireFace = false;
+    await page.locator('#onair-panel [data-action="broadcast.start"]').click();
+    await page.locator('#onair[data-state="live"]').waitFor();
+    check('a renewed challenge after verification requires an explicit retry');
+
+    await page.locator('#onair [data-action="broadcast.stop"]').click();
+    await page.locator('#onair[data-state="off"]').waitFor();
+    requireFace = true; faceKind = 60043;
+    await startFromPreparation();
+    await page.locator('#onair-panel .onair-face-qr img').waitFor();
+    const checksBeforeManual = actions().filter(action => action === 'bili.broadcast.face.check').length;
+    const startsBeforeManual = actions().filter(action => action === 'bili.broadcast.start').length;
+    await page.waitForTimeout(5500);
+    assert.equal(actions().filter(action => action === 'bili.broadcast.face.check').length, checksBeforeManual);
+    assert.equal(actions().filter(action => action === 'bili.broadcast.start').length, startsBeforeManual);
+    requireFace = false;
+    await page.locator('#onair-panel [data-action="broadcast.start"]').click();
+    await page.locator('#onair[data-state="live"]').waitFor();
+    check('60043 waits for a user retry without using the 60024 status endpoint');
 
     await openObs();
     assert.equal(Math.round((await page.locator('#settings').boundingBox()).width), 908);

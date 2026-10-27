@@ -46,6 +46,8 @@ let browser;
 let server;
 let failNextTitle = false;
 let faceNextStart = false;
+let facePending = false;
+let faceVerified = false;
 const snapshots = () => structuredClone(state);
 const push = async () => { await page.evaluate(next => window.__lakePush(next), snapshots()); await page.waitForTimeout(50); };
 const actionCalls = action => calls.filter(call => call.action === action);
@@ -134,9 +136,12 @@ async function noOverlap(selectors, label) {
       } else if (action === 'bili.broadcast.start') {
         assert.equal(state.preferences.broadcast_console, true);
         assert.equal(payload.confirmed, true);
-        if (faceNextStart) { faceNextStart = false; state.broadcast.face_image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yN+UAAAAASUVORK5CYII='; }
-        else { state.broadcast.face_image = null; Object.assign(state.broadcast.room, { live_status: 1, live_since: Math.floor(Date.now() / 1000) - 1 }); }
+        if (faceNextStart) { faceNextStart = false; facePending = true; faceVerified = false; state.broadcast.face_kind = 60024; state.broadcast.face_image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yN+UAAAAASUVORK5CYII='; }
+        else { if (facePending) assert.equal(faceVerified, true, 'must not restart before verification'); facePending = false; state.broadcast.face_kind = null; state.broadcast.face_image = null; Object.assign(state.broadcast.room, { live_status: 1, live_since: Math.floor(Date.now() / 1000) - 1 }); }
         return { ...snapshots(), result: { obs: { outcome: state.broadcast.face_image ? 'needs_face' : 'started' } } };
+      } else if (action === 'bili.broadcast.face.check') {
+        assert.equal(facePending, true);
+        return { ...snapshots(), result: { verified: faceVerified } };
       } else if (action === 'bili.broadcast.stop') {
         assert.equal(payload.confirmed, true);
         // The fixture supplies the backend ledger result. SQLite reopen/count
@@ -395,7 +400,14 @@ async function noOverlap(selectors, label) {
     await page.locator('#onair-panel[data-mode="face"]').waitFor();
     assert.equal(await page.locator('#live-shell').getAttribute('data-scene'), 'face');
     assert.match(await page.locator('#onair-panel[data-mode="face"]').textContent(), /等待验证/);
+    const faceDeadline = Date.now() + 8000;
+    while (actionCalls('bili.broadcast.face.check').length === 0 && Date.now() < faceDeadline) await page.waitForTimeout(50);
+    assert.equal(actionCalls('bili.broadcast.face.check').length, 1, 'should check verification status');
+    assert.equal(actionCalls('bili.broadcast.start').length, 1, 'unverified status must not restart');
+    faceVerified = true;
     await page.locator('#onair [data-action="broadcast.stop"]').waitFor({ timeout: 8000 });
+    assert.equal(actionCalls('bili.broadcast.face.check').length, 2);
+    assert.equal(actionCalls('bili.broadcast.start').length, 2);
     assert.match(await page.locator('#onair').textContent(), /ON AIR/);
     assert.equal(state.live.running, true);
     state.live.received = 191;

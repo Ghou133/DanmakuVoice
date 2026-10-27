@@ -1594,6 +1594,14 @@ impl Application {
                 {
                     rules.events.filter_bilibili_emoticons = prior.events.filter_bilibili_emoticons;
                 }
+                // Older frontends do not know about backend-only entry speech.
+                // Saving another rule must preserve its switch and template.
+                if payload["rules"]["events"].get("entry_on").is_none() {
+                    rules.events.entry_on = prior.events.entry_on;
+                }
+                if payload["rules"]["templates"].get("entry").is_none() {
+                    rules.templates.entry = prior.templates.entry.clone();
+                }
                 if payload["rules"].get("preferred_presets").is_none() {
                     rules.preferred_presets = prior.preferred_presets.clone();
                 }
@@ -4052,6 +4060,17 @@ fn overlay_config(settings: &OverlaySettings) -> Value {
     })
 }
 
+/// Audio-only entry results must not consume an overlay replay slot.
+fn overlay_recent_start(results: &[ProcessedLiveEvent], limit: usize) -> usize {
+    results
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, result)| result.event.kind != EventKind::Entry)
+        .nth(limit.saturating_sub(1))
+        .map_or(0, |(index, _)| index)
+}
+
 /// First result to send. Initial spine replay is bounded by the hub capacity
 /// and survives idle time; cards retain their existing freshness window.
 fn overlay_feed_start(
@@ -4063,12 +4082,14 @@ fn overlay_feed_start(
 ) -> usize {
     let start = match previous {
         None if persistent_spine => {
-            let recent = results.len().saturating_sub(crate::overlay::REPLAY_ITEMS);
+            let recent = overlay_recent_start(results, crate::overlay::REPLAY_ITEMS);
             results
                 .iter()
                 .enumerate()
                 .rev()
-                .filter(|(_, result)| result.event.kind != EventKind::SuperChat)
+                .filter(|(_, result)| {
+                    !matches!(result.event.kind, EventKind::SuperChat | EventKind::Entry)
+                })
                 .take(crate::overlay::SPINE_REPLAY_ITEMS)
                 .last()
                 .map_or(recent, |(index, _)| recent.min(index))
@@ -4076,9 +4097,14 @@ fn overlay_feed_start(
         None => {
             let fresh = results
                 .iter()
-                .rposition(|result| now_ms.saturating_sub(result.event.observed_at_ms) > linger_ms)
-                .map_or(0, |index| index + 1);
-            fresh.max(results.len().saturating_sub(3))
+                .enumerate()
+                .rev()
+                .find(|(_, result)| {
+                    result.event.kind != EventKind::Entry
+                        && now_ms.saturating_sub(result.event.observed_at_ms) > linger_ms
+                })
+                .map_or(0, |(index, _)| index + 1);
+            fresh.max(overlay_recent_start(results, 3))
         }
         Some(None) => 0,
         Some(Some(last)) => results
@@ -4123,7 +4149,7 @@ fn publish_overlay_results(
         hub.ensure_session_reading_item(item, session, result.event.observed_at_ms, job_id);
     }
     let initial_spine = !cursor.primed && settings.style == OverlayStyle::Spine;
-    let recent = results.len().saturating_sub(crate::overlay::REPLAY_ITEMS);
+    let recent = overlay_recent_start(results, crate::overlay::REPLAY_ITEMS);
     for (index, result) in results.iter().enumerate().skip(start) {
         if initial_spine
             && result.event.kind == EventKind::SuperChat
@@ -4144,7 +4170,9 @@ fn publish_overlay_results(
 
 fn overlay_reading_job(current: Option<SpeechJob>, replay_after_ms: u64) -> Option<SpeechJob> {
     current.filter(|job| {
-        job.origin == JobOrigin::Live && job.preview.event.observed_at_ms >= replay_after_ms
+        job.origin == JobOrigin::Live
+            && job.preview.event.kind != EventKind::Entry
+            && job.preview.event.observed_at_ms >= replay_after_ms
     })
 }
 
@@ -4168,6 +4196,8 @@ fn overlay_item(result: &ProcessedLiveEvent, settings: &OverlaySettings) -> Opti
         EventKind::Gift => settings.show_gift,
         EventKind::SuperChat => settings.show_super_chat,
         EventKind::Guard => settings.show_guard,
+        // Entry announcements are audio-only until an overlay design is requested.
+        EventKind::Entry => false,
     };
     if !shown {
         return None;

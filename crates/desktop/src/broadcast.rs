@@ -9,7 +9,9 @@
 use super::{Application, confirmed, display, qr_url_png};
 use danmakuvoice_engine::{
     bilibili::{BiliError, BiliSession},
-    broadcast::{BroadcastClient, BroadcastRoom, LiveArea, PushCredentials, StartBroadcast},
+    broadcast::{
+        BroadcastClient, BroadcastRoom, LiveArea, LivehimeDevice, PushCredentials, StartBroadcast,
+    },
     obs::{self, ObsError, ObsPush, ObsSettings},
     obs_process,
 };
@@ -23,6 +25,7 @@ pub(super) struct BroadcastState {
     areas: Vec<LiveArea>,
     credentials: Option<PushCredentials>,
     face_image: Option<Zeroizing<String>>,
+    face_kind: Option<u64>,
     busy: bool,
     epoch: u64,
     cancel: CancellationToken,
@@ -32,7 +35,7 @@ impl BroadcastState {
     pub(super) fn view(&self) -> Value {
         json!({"room":self.room, "areas":self.areas, "busy":self.busy,
             "has_stream_key":self.credentials.is_some(),
-            "face_image":self.face_image.as_deref().map(|s| s.as_str())})
+            "face_image":self.face_image.as_deref().map(|s| s.as_str()), "face_kind": self.face_kind})
     }
 
     pub(super) fn invalidate(&mut self) {
@@ -195,6 +198,7 @@ enum Operation {
     Refreshed(BroadcastRoom, Vec<LiveArea>),
     Updated(BroadcastRoom),
     Started(BroadcastRoom, StartBroadcast),
+    FaceChecked(bool),
     Stopped(BroadcastRoom),
 }
 
@@ -223,6 +227,7 @@ impl Application {
             "bili.broadcast.refresh"
                 | "bili.broadcast.update"
                 | "bili.broadcast.start"
+                | "bili.broadcast.face.check"
                 | "bili.broadcast.stop"
                 | "bili.broadcast.credentials"
                 | "bili.broadcast.forget"
@@ -266,7 +271,7 @@ impl Application {
         if !self.lock()?.prefs.broadcast_console {
             return Err("请先在设置中启用开播台 [DV-B10]".into());
         }
-        let (session, epoch, cancel, obs_cancel) = {
+        let (session, device, epoch, cancel, obs_cancel, face_room) = {
             let mut state = self.lock()?;
             if state.broadcast.busy {
                 return Err("开播管理正在处理请求，请稍候 [DV-B10]".into());
@@ -279,16 +284,41 @@ impl Application {
             if state.bili_user_id != Some(session.user_id()) {
                 return Err("账号已变更，请重新登录后管理直播间 [DV-B10]".into());
             }
+            // One device per installation, kept across logout and re-login,
+            // so the account keeps opening rooms from a familiar device.
+            let device = state
+                .store
+                .load_or_create_livehime_device()
+                .map_err(display)?;
+            let face_room = if action == "bili.broadcast.face.check" {
+                if state.broadcast.face_kind != Some(60024) || state.broadcast.face_image.is_none()
+                {
+                    return Err("当前没有可查询的 60024 人脸验证 [DV-B10]".into());
+                }
+                Some(
+                    state
+                        .broadcast
+                        .room
+                        .as_ref()
+                        .ok_or("请先加载自己的开播信息 [DV-B10]")?
+                        .room_id,
+                )
+            } else {
+                None
+            };
             if action == "bili.broadcast.start" {
                 state.broadcast.credentials = None;
                 state.broadcast.face_image = None;
+                state.broadcast.face_kind = None;
             }
             state.broadcast.busy = true;
             (
                 session,
+                device,
                 state.broadcast.epoch,
                 state.broadcast.cancel.clone(),
                 state.obs_activity.cancel.clone(),
+                face_room,
             )
         };
         let _guard = BroadcastGuard(self.clone(), epoch);
@@ -339,7 +369,7 @@ impl Application {
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err("账号已变更，开播管理请求已取消；请刷新房间状态 [DV-B10]".into()),
-            result = perform(action, payload, &session) => result,
+            result = perform(action, payload, &session, device, face_room) => result,
         };
         let obs_push = {
             let mut state = self.lock()?;
@@ -360,6 +390,9 @@ impl Application {
                 }
             };
             let mut obs_push = None;
+            if let Operation::FaceChecked(verified) = result {
+                return Ok(json!({"verified": verified}));
+            }
             // start() may fill live_since from the local clock. Its live
             // transition is real, but only get_info establishes a start key.
             let authoritative_start = !matches!(&result, Operation::Started(..));
@@ -392,9 +425,11 @@ impl Application {
                             ));
                             state.broadcast.credentials = Some(credentials);
                             state.broadcast.face_image = None;
+                            state.broadcast.face_kind = None;
                         }
-                        StartBroadcast::FaceVerification(url) => {
+                        StartBroadcast::FaceVerification { url, code } => {
                             state.broadcast.face_image = Some(Zeroizing::new(qr_url_png(&url)?));
+                            state.broadcast.face_kind = Some(code);
                         }
                     }
                 }
@@ -402,7 +437,9 @@ impl Application {
                     state.broadcast.room = Some(room);
                     state.broadcast.credentials = None;
                     state.broadcast.face_image = None;
+                    state.broadcast.face_kind = None;
                 }
+                Operation::FaceChecked(_) => unreachable!("handled above"),
             }
             let observed_at = super::broadcast_sessions::observed_now();
             if authoritative_start {
@@ -938,8 +975,10 @@ async fn perform(
     action: &str,
     payload: &Value,
     session: &BiliSession,
+    device: LivehimeDevice,
+    face_room: Option<u64>,
 ) -> Result<Operation, BiliError> {
-    let client = BroadcastClient::new()?;
+    let client = BroadcastClient::new(device)?;
     match action {
         "bili.broadcast.refresh" => {
             let room = client.own_room(session).await?;
@@ -963,6 +1002,14 @@ async fn perform(
             let (room, result) = client.start(session, area).await?;
             Ok(Operation::Started(room, result))
         }
+        "bili.broadcast.face.check" => Ok(Operation::FaceChecked(
+            client
+                .face_verification_status(
+                    session,
+                    face_room.ok_or(BiliError::Protocol("没有待验证的直播间"))?,
+                )
+                .await?,
+        )),
         "bili.broadcast.stop" => Ok(Operation::Stopped(client.stop(session).await?)),
         _ => unreachable!("validated action"),
     }
@@ -1204,6 +1251,43 @@ mod tests {
             address: "rtmp://live-push.bilivideo.com/live/".into(),
             stream_key: "fictional-private-stream-key".into(),
         });
+    }
+
+    #[tokio::test]
+    async fn face_check_requires_active_60024_challenge_and_logout_clears_it() {
+        let (_directory, app) = isolated(false);
+        add_credentials(&app);
+        assert!(
+            app.dispatch("bili.broadcast.face.check", json!({}))
+                .await
+                .unwrap_err()
+                .contains("60024")
+        );
+        {
+            let mut state = app.lock().unwrap();
+            state.broadcast.face_kind = Some(60043);
+            state.broadcast.face_image = Some(Zeroizing::new("fictional-qr".into()));
+        }
+        let view = app.snapshot().unwrap();
+        assert_eq!(view["broadcast"]["face_kind"], 60043);
+        assert!(
+            app.dispatch("bili.broadcast.face.check", json!({}))
+                .await
+                .unwrap_err()
+                .contains("60024")
+        );
+        {
+            let mut state = app.lock().unwrap();
+            state.broadcast.face_kind = Some(60024);
+        }
+        let cancel = app.lock().unwrap().broadcast.cancel.clone();
+        app.dispatch("bili.logout", json!({"confirmed":true}))
+            .await
+            .unwrap();
+        assert!(cancel.is_cancelled());
+        let view = app.snapshot().unwrap();
+        assert!(view["broadcast"]["face_kind"].is_null());
+        assert!(view["broadcast"]["face_image"].is_null());
     }
 
     #[tokio::test]

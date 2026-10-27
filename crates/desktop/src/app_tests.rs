@@ -3422,6 +3422,70 @@ fn speech_restart_keeps_chat_in_order_and_bounded() {
 }
 
 #[tokio::test]
+async fn entry_rules_roundtrip_and_old_clients_preserve_backend_only_settings() {
+    let (directory, app) = isolated(true);
+    let before = app.snapshot().unwrap();
+    assert_eq!(before["rules"]["events"]["entry_on"], false);
+    assert_eq!(
+        before["rules"]["templates"]["entry"],
+        "{user_name}进入了直播间"
+    );
+    let mut rules = before["rules"].clone();
+    rules["events"]["entry_on"] = json!(false);
+    rules["templates"]["entry"] = json!("欢迎回来，{user_name}");
+    let saved = app
+        .dispatch("rules.save", json!({"rules":rules}))
+        .await
+        .unwrap();
+    assert_eq!(saved["rules"]["events"]["entry_on"], false);
+    assert_eq!(
+        saved["rules"]["templates"]["entry"],
+        "欢迎回来，{user_name}"
+    );
+    assert_eq!(saved["overlay"], before["overlay"]);
+
+    drop(app);
+    let reopened = Application::new(directory.path().to_owned(), true).unwrap();
+    let mut old = reopened.snapshot().unwrap()["rules"].clone();
+    assert_eq!(old["events"]["entry_on"], false);
+    assert_eq!(old["templates"]["entry"], "欢迎回来，{user_name}");
+    old["events"].as_object_mut().unwrap().remove("entry_on");
+    old["templates"].as_object_mut().unwrap().remove("entry");
+    old["events"]["danmaku_on"] = json!(false);
+    let retained = reopened
+        .dispatch("rules.save", json!({"rules":old}))
+        .await
+        .unwrap();
+    assert_eq!(retained["rules"]["events"]["entry_on"], false);
+    assert_eq!(
+        retained["rules"]["templates"]["entry"],
+        "欢迎回来，{user_name}"
+    );
+    assert_eq!(retained["rules"]["events"]["danmaku_on"], false);
+
+    let mut explicit = retained["rules"].clone();
+    explicit["events"]["entry_on"] = json!(true);
+    explicit["templates"]["entry"] = json!("{user_name}来啦");
+    let enabled = reopened
+        .dispatch("rules.save", json!({"rules":explicit}))
+        .await
+        .unwrap();
+    assert_eq!(enabled["rules"]["events"]["entry_on"], true);
+    assert_eq!(enabled["rules"]["templates"]["entry"], "{user_name}来啦");
+    assert_eq!(enabled["rules"]["events"]["danmaku_on"], false);
+    drop(reopened);
+    let reopened = Application::new(directory.path().to_owned(), true).unwrap();
+    assert_eq!(
+        reopened.snapshot().unwrap()["rules"]["events"]["entry_on"],
+        true
+    );
+    assert_eq!(
+        reopened.snapshot().unwrap()["rules"]["templates"]["entry"],
+        "{user_name}来啦"
+    );
+}
+
+#[tokio::test]
 async fn overlay_switch_server_items_and_token_reset_stay_local() {
     let (directory, app) = isolated(true);
     let first = app.snapshot().unwrap();
@@ -3536,6 +3600,164 @@ fn overlay_items_follow_switches_and_hide_names_in_the_app() {
     let demo = overlay_demo_item("danmaku", &settings).unwrap();
     assert_eq!(demo["demo"], true);
     assert!(demo.get("job_id").is_none());
+}
+
+#[test]
+fn entry_speech_does_not_publish_obs_items_or_danmaku_reading_state() {
+    let settings = OverlaySettings::default();
+    let mut arrival = LiveEvent::danmaku(1, Some(7), "新观众", "");
+    arrival.kind = EventKind::Entry;
+    arrival.observed_at_ms = 100;
+    let entry_result = ProcessedLiveEvent {
+        event: arrival.clone(),
+        outcome: LiveEventOutcome::Enqueued { job_id: 3 },
+    };
+    assert!(overlay_item(&entry_result, &settings).is_none());
+    let reading = SpeechJob {
+        id: 3,
+        origin: JobOrigin::Live,
+        preview: RulePreview {
+            event: arrival,
+            filtered_reason: None,
+            final_text: "欢迎新观众进入直播间".into(),
+            parts: Vec::new(),
+            voice: None,
+            default_voice: None,
+            voice_from_binding: false,
+            pending_legacy_binding: false,
+        },
+        prepared: None,
+    };
+    assert!(overlay_reading_job(Some(reading), 100).is_none());
+    let mut chat = LiveEvent::danmaku(1, Some(7), "新观众", "真正的弹幕");
+    chat.observed_at_ms = 101;
+    let results = [
+        entry_result,
+        ProcessedLiveEvent {
+            event: chat,
+            outcome: LiveEventOutcome::Enqueued { job_id: 4 },
+        },
+    ];
+    let hub = OverlayHub::new();
+    publish_overlay_results(
+        &hub,
+        &settings,
+        &mut OverlayCursor::default(),
+        &results,
+        102,
+        (0, 0),
+        Some(3),
+    );
+    let replay = hub.replay_snapshot();
+    let items = replay["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["kind"], "danmaku");
+    assert_eq!(items[0]["message"], "真正的弹幕");
+    assert_eq!(items[0]["job_id"], 4);
+    assert!(replay["reading"].is_null());
+}
+
+#[test]
+fn overlay_card_initial_replay_ignores_entries_when_selecting_three_visible_results() {
+    let result = |kind, text: &str, at| {
+        let mut event = LiveEvent::danmaku(1, Some(7), "观众", text);
+        event.kind = kind;
+        event.observed_at_ms = at;
+        ProcessedLiveEvent {
+            event,
+            outcome: LiveEventOutcome::DisplayOnly,
+        }
+    };
+    let mut results = vec![
+        result(EventKind::Danmaku, "旧弹幕", 1_000),
+        result(EventKind::Danmaku, "一", 50_000),
+        result(EventKind::Danmaku, "二", 51_000),
+        result(EventKind::Danmaku, "三", 52_000),
+        result(EventKind::SuperChat, "新醒目留言", 53_000),
+    ];
+    results.extend((0..20).map(|index| result(EventKind::Entry, "进入直播间", 54_000 + index)));
+    assert_eq!(overlay_feed_start(&results, None, 60_000, 14_000, false), 2);
+    let hub = OverlayHub::new();
+    hub.set_config(json!({"style":"card"}));
+    publish_overlay_results(
+        &hub,
+        &OverlaySettings {
+            style: OverlayStyle::Card,
+            ..Default::default()
+        },
+        &mut OverlayCursor::default(),
+        &results,
+        60_000,
+        (0, 0),
+        None,
+    );
+    let replay = hub.replay_snapshot();
+    let items = replay["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["message"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["二", "三", "新醒目留言"]
+    );
+    assert_eq!(items[2]["kind"], "super_chat");
+    assert!(items.iter().all(|item| item["kind"] != "entry"));
+}
+
+#[test]
+fn overlay_spine_initial_replay_entries_do_not_displace_history_or_fresh_super_chat() {
+    let result = |kind, text: String, at| {
+        let mut event = LiveEvent::danmaku(1, Some(7), "观众", &text);
+        event.kind = kind;
+        event.observed_at_ms = at;
+        ProcessedLiveEvent {
+            event,
+            outcome: LiveEventOutcome::DisplayOnly,
+        }
+    };
+    let mut results: Vec<_> = (1..=20)
+        .map(|index| result(EventKind::Danmaku, format!("弹幕{index}"), index))
+        .collect();
+    results.push(result(EventKind::SuperChat, "已过期".into(), 30));
+    results.extend((1..=14).map(|index| {
+        result(
+            EventKind::SuperChat,
+            format!("醒目留言{index}"),
+            599_000 + index,
+        )
+    }));
+    results.extend(
+        (0..20).map(|index| result(EventKind::Entry, "进入直播间".into(), 599_100 + index)),
+    );
+    let hub = OverlayHub::new();
+    hub.set_config(json!({"style":"spine"}));
+    publish_overlay_results(
+        &hub,
+        &OverlaySettings::default(),
+        &mut OverlayCursor::default(),
+        &results,
+        600_000,
+        (0, 0),
+        None,
+    );
+    let replay = hub.replay_snapshot();
+    let items = replay["items"].as_array().unwrap();
+    let chat: Vec<_> = items
+        .iter()
+        .filter(|item| item["kind"] == "danmaku")
+        .collect();
+    let super_chat: Vec<_> = items
+        .iter()
+        .filter(|item| item["kind"] == "super_chat")
+        .collect();
+    assert_eq!(chat.len(), crate::overlay::SPINE_REPLAY_ITEMS);
+    assert_eq!(chat[0]["message"], "弹幕9");
+    assert_eq!(chat.last().unwrap()["message"], "弹幕20");
+    assert_eq!(super_chat.len(), crate::overlay::REPLAY_ITEMS);
+    assert_eq!(super_chat[0]["message"], "醒目留言3");
+    assert_eq!(super_chat.last().unwrap()["message"], "醒目留言14");
+    assert_eq!(items.len(), chat.len() + super_chat.len());
 }
 
 #[test]

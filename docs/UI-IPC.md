@@ -176,6 +176,26 @@ is a test-only process flag: network commands reject with a clear error.
 | `migration.cancel` | `{}` |
 | `data.clear` | `{confirmed:true}` clears WebView2 profile and managed app data, preserves unknown/external files and returns fresh onboarding |
 
+Ordinary Bilibili room entry is normalized as `LiveEvent.kind:"entry"` from
+`INTERACT_WORD` or `INTERACT_WORD_V2` with `msg_type:1`. Follow/share notifications
+and `ENTRY_EFFECT` are not entry speech sources. Entries use the existing live
+speech queue, global TTS switch, username readings and voice bindings.
+`RuleSet.events.entry_on` defaults to `false` (there is no settings UI for it
+yet), and `RuleSet.templates.entry`
+defaults to `{user_name}进入了直播间`, including when loading older saved rules.
+`rules.save` preserves these two saved fields when an older frontend omits them;
+an explicit value updates them. They can be inspected and changed through the
+existing rules IPC; this backend change adds no UI controls.
+Repeated entries for the same confirmed UID in the same room are suppressed for
+30 seconds; users without a confirmed UID are not grouped by display name.
+Stable platform entry IDs are also subject to the existing 120-second replay
+filter. Entry speech is excluded from OBS overlay items and reading state.
+The internal processed-result cache retains at most 100 entry results and 100
+other results, in their original processing order; entry bursts and initial
+overlay replay quotas cannot displace retained chat or Super Chat results.
+Only entries delivered by Bilibili can be announced; the receiver does not infer
+arrivals from audience counts or promise complete reporting of every viewer.
+
 The frontend edits serialized engine models directly. Connection settings use
 `{provider:"dots"|"gpt_sovits",endpoint,timeout_secs}` or
 `{provider:"doubao"|"fish_audio",timeout_secs}`. Presets include
@@ -239,6 +259,7 @@ Broadcast commands (independent of chat reception and OBS media output):
 | `bili.broadcast.refresh` | `{}` | Resolve the authenticated account's own room and current areas. |
 | `bili.broadcast.update` | `{confirmed:true,title,area_id}` | Update the title and valid subcategory on Bilibili. |
 | `bili.broadcast.start` | `{confirmed:true,area_id}` | Fetch current desktop version and sign the start request; retain push credentials or show a face-verification QR. With the OBS link on, first start a local OBS when `auto_launch` is on and none runs; after credentials arrive, wait for it, write them to OBS as a custom RTMP service and start streaming: `result:{obs:{outcome:"started"\|"starting"\|"already_streaming",launched}}` or `result:{obs:{error,launched}}` (the room stays open). |
+| `bili.broadcast.face.check` | `{}` | For an active 60024 challenge, query verification status for the authenticated account and its current room; return `result:{verified:boolean}` without creating another challenge or starting the room. 60043 is not eligible for this status query. |
 | `bili.broadcast.stop` | `{confirmed:true}` | Close the own room; preserve chat/TTS reception. With the OBS link on, first stop the OBS stream (best effort): `result:{obs:{outcome:"stopped"\|"stopping"\|"not_streaming"}}` or `result:{obs:{error}}`. The UI no longer asks for confirmation; `confirmed:true` stays the IPC contract. |
 | `bili.broadcast.credentials` | `{confirmed:true}` | Transient `result:{address,stream_key}` for explicit reveal/copy only. |
 | `bili.broadcast.forget` | `{}` | Cancel pending management and clear retained push credentials and face QR; do not close the room. |
@@ -267,7 +288,7 @@ While the overlay is enabled, a process-lifetime recovery task checks missing OB
 
 `received_emotes_error` is `null` or the sanitized current receive-session personal metadata read error. Current-account, current-room platform metadata enriches `live.events[].emotes` before speech rules run, including personal comment markers delivered without native images. The raw message remains unchanged; only exact known markers count toward the standalone Bilibili emote filter. Refresh can add images to retained events without altering past outcomes or requeuing speech. Queue items carry their original `event` for live jobs, and `null` for auditions, so renderers never infer image associations from names or speech text.
 
-The public `broadcast` snapshot has `{room,areas,busy,has_stream_key,face_image,last_session,session_active}`. `room` contains
+The public `broadcast` snapshot has `{room,areas,busy,has_stream_key,face_image,face_kind,last_session,session_active}`. `face_kind` is the current challenge code (60024 or 60043), or `null`; the verification URL and tokens are never included. For 60024, the UI checks status while the QR is shown, and makes at most one automatic start request once verification is confirmed. A renewed challenge requires an explicit retry. For legacy 60043, the UI offers a manual continuation; 60043 with `risk_extra.v_voucher` is explicitly reported as unsupported rather than showing an unrelated QR. `room` contains
 `{room_id,title,parent_area_id,area_id,live_status,live_since}`; `live_since` is Unix seconds from Bilibili's
 `live_time` (UTC+8) while `live_status` is 1, otherwise `null`, and only drives the elapsed-time display; `areas` contains `{id,name,children:[{id,name}]}`.
 `last_session` is `null` or `{started_at,observed_started_at,ended_observed_at,messages,seconds}`. Times are Unix seconds;

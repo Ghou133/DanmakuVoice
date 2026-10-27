@@ -36,6 +36,7 @@ use crate::{
 /// Backpressure reaches the room receiver when configuration or playback
 /// cannot keep up. A disconnected receiver causes the room task to exit.
 pub const LIVE_EVENT_CHANNEL_CAPACITY: usize = 128;
+/// Raw event limit and the per-class processed result limit.
 pub const LIVE_RECENT_EVENT_LIMIT: usize = 100;
 pub(crate) const MAX_LIVE_EVENT_BYTES: usize = 16 * 1024;
 
@@ -89,7 +90,11 @@ pub struct LiveSnapshot {
     pub errors: u64,
     pub emote_lookup_error: Option<String>,
     pub last_failure: Option<LiveFailure>,
+    /// Most recent raw events, at most `LIVE_RECENT_EVENT_LIMIT` in total.
     pub recent_events: Vec<LiveEvent>,
+    /// Keeps up to `LIVE_RECENT_EVENT_LIMIT` entries and the same number of
+    /// other results, retaining their global processing order. Entry bursts
+    /// must not evict the visible events needed to restore an OBS overlay.
     pub recent_results: Vec<ProcessedLiveEvent>,
 }
 
@@ -943,7 +948,7 @@ fn record_processed(
                 state.last_failure = Some(failure);
             }
         }
-        push_bounded(
+        push_processed_bounded(
             &mut state.recent_results,
             ProcessedLiveEvent { event, outcome },
         )
@@ -956,6 +961,24 @@ fn record_processed(
 fn push_bounded<T>(items: &mut Vec<T>, item: T) {
     if items.len() == LIVE_RECENT_EVENT_LIMIT {
         items.remove(0);
+    }
+    items.push(item);
+}
+
+fn push_processed_bounded(items: &mut Vec<ProcessedLiveEvent>, item: ProcessedLiveEvent) {
+    let is_entry = item.event.kind == EventKind::Entry;
+    let mut oldest = None;
+    let mut count = 0;
+    for (index, existing) in items.iter().enumerate() {
+        if (existing.event.kind == EventKind::Entry) == is_entry {
+            oldest.get_or_insert(index);
+            count += 1;
+        }
+    }
+    if count >= LIVE_RECENT_EVENT_LIMIT
+        && let Some(index) = oldest
+    {
+        items.remove(index);
     }
     items.push(item);
 }
@@ -1063,7 +1086,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        let rules = RuleSet {
+        let mut rules = RuleSet {
             default_preset_id: Some("default".into()),
             templates: EventTemplates {
                 danmaku: "old:{message}".into(),
@@ -1071,6 +1094,8 @@ mod tests {
             },
             ..Default::default()
         };
+        // Entry speech is off by default; these fixtures exercise it.
+        rules.events.entry_on = true;
         store.save_rules(&rules).unwrap();
         store
             .save_binding(
@@ -1176,6 +1201,124 @@ mod tests {
         event
     }
 
+    fn entry(user_id: u64, user_name: &str, event_id: &str) -> LiveEvent {
+        let mut event = LiveEvent::danmaku(42, Some(user_id), user_name, "");
+        event.kind = EventKind::Entry;
+        event.platform_event_id = Some(event_id.into());
+        event
+    }
+
+    fn numbered_event(sequence: usize, kind: EventKind) -> LiveEvent {
+        let mut event = LiveEvent::danmaku(42, Some(7), "Alice", &sequence.to_string());
+        event.kind = kind;
+        event.observed_at_ms = sequence as u64;
+        event
+    }
+
+    #[test]
+    fn processed_retention_entry_flood_preserves_all_recent_non_entry_events() {
+        let (updates, _) = watch::channel(LiveSnapshot::default());
+        for sequence in 0..LIVE_RECENT_EVENT_LIMIT {
+            record_processed(
+                &updates,
+                numbered_event(sequence, EventKind::Danmaku),
+                LiveEventOutcome::DisplayOnly,
+            );
+        }
+        for sequence in LIVE_RECENT_EVENT_LIMIT..11 * LIVE_RECENT_EVENT_LIMIT {
+            record_processed(
+                &updates,
+                numbered_event(sequence, EventKind::Entry),
+                LiveEventOutcome::DisplayOnly,
+            );
+        }
+        let snapshot = updates.borrow();
+        let results = &snapshot.recent_results;
+        assert_eq!(results.len(), 2 * LIVE_RECENT_EVENT_LIMIT);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.event.observed_at_ms)
+                .collect::<Vec<_>>(),
+            (0..LIVE_RECENT_EVENT_LIMIT)
+                .chain(10 * LIVE_RECENT_EVENT_LIMIT..11 * LIVE_RECENT_EVENT_LIMIT)
+                .map(|sequence| sequence as u64)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            results[..LIVE_RECENT_EVENT_LIMIT]
+                .iter()
+                .all(|result| result.event.kind == EventKind::Danmaku)
+        );
+        assert!(
+            results[LIVE_RECENT_EVENT_LIMIT..]
+                .iter()
+                .all(|result| result.event.kind == EventKind::Entry)
+        );
+    }
+
+    #[test]
+    fn processed_retention_interleaved_classes_keep_both_limits_and_global_order() {
+        let (updates, _) = watch::channel(LiveSnapshot::default());
+        for sequence in 0..6 * LIVE_RECENT_EVENT_LIMIT {
+            let kind = match sequence % 8 {
+                1 => EventKind::Danmaku,
+                3 => EventKind::Gift,
+                5 => EventKind::SuperChat,
+                7 => EventKind::Guard,
+                _ => EventKind::Entry,
+            };
+            record_processed(
+                &updates,
+                numbered_event(sequence, kind),
+                LiveEventOutcome::DisplayOnly,
+            );
+        }
+        let snapshot = updates.borrow();
+        let results = &snapshot.recent_results;
+        assert_eq!(results.len(), 2 * LIVE_RECENT_EVENT_LIMIT);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.event.kind == EventKind::Entry)
+                .count(),
+            LIVE_RECENT_EVENT_LIMIT
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.event.observed_at_ms)
+                .collect::<Vec<_>>(),
+            (4 * LIVE_RECENT_EVENT_LIMIT..6 * LIVE_RECENT_EVENT_LIMIT)
+                .map(|sequence| sequence as u64)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn processed_retention_without_entries_keeps_original_hundred_result_limit() {
+        let (updates, _) = watch::channel(LiveSnapshot::default());
+        for sequence in 0..3 * LIVE_RECENT_EVENT_LIMIT {
+            record_processed(
+                &updates,
+                numbered_event(sequence, EventKind::Danmaku),
+                LiveEventOutcome::DisplayOnly,
+            );
+        }
+        let snapshot = updates.borrow();
+        assert_eq!(snapshot.recent_results.len(), LIVE_RECENT_EVENT_LIMIT);
+        assert_eq!(
+            snapshot
+                .recent_results
+                .iter()
+                .map(|result| result.event.observed_at_ms)
+                .collect::<Vec<_>>(),
+            (2 * LIVE_RECENT_EVENT_LIMIT..3 * LIVE_RECENT_EVENT_LIMIT)
+                .map(|sequence| sequence as u64)
+                .collect::<Vec<_>>()
+        );
+    }
+
     async fn wait_for_processed(controller: &LiveController, count: usize) {
         let mut status = controller.subscribe();
         timeout(Duration::from_secs(3), async {
@@ -1188,6 +1331,192 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_entry_uses_welcome_template_and_existing_voice_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = configure_store(dir.path());
+        store
+            .save_live_settings(&LiveSettings {
+                room_id: Some(42),
+                gift_merge: GiftMergeSettings {
+                    enabled: true,
+                    initial_seconds: 30.0,
+                    increment_seconds: 0.0,
+                    maximum_seconds: 30.0,
+                },
+            })
+            .unwrap();
+        let (jobs_tx, mut jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: false,
+        }));
+        scheduler.start().await.unwrap();
+        let controller = LiveController::new(dir.path(), scheduler, None).unwrap();
+        let events = controller.start_offline(42).await.unwrap();
+
+        for (uid, name, id, voice, bound) in [
+            (7, "Alice", "entry-bound", "bound", true),
+            (8, "Bob", "entry-default", "default", false),
+        ] {
+            events.send(entry(uid, name, id)).await.unwrap();
+            let job = timeout(Duration::from_secs(3), jobs_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("entry did not enqueue: {:?}", controller.snapshot()))
+                .unwrap();
+            assert_eq!(job.origin, JobOrigin::Live);
+            assert_eq!(job.preview.event.kind, EventKind::Entry);
+            assert_eq!(job.preview.final_text, format!("{name}进入了直播间"));
+            assert_eq!(job.preview.voice.as_ref().unwrap().id, voice);
+            assert_eq!(job.preview.voice_from_binding, bound);
+            assert_eq!(job.preview.event.price_yuan, 0.0);
+            assert!(job.preview.event.guard_name.is_empty());
+            assert!(job.prepared.is_some());
+        }
+        wait_for_enqueued(&controller, 2).await;
+        let snapshot = controller.snapshot();
+        assert_eq!(
+            (snapshot.received, snapshot.enqueued, snapshot.errors),
+            (2, 2, 0)
+        );
+        controller.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn entry_switch_and_template_reload_independently_of_danmaku() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = configure_store(dir.path());
+        let mut rules = store.load_rules().unwrap();
+        rules.events.entry_on = false;
+        store.save_rules(&rules).unwrap();
+        let (jobs_tx, mut jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: false,
+        }));
+        scheduler.start().await.unwrap();
+        let controller = LiveController::new(dir.path(), scheduler, None).unwrap();
+        let events = controller.start_offline(42).await.unwrap();
+
+        events
+            .send(entry(7, "Alice", "entry-disabled"))
+            .await
+            .unwrap();
+        events
+            .send(LiveEvent::danmaku(42, Some(7), "Alice", "still speaking"))
+            .await
+            .unwrap();
+        let danmaku = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(danmaku.preview.event.kind, EventKind::Danmaku);
+        assert_eq!(danmaku.preview.final_text, "old:still speaking");
+        wait_for_processed(&controller, 2).await;
+        assert_eq!(
+            controller.snapshot().recent_results[0].outcome,
+            LiveEventOutcome::Filtered
+        );
+        assert_eq!(controller.snapshot().enqueued, 1);
+
+        rules.events.entry_on = true;
+        rules.templates.entry = "欢迎回来，{user_name}".into();
+        store.save_rules(&rules).unwrap();
+        events.send(entry(8, "Bob", "entry-enabled")).await.unwrap();
+        let welcome = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(welcome.preview.event.kind, EventKind::Entry);
+        assert_eq!(welcome.preview.final_text, "欢迎回来，Bob");
+        wait_for_enqueued(&controller, 2).await;
+        assert_eq!(controller.snapshot().errors, 0);
+        assert!(jobs_rx.try_recv().is_err());
+        controller.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn entry_pause_resume_and_stop_discard_old_speech_without_replaying_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let _store = configure_store(dir.path());
+        let (jobs_tx, mut jobs_rx) = mpsc::channel(4);
+        let scheduler = scheduler::spawn(Arc::new(CaptureExecutor {
+            jobs: jobs_tx,
+            wait_for_cancel: true,
+        }));
+        scheduler.start().await.unwrap();
+        let controller = LiveController::new(dir.path(), scheduler.clone(), None).unwrap();
+        let events = controller.start_offline(42).await.unwrap();
+        events
+            .send(entry(7, "Alice", "entry-speaking"))
+            .await
+            .unwrap();
+        let speaking = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(speaking.preview.final_text, "Alice进入了直播间");
+        events.send(entry(8, "Bob", "entry-pending")).await.unwrap();
+        wait_for_enqueued(&controller, 2).await;
+        controller.set_tts_enabled(false).await.unwrap();
+        let queue = scheduler.state().borrow().clone();
+        assert!(queue.current.is_none());
+        assert!(queue.pending.is_empty());
+        assert!(queue.accepting);
+
+        let silent = entry(9, "Carol", "entry-while-paused");
+        events.send(silent.clone()).await.unwrap();
+        wait_for_processed(&controller, 3).await;
+        assert_eq!(
+            controller.snapshot().recent_results[2].outcome,
+            LiveEventOutcome::DisplayOnly
+        );
+        controller.set_tts_enabled(true).await.unwrap();
+        events.send(silent).await.unwrap();
+        events
+            .send(entry(10, "Dave", "entry-after-resume"))
+            .await
+            .unwrap();
+        let resumed = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.preview.final_text, "Dave进入了直播间");
+        wait_for_enqueued(&controller, 3).await;
+        assert_eq!(controller.snapshot().received, 5);
+        assert!(jobs_rx.try_recv().is_err());
+
+        events
+            .send(entry(11, "Eve", "entry-before-stop"))
+            .await
+            .unwrap();
+        wait_for_enqueued(&controller, 4).await;
+        controller.stop().await.unwrap();
+        assert!(
+            events
+                .send(entry(12, "Frank", "entry-too-late"))
+                .await
+                .is_err()
+        );
+        let queue = scheduler.state().borrow().clone();
+        assert!(queue.current.is_none());
+        assert!(queue.pending.is_empty());
+        let restarted = controller.start_offline(42).await.unwrap();
+        restarted
+            .send(entry(13, "Grace", "entry-new-session"))
+            .await
+            .unwrap();
+        let fresh = timeout(Duration::from_secs(3), jobs_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.preview.final_text, "Grace进入了直播间");
+        wait_for_enqueued(&controller, 1).await;
+        assert_eq!(controller.snapshot().received, 1);
+        assert!(jobs_rx.try_recv().is_err());
+        controller.stop().await.unwrap();
     }
 
     #[tokio::test]

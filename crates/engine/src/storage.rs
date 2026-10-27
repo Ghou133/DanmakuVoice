@@ -2,6 +2,7 @@
 
 use crate::audio::OutputSelection;
 use crate::bilibili::BiliSession;
+use crate::broadcast::LivehimeDevice;
 use crate::model::{LiveSettings, Provider, VoiceBinding, VoicePreset};
 use crate::obs::ObsSettings;
 use crate::rules::{RuleError, RulePreview, RuleSet};
@@ -110,6 +111,8 @@ pub enum StorageError {
     InvalidObsSettings,
     #[error("备份版本或内容无效，请选择本应用导出的配置备份 [DV-S48]")]
     InvalidConfigurationBackup,
+    #[error("直播姬设备标识无效，请检查本机数据目录 [DV-S49]")]
+    InvalidLivehimeDevice,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1266,6 +1269,43 @@ impl DataStore {
             .validate()
             .map_err(|_| StorageError::InvalidDoubaoDevice)?;
         Ok(Some(device))
+    }
+
+    /// Generate the desktop-client device identity only once per data
+    /// directory. It is stored apart from the Bilibili session so logout and
+    /// re-login keep the same device, and is excluded from normal export.
+    pub fn load_or_create_livehime_device(&mut self) -> Result<LivehimeDevice, StorageError> {
+        if let Some(device) = self.load_livehime_device()? {
+            return Ok(device);
+        }
+        let generated = LivehimeDevice::generate();
+        let protected = secrets::protect(generated.as_str().as_bytes())?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO protected_secrets(key,protected_value) VALUES('livehime_device',?1)",
+            params![protected],
+        )?;
+        self.load_livehime_device()?
+            .ok_or(StorageError::InvalidLivehimeDevice)
+    }
+
+    fn load_livehime_device(&self) -> Result<Option<LivehimeDevice>, StorageError> {
+        let protected: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT protected_value FROM protected_secrets WHERE key='livehime_device'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(protected) = protected else {
+            return Ok(None);
+        };
+        let plaintext = secrets::unprotect(&protected)?;
+        std::str::from_utf8(plaintext.as_bytes())
+            .ok()
+            .and_then(|value| LivehimeDevice::parse(value).ok())
+            .map(Some)
+            .ok_or(StorageError::InvalidLivehimeDevice)
     }
 
     pub fn save_connection(&mut self, connection: &ServiceConnection) -> Result<(), StorageError> {
@@ -2584,6 +2624,37 @@ mod tests {
             Some(other)
         );
         assert_eq!(reopened.load_broadcast_session(456, 123).unwrap(), None);
+    }
+
+    #[test]
+    fn livehime_device_is_created_once_and_outlives_the_bili_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = DataStore::open(temp.path()).unwrap();
+        let session = BiliSession::from_secret_payload(
+            br#"{"user_id":42,"sessdata":"fictional-session","bili_jct":"fictional-csrf"}"#,
+        )
+        .unwrap();
+        store.save_bili_session(&session).unwrap();
+        let device = store.load_or_create_livehime_device().unwrap();
+        assert_eq!(store.load_or_create_livehime_device().unwrap(), device);
+        // Logout must not turn the next login into a new device.
+        assert!(store.clear_bili_session().unwrap());
+        drop(store);
+        let mut reopened = DataStore::open(temp.path()).unwrap();
+        assert_eq!(reopened.load_or_create_livehime_device().unwrap(), device);
+        // A damaged stored value is reported, never silently replaced.
+        let protected = secrets::protect(b"not-a-device").unwrap();
+        reopened
+            .conn
+            .execute(
+                "UPDATE protected_secrets SET protected_value=?1 WHERE key='livehime_device'",
+                params![protected],
+            )
+            .unwrap();
+        assert!(matches!(
+            reopened.load_or_create_livehime_device(),
+            Err(StorageError::InvalidLivehimeDevice)
+        ));
     }
 
     #[test]

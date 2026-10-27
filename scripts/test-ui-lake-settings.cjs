@@ -12,7 +12,7 @@ const state = {
   preferences:{language:'zh-CN',appearance:'dark',scale:1,master_volume:1,muted:false,tts_enabled:true,output:'default'},
   setup:{room_id:123,tts_enabled:true,mode:'account'},live_settings:{room_id:123,gift_merge:{enabled:false,initial_seconds:1.5,increment_seconds:.5,maximum_seconds:5}},
   live:{room_id:123,running:false,state:'stopped',events:[]},queue:{current:null,pending:[],history:[]},
-  rules:{default_preset_id:'voice',events:{danmaku_on:true,filter_bilibili_emoticons:true,gift_on:true,free_gift_on:false,super_chat_on:true,guard_on:true,gift_threshold_yuan:5,super_chat_threshold_yuan:30},templates:{danmaku:'{user_name}说：{message}',gift:'{user_name}赠送了{gift_num}个{gift_name}',super_chat:'{user_name}留言：{message}',guard:'感谢{user_name}赠送的{guard_name}'},user_words:[{from:'Kinoko7',to:'蘑菇七'}],message_words:[{from:'yyds',to:'永远的神'}],emote_words:[{from:'[doge]',to:'狗头'}],sounds:[{trigger:'晚安',asset_id:'bell'}]},
+  rules:{default_preset_id:'voice',events:{danmaku_on:true,filter_bilibili_emoticons:true,gift_on:true,free_gift_on:false,super_chat_on:true,guard_on:true,entry_on:false,gift_threshold_yuan:5,super_chat_threshold_yuan:30},templates:{danmaku:'{user_name}说：{message}',gift:'{user_name}赠送了{gift_num}个{gift_name}',super_chat:'{user_name}留言：{message}',guard:'感谢{user_name}赠送的{guard_name}',entry:'{user_name}进入了直播间'},user_words:[{from:'Kinoko7',to:'蘑菇七'}],message_words:[{from:'yyds',to:'永远的神'}],emote_words:[{from:'[doge]',to:'狗头'}],sounds:[{trigger:'晚安',asset_id:'bell'}]},
   connections:[{id:'local',name:'Local',settings:{provider:'dots',endpoint:'http://127.0.0.1:9881',timeout_secs:30}}],
   presets:[{id:'voice',connection_id:'local',name:'元气少女',provider:'dots',voice_id:'reference.wav',speed:1,volume:1}],
   bindings:[{id:'binding',binding:{platform:'bilibili',user_id:null,user_name:'Kinoko7',legacy_user_name:null,preset_id:'voice',enabled:true}}],assets:[{id:'bell',name:'风铃',bytes:1234}],devices:[],account:{user_id:42,name:'柚子不加糖'},qr:{status:'idle'},local_services:{dots:{state:'ready'},gpt_sovits:{state:'unconfigured'}},doubao_voices:[],startup_enabled:false,status:{},
@@ -98,6 +98,10 @@ const calls=[];let rejectRules=false;
   await dialog.locator('[data-action="lake.advanced.section"][data-id="messages"]').click();
   await dialog.locator('[name="gift_threshold_yuan"]').fill('12');await dialog.locator('[name="gift_threshold_yuan"]').press('Tab');
   await page.waitForFunction(()=>document.querySelector('[data-form="lake-thresholds"] .autosave-status').hidden);
+  // Entry announcements stay off until the switch is turned on, then save like the other switches.
+  const entrySwitch=dialog.locator('[data-form="lake-thresholds"] input[name="entry_on"]');
+  assert.equal(await entrySwitch.isChecked(),false);await entrySwitch.check();
+  await page.waitForFunction(()=>window.__fixtureSavedRules?.events.entry_on===true);assert.equal(state.rules.events.gift_threshold_yuan,12);
   await dialog.locator('[data-action="lake.advanced.section"][data-id="templates"]').click();
   assert.equal(state.rules.events.gift_threshold_yuan,12);assert.equal(state.rules.user_words.length,2);assert.equal(state.rules.emote_words.length,1);
   assert.equal(await dialog.locator('.lake-accordion-toggle[aria-expanded="true"]').count(),1);
@@ -117,7 +121,7 @@ const calls=[];let rejectRules=false;
   await sentence.fill('今晚：');await sentence.press('End');await sentence.press('Enter');await sentence.press('Enter');await sentence.press('A');
   await dialog.locator('.lake-template-row').first().locator('[data-action="lake.template.insert"][data-id="message"]').click();
   await dialog.locator('[data-action="lake.advanced.section"][data-id="sounds"]').click();
-  assert.equal(state.rules.templates.danmaku,'今晚：\n\nA{message}');assert.equal(state.rules.templates.gift,'{user_name}赠送了{gift_num}个{gift_name}');
+  assert.equal(state.rules.templates.danmaku,'今晚：\n\nA{message}');assert.equal(state.rules.templates.gift,'{user_name}赠送了{gift_num}个{gift_name}');assert.equal(state.rules.templates.entry,'{user_name}进入了直播间');
   await page.waitForFunction(()=>document.querySelector('[data-action="lake.advanced.section"][data-id="sounds"]').getAttribute('aria-expanded')==='true');
   await dialog.locator('.lake-sound-row [data-action="lake.sound.audition"]').click();assert.equal(calls.at(-1).action,'assets.audition');
   await dialog.locator('[data-action="lake.sound.pick"]').click();assert.equal(state.assets.at(-1).name,'piano');

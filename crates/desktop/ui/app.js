@@ -1151,6 +1151,7 @@ function updateLakePopScrim() {
 }
 
 function renderApp() {
+  if (onAirPanelMode === 'face') cancelLakeFaceWait();
   clearFoldingRows();
   app.setAttribute('aria-busy', 'false');
   document.documentElement.dataset.step = step || '';
@@ -3062,21 +3063,29 @@ function cancelLakeFaceWait() {
 
 function beginLakeFaceWait() {
   cancelLakeFaceWait(); lakeFaceError = '';
-  lakeFaceAttempt = { account: broadcastAccount(), room: String(snapshot.broadcast?.room?.room_id || ''), until: Date.now() + 120000 };
+  if (snapshot.broadcast?.face_kind !== 60024) return;
+  lakeFaceAttempt = { account: broadcastAccount(), room: String(snapshot.broadcast?.room?.room_id || ''), area: snapshot.broadcast?.room?.area_id, image: snapshot.broadcast.face_image, until: Date.now() + 120000 };
   scheduleLakeFaceWait(lakeFaceAttempt);
 }
 
 function scheduleLakeFaceWait(attempt) {
   clearTimeout(lakeFaceTimer);
   lakeFaceTimer = setTimeout(async () => {
-    const same = () => lakeFaceAttempt === attempt && broadcastEnabled() && broadcastAccount() === attempt.account && String(snapshot.broadcast?.room?.room_id || '') === attempt.room && !snapshot.network_disabled;
-    if (!same() || broadcastLive(snapshot.broadcast?.room)) { cancelLakeFaceWait(); if (onAirPanelMode === 'face') closeOnAirPanel(); return; }
+    const same = () => lakeFaceAttempt === attempt && broadcastEnabled() && broadcastAccount() === attempt.account && String(snapshot.broadcast?.room?.room_id || '') === attempt.room && snapshot.broadcast?.room?.area_id === attempt.area && !snapshot.network_disabled;
+    const sameChallenge = () => same() && snapshot.broadcast?.face_kind === 60024 && snapshot.broadcast?.face_image === attempt.image;
+    if (!sameChallenge() || broadcastLive(snapshot.broadcast?.room)) { cancelLakeFaceWait(); if (onAirPanelMode === 'face') closeOnAirPanel(); return; }
     if (Date.now() >= attempt.until) {
       lakeFaceError = t('验证等待已超时，请重新开播。'); cancelLakeFaceWait(); renderOnAirPanel(); return;
     }
     if (broadcastBusy || snapshot.broadcast?.busy) { scheduleLakeFaceWait(attempt); return; }
     try {
-      const next = await runBroadcastAction('start', { confirmed: true, area_id: snapshot.broadcast.room.area_id }, {
+      const checked = await runBroadcastAction('face.check', {}, {
+        quiet: true, silent: true,
+        accept: next => sameChallenge() && String(next.account?.user_id || '') === attempt.account && String(next.broadcast?.room?.room_id || '') === attempt.room && next.broadcast?.room?.area_id === attempt.area && next.broadcast?.face_kind === 60024 && next.broadcast?.face_image === attempt.image,
+      });
+      if (!sameChallenge() || !checked) { if (lakeFaceAttempt === attempt) cancelLakeFaceWait(); return; }
+      if (checked?.result?.verified !== true) { scheduleLakeFaceWait(attempt); return; }
+      const next = await runBroadcastAction('start', { confirmed: true, area_id: attempt.area }, {
         quiet: true, silent: true,
         accept: next => same() && String(next.account?.user_id || '') === attempt.account && String(next.broadcast?.room?.room_id || '') === attempt.room,
       });
@@ -3084,9 +3093,16 @@ function scheduleLakeFaceWait(attempt) {
       if (next && !snapshot.broadcast?.face_image && broadcastLive(snapshot.broadcast?.room)) {
         cancelLakeFaceWait(); closeOnAirPanel();
         showToast(t(next.result?.obs?.outcome === 'started' ? '已开播，OBS 已开始推流' : '已开播，请在 OBS 中开始推流'));
-      } else scheduleLakeFaceWait(attempt);
+      } else {
+        lakeFaceError = t('验证后仍需确认，请完成验证并重试开播。');
+        cancelLakeFaceWait(); renderOnAirPanel();
+      }
     } catch (error) {
-      if (same()) { lakeFaceError = errorMessage(error); cancelLakeFaceWait(); renderOnAirPanel(); }
+      if (same()) {
+        lakeFaceError = errorMessage(error); cancelLakeFaceWait();
+        if (snapshot.broadcast?.face_image) renderOnAirPanel();
+        else { closeOnAirPanel(); showToast(lakeFaceError, true); }
+      }
     }
   }, 5000);
 }
@@ -3209,7 +3225,7 @@ function renderOnAirPanel() {
   if (!panel || !room) return;
   const content = onAirPanelMode === 'info' ? [room.title, room.parent_area_id, room.area_id, view.areas]
     : onAirPanelMode === 'obs' ? [lakeObsTitle()]
-      : [view.face_image, room.live_status, view.busy, broadcastBusy, lakeFaceError];
+      : [view.face_image, view.face_kind, room.live_status, view.busy, broadcastBusy, lakeFaceError];
   const signature = JSON.stringify([onAirPanelMode, content, getLanguage()]);
   if (panel.dataset.signature === signature && !panel.hidden) return;
   const active = panel.contains(document.activeElement) ? document.activeElement : null;
@@ -3223,7 +3239,10 @@ function renderOnAirPanel() {
   } else if (onAirPanelMode === 'obs') {
     panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="overlay-title" class="onair-info lake-title-form" novalidate>${lakeOverlayTitleFields()}</form>`;
   } else if (onAirPanelMode === 'face' && view.face_image) {
-    panel.innerHTML = `<span class="lake-face-kicker">FACE CHECK</span><h3>${esc(t('开播前需要验证本人'))}</h3><div class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></div><p class="lake-face-note">${esc(t('用哔哩哔哩 App 扫一扫，完成验证后会自动开播。'))}</p><div class="onair-panel-foot">${lakeFaceError ? `<span role="alert">${esc(lakeFaceError)}</span><button type="button" class="onair-text-button" data-action="broadcast.start">${esc(t('重试'))}</button>` : `<span class="lake-face-waiting" role="status">${esc(t('等待验证…'))}</span>`}</div>`;
+    const manual = view.face_kind !== 60024;
+    const note = manual ? '用哔哩哔哩 App 扫一扫，完成验证后点击继续开播。' : '用哔哩哔哩 App 扫一扫，完成验证后会自动开播。';
+    const action = lakeFaceError ? `<span role="alert">${esc(lakeFaceError)}</span><button type="button" class="onair-text-button" data-action="broadcast.start">${esc(t('重试'))}</button>` : manual ? `<button type="button" class="onair-text-button" data-action="broadcast.start">${esc(t('继续开播'))}</button>` : `<span class="lake-face-waiting" role="status">${esc(t('等待验证…'))}</span>`;
+    panel.innerHTML = `<span class="lake-face-kicker">FACE CHECK</span><h3>${esc(t('开播前需要验证本人'))}</h3><div class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></div><p class="lake-face-note">${esc(t(note))}</p><div class="onair-panel-foot">${action}</div>`;
   }
   panel.dataset.mode = onAirPanelMode;
   for (const form of panel.querySelectorAll('form')) {
@@ -3255,6 +3274,7 @@ function openOnAirPanel(mode) {
   if (!panel || !snapshot.broadcast?.room) return;
   closeVoicePanel(); closeQueuePanel();
   if (!panel.hidden && onAirPanelMode === mode) return handleAction('onair.close', '', null);
+  if (onAirPanelMode === 'face' && mode !== 'face') cancelLakeFaceWait();
   onAirPanelMode = mode;
   panel.dataset.signature = '';
   renderOnAirPanel();
@@ -4156,7 +4176,7 @@ function previewEventForm() {
 let lakeAdvancedSection = '';
 let lakeReadingsSearch = '';
 let lakeTemplateRange = null;
-const lakeTemplateDefaults = { danmaku: '"{user_name}"说:"{message}"', gift: '"{user_name}"赠送了{gift_num}个{gift_name}', super_chat: '"{user_name}"发送了一条醒目留言，他说"{message}"', guard: '感谢"{user_name}"赠送的{guard_name}' };
+const lakeTemplateDefaults = { danmaku: '"{user_name}"说:"{message}"', gift: '"{user_name}"赠送了{gift_num}个{gift_name}', super_chat: '"{user_name}"发送了一条醒目留言，他说"{message}"', guard: '感谢"{user_name}"赠送的{guard_name}', entry: '{user_name}进入了直播间' };
 const lakeTokenLabels = { user_name: '名字', message: '内容', gift_name: '礼物', gift_num: '数量', price: '金额', guard_name: '舰长' };
 
 function lakeMiniWave() { return '<svg class="lake-mini-wave" viewBox="0 0 40 20" aria-hidden="true"><path d="M1 10h5m2 0 3-6 4 12 4-14 4 16 4-12 4 8 3-4h5"/></svg>'; }
@@ -4369,12 +4389,12 @@ function renderRulesSettings() {
   const rules = snapshot.rules;
   const events = rules.events;
   const amount = (name, value, label) => `<span class="lake-amount">${esc(t('至少'))} ¥<input name="${name}" type="number" min="0" step="0.1" required value="${esc(displayNumber(value))}" aria-label="${esc(t(label))}"></span>`;
-  const thresholds = `<form data-form="lake-thresholds">${sSwitch('danmaku_on', t('弹幕'), events.danmaku_on)}${sSwitch('gift_on', t('礼物'), events.gift_on, '', amount('gift_threshold_yuan', events.gift_threshold_yuan, '礼物最低金额（元）'))}<div class="lake-indented">${sSwitch('free_gift_on', t('免费礼物也读'), events.free_gift_on)}</div>${sSwitch('super_chat_on', t('醒目留言'), events.super_chat_on, '', amount('super_chat_threshold_yuan', events.super_chat_threshold_yuan, '醒目留言最低金额（元）'))}${sSwitch('guard_on', t('大航海'), events.guard_on)}${autoStatus()}</form>`;
-  const templates = `<form data-form="lake-templates">${[['danmaku', '弹幕'], ['gift', '礼物'], ['super_chat', '醒目留言'], ['guard', '大航海']].map(([key, label]) => `<div class="lake-template-row"><label id="lake-template-label-${key}">${esc(t(label))}</label><div class="lake-template-edit" data-lake-template="${key}" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="lake-template-label-${key}">${lakeTemplateMarkup(rules.templates[key] || '')}</div><input type="hidden" name="template_${key}" value="${esc(rules.templates[key] || '')}"><div class="lake-template-tools"><span>${esc(t('插入'))}:</span>${Object.entries(lakeTokenLabels).map(([token, label]) => `<button type="button" data-action="lake.template.insert" data-id="${token}">${esc(t(label))}</button>`).join('')}<button type="button" data-action="lake.template.reset" data-id="${key}">${esc(t('恢复这句'))}</button></div></div>`).join('')}${autoStatus()}</form>`;
+  const thresholds = `<form data-form="lake-thresholds">${sSwitch('danmaku_on', t('弹幕'), events.danmaku_on)}${sSwitch('gift_on', t('礼物'), events.gift_on, '', amount('gift_threshold_yuan', events.gift_threshold_yuan, '礼物最低金额（元）'))}<div class="lake-indented">${sSwitch('free_gift_on', t('免费礼物也读'), events.free_gift_on)}</div>${sSwitch('super_chat_on', t('醒目留言'), events.super_chat_on, '', amount('super_chat_threshold_yuan', events.super_chat_threshold_yuan, '醒目留言最低金额（元）'))}${sSwitch('guard_on', t('大航海'), events.guard_on)}${sSwitch('entry_on', t('观众进场'), events.entry_on)}${autoStatus()}</form>`;
+  const templates = `<form data-form="lake-templates">${[['danmaku', '弹幕'], ['gift', '礼物'], ['super_chat', '醒目留言'], ['guard', '大航海'], ['entry', '观众进场']].map(([key, label]) => `<div class="lake-template-row"><label id="lake-template-label-${key}">${esc(t(label))}</label><div class="lake-template-edit" data-lake-template="${key}" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="lake-template-label-${key}">${lakeTemplateMarkup(rules.templates[key] || '')}</div><input type="hidden" name="template_${key}" value="${esc(rules.templates[key] || '')}"><div class="lake-template-tools"><span>${esc(t('插入'))}:</span>${Object.entries(lakeTokenLabels).map(([token, label]) => `<button type="button" data-action="lake.template.insert" data-id="${token}">${esc(t(label))}</button>`).join('')}<button type="button" data-action="lake.template.reset" data-id="${key}">${esc(t('恢复这句'))}</button></div></div>`).join('')}${autoStatus()}</form>`;
   const section = (key, label, detail, body) => `<section class="lake-accordion"><button type="button" class="lake-accordion-toggle" data-action="lake.advanced.section" data-id="${key}" aria-expanded="${lakeAdvancedSection === key}" aria-controls="lake-advanced-${key}"><span>${esc(t(label))}</span><small>${esc(detail)}</small>${icon(lakeAdvancedSection === key ? 'up' : 'down')}</button><div id="lake-advanced-${key}" class="lake-accordion-body"${lakeAdvancedSection === key ? '' : ' hidden'}>${body}</div></section>`;
   const merge = snapshot.live_settings?.gift_merge || { enabled: false, initial_seconds: 1.5, increment_seconds: .5, maximum_seconds: 5 };
   const giftMerge = `<form data-form="gift-merge" class="lake-merge">${sSwitch('enabled', t('合并连续赠送的礼物'), merge.enabled)}${['initial_seconds', 'increment_seconds', 'maximum_seconds'].map(key => `<input type="hidden" name="${key}" value="${esc(merge[key])}">`).join('')}${autoStatus()}</form>`;
-  return `<div class="lake-settings-page lake-advanced">${section('messages', '播报哪些消息', '', thresholds)}${section('templates', '播报模板', '4', templates)}${section('sounds', '关键词音效', (rules.sounds || []).map(row => row.trigger).slice(0, 2).join('、'), renderAssetsSettings())}${giftMerge}<footer class="lake-settings-footer lake-reset-note"><span>${esc(t('这些一般不用动，改乱了可以一键恢复。'))}</span>${button(t('恢复默认'), 'lake.advanced.reset', { class: 'quiet small' })}</footer></div>`;
+  return `<div class="lake-settings-page lake-advanced">${section('messages', '播报哪些消息', '', thresholds)}${section('templates', '播报模板', '5', templates)}${section('sounds', '关键词音效', (rules.sounds || []).map(row => row.trigger).slice(0, 2).join('、'), renderAssetsSettings())}${giftMerge}<footer class="lake-settings-footer lake-reset-note"><span>${esc(t('这些一般不用动，改乱了可以一键恢复。'))}</span>${button(t('恢复默认'), 'lake.advanced.reset', { class: 'quiet small' })}</footer></div>`;
 }
 
 function renderAssetsSettings() {
@@ -4393,9 +4413,9 @@ function collectLakeSettingsAutosave(form) {
   const rules = structuredClone(snapshot.rules);
   rules.events.filter_bilibili_emoticons = true;
   if (form.dataset.form === 'lake-thresholds') {
-    for (const key of ['danmaku_on', 'gift_on', 'free_gift_on', 'super_chat_on', 'guard_on']) rules.events[key] = data.has(key);
+    for (const key of ['danmaku_on', 'gift_on', 'free_gift_on', 'super_chat_on', 'guard_on', 'entry_on']) rules.events[key] = data.has(key);
     for (const key of ['gift_threshold_yuan', 'super_chat_threshold_yuan']) rules.events[key] = Number(data.get(key));
-  } else for (const key of ['danmaku', 'gift', 'super_chat', 'guard']) rules.templates[key] = String(data.get(`template_${key}`) || '');
+  } else for (const key of ['danmaku', 'gift', 'super_chat', 'guard', 'entry']) rules.templates[key] = String(data.get(`template_${key}`) || '');
   return { action: 'rules.save', payload: { rules } };
 }
 
@@ -4440,7 +4460,7 @@ async function handleLakeSettingsAction(action, id, target) {
     if (!await flushAutosaves()) return true;
     if (!await confirmAction(t('恢复高级设置的默认值？'), t('播报消息、模板、关键词音效和礼物合并会恢复默认。声音和记住的读法会保留。'), t('恢复默认'), false)) return true;
     const rules = structuredClone(snapshot.rules);
-    rules.events = { danmaku_on: true, filter_bilibili_emoticons: true, gift_on: true, free_gift_on: false, super_chat_on: true, guard_on: true, gift_threshold_yuan: 5, super_chat_threshold_yuan: 30 };
+    rules.events = { danmaku_on: true, entry_on: false, filter_bilibili_emoticons: true, gift_on: true, free_gift_on: false, super_chat_on: true, guard_on: true, gift_threshold_yuan: 5, super_chat_threshold_yuan: 30 };
     rules.templates = { ...lakeTemplateDefaults }; rules.sounds = [];
     await command('rules.save', { rules });
     await command('live.save', { gift_merge: { enabled: false, initial_seconds: 1.5, increment_seconds: .5, maximum_seconds: 5 } });

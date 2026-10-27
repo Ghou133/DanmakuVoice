@@ -62,6 +62,7 @@
 | `DV-S36` | `storage.rs / StorageError::DataResetBusy` | 数据已重置，但数据库仍被其他实例占用；请关闭其他实例后重新清除 |
 | `DV-S37` | `storage.rs / StorageError::InvalidOverlaySettings` | OBS 叠加层设置超出范围（标题为空或过长、大小/暗角/停留时间越界、端口或令牌格式不对） |
 | `DV-S38` | `storage.rs / StorageError::InvalidObsSettings`；`broadcast.rs` OBS 联动命令 | OBS 联动设置无效：地址不是主机名/IPv4、端口为 0、密码超过 256 字或含控制字符，或命令载荷不完整 |
+| `DV-S49` | `storage.rs / StorageError::InvalidLivehimeDevice` | 直播姬设备标识无效，请检查本机数据目录 |
 | `DV-K01` | `secrets.rs / SecretError::Empty` | 凭据为空 |
 | `DV-K02` | `secrets.rs / SecretError::TooLarge` | 凭据超过系统加密接口的长度限制 |
 | `DV-K03` | `secrets.rs / SecretError::Protect` | Windows 凭据保护失败：{0} |

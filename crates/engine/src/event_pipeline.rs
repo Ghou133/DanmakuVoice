@@ -8,6 +8,7 @@ use crate::model::{EventKind, GiftMergeSettings, LiveEvent};
 const MAX_RECENT_IDS: usize = 4096;
 const RECENT_ID_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_GIFT_GROUPS: usize = 256;
+const ENTRY_COOLDOWN: Duration = Duration::from_secs(30);
 
 struct PendingGift {
     event: LiveEvent,
@@ -21,6 +22,8 @@ pub struct EventPipeline {
     merge: GiftMergeSettings,
     seen_ids: HashSet<String>,
     recent_ids: VecDeque<(Instant, String)>,
+    seen_entries: HashSet<(u64, u64)>,
+    recent_entries: VecDeque<(Instant, (u64, u64))>,
     gifts: Vec<PendingGift>,
 }
 
@@ -33,6 +36,8 @@ impl EventPipeline {
             merge,
             seen_ids: HashSet::new(),
             recent_ids: VecDeque::new(),
+            seen_entries: HashSet::new(),
+            recent_entries: VecDeque::new(),
             gifts: Vec::new(),
         })
     }
@@ -106,6 +111,8 @@ impl EventPipeline {
         self.gifts.clear();
         self.seen_ids.clear();
         self.recent_ids.clear();
+        self.seen_entries.clear();
+        self.recent_entries.clear();
     }
 
     /// Forget partial gift groups when speech is disabled, while retaining
@@ -119,11 +126,44 @@ impl EventPipeline {
     /// may ignore the duplicate result because raw display can show repeats.
     pub fn remember_event_id(&mut self, event: &LiveEvent, now: Instant) -> bool {
         self.expire_ids(now);
-        self.is_duplicate(event, now)
+        self.is_duplicate(event, now) || self.is_repeated_entry(event, now)
     }
 
     pub fn pending_gifts(&self) -> usize {
         self.gifts.len()
+    }
+
+    /// Ordinary entry can be sent repeatedly (including across reconnects).
+    /// Only a confirmed UID is an identity: anonymous users with identical
+    /// masked names must never suppress one another. Use monotonic receipt
+    /// time so platform clock changes cannot extend or bypass the cooldown.
+    fn is_repeated_entry(&mut self, event: &LiveEvent, now: Instant) -> bool {
+        while self
+            .recent_entries
+            .front()
+            .is_some_and(|(seen, _)| now.saturating_duration_since(*seen) >= ENTRY_COOLDOWN)
+        {
+            if let Some((_, key)) = self.recent_entries.pop_front() {
+                self.seen_entries.remove(&key);
+            }
+        }
+        if event.kind != EventKind::Entry {
+            return false;
+        }
+        let Some(uid) = event.user_id.filter(|uid| *uid > 0) else {
+            return false;
+        };
+        let key = (event.room_id, uid);
+        if !self.seen_entries.insert(key) {
+            return true;
+        }
+        self.recent_entries.push_back((now, key));
+        while self.recent_entries.len() > MAX_RECENT_IDS {
+            if let Some((_, old)) = self.recent_entries.pop_front() {
+                self.seen_entries.remove(&old);
+            }
+        }
+        false
     }
 
     fn expire_ids(&mut self, now: Instant) {
@@ -151,6 +191,7 @@ impl EventPipeline {
             EventKind::Gift => "gift",
             EventKind::SuperChat => "sc",
             EventKind::Guard => "guard",
+            EventKind::Entry => "entry",
         };
         let key = format!("{}:{kind}:{id}", event.room_id);
         if !self.seen_ids.insert(key.clone()) {
@@ -205,6 +246,78 @@ mod tests {
             1
         );
         assert!(pipeline.recent_ids.len() <= MAX_RECENT_IDS);
+    }
+
+    fn entry(uid: Option<u64>, name: &str) -> LiveEvent {
+        let mut event = LiveEvent::danmaku(42, uid, name, "进入直播间");
+        event.kind = EventKind::Entry;
+        event
+    }
+
+    #[test]
+    fn entry_cooldown_is_per_uid_and_room_without_sliding_or_affecting_chat() {
+        let now = Instant::now();
+        let mut pipeline = EventPipeline::new(GiftMergeSettings::default()).unwrap();
+        let event = entry(Some(7), "Alice");
+        assert_eq!(pipeline.ingest(event.clone(), now).len(), 1);
+        assert!(
+            pipeline
+                .ingest(entry(Some(7), "renamed"), now + Duration::from_secs(29))
+                .is_empty()
+        );
+        assert_eq!(pipeline.ingest(entry(Some(8), "Alice"), now).len(), 1);
+        let mut another_room = event.clone();
+        another_room.room_id = 43;
+        assert_eq!(pipeline.ingest(another_room, now).len(), 1);
+        assert_eq!(
+            pipeline
+                .ingest(LiveEvent::danmaku(42, Some(7), "Alice", "你好"), now)
+                .len(),
+            1
+        );
+        assert_eq!(
+            pipeline.ingest(event.clone(), now + ENTRY_COOLDOWN).len(),
+            1
+        );
+        pipeline.clear();
+        assert_eq!(pipeline.ingest(event, now + ENTRY_COOLDOWN).len(), 1);
+    }
+
+    #[test]
+    fn entry_anonymous_names_are_not_identity_and_real_ids_still_dedupe() {
+        let now = Instant::now();
+        let mut pipeline = EventPipeline::new(GiftMergeSettings::default()).unwrap();
+        for uid in [None, None, Some(0), Some(0)] {
+            assert_eq!(pipeline.ingest(entry(uid, "神秘人"), now).len(), 1);
+        }
+        let mut event = entry(Some(7), "Alice");
+        event.platform_event_id = Some("7:100".into());
+        assert_eq!(pipeline.ingest(event.clone(), now).len(), 1);
+        assert!(
+            pipeline
+                .ingest(event.clone(), now + ENTRY_COOLDOWN)
+                .is_empty()
+        );
+        event.platform_event_id = Some("7:131".into());
+        assert_eq!(pipeline.ingest(event, now + ENTRY_COOLDOWN).len(), 1);
+    }
+
+    #[test]
+    fn display_only_entries_remain_seen_and_entry_state_is_bounded() {
+        let now = Instant::now();
+        let mut pipeline = EventPipeline::new(GiftMergeSettings::default()).unwrap();
+        let event = entry(Some(7), "Alice");
+        assert!(!pipeline.remember_event_id(&event, now));
+        pipeline.discard_pending_gifts();
+        assert!(pipeline.ingest(event, now).is_empty());
+        for uid in 1..=MAX_RECENT_IDS as u64 + 10 {
+            pipeline.ingest(entry(Some(uid), "Viewer"), now);
+        }
+        assert_eq!(pipeline.seen_entries.len(), MAX_RECENT_IDS);
+        assert_eq!(pipeline.recent_entries.len(), MAX_RECENT_IDS);
+        pipeline.ingest(entry(Some(99999), "Viewer"), now + ENTRY_COOLDOWN);
+        assert_eq!(pipeline.seen_entries.len(), 1);
+        assert_eq!(pipeline.recent_entries.len(), 1);
     }
 
     #[test]

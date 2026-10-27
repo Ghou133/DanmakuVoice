@@ -46,6 +46,8 @@ let browser;
 let server;
 let failNextTitle = false;
 let faceNextStart = false;
+let facePending = false;
+let faceVerified = false;
 let archiveEvents = [];
 let failNextHistory = false;
 let failBroadcastRead = false;
@@ -147,9 +149,12 @@ async function noOverlap(selectors, label) {
       } else if (action === 'bili.broadcast.start') {
         assert.equal(state.preferences.broadcast_console, true);
         assert.equal(payload.confirmed, true);
-        if (faceNextStart) { faceNextStart = false; state.broadcast.face_image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yN+UAAAAASUVORK5CYII='; }
-        else { state.broadcast.face_image = null; Object.assign(state.broadcast.room, { live_status: 1, live_since: Math.floor(Date.now() / 1000) - 1 }); }
+        if (faceNextStart) { faceNextStart = false; facePending = true; faceVerified = false; state.broadcast.face_kind = 60024; state.broadcast.face_image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yN+UAAAAASUVORK5CYII='; }
+        else { if (facePending) assert.equal(faceVerified, true, 'must not restart before verification'); facePending = false; state.broadcast.face_kind = null; state.broadcast.face_image = null; Object.assign(state.broadcast.room, { live_status: 1, live_since: Math.floor(Date.now() / 1000) - 1 }); }
         return { ...snapshots(), result: { obs: { outcome: state.broadcast.face_image ? 'needs_face' : 'started' } } };
+      } else if (action === 'bili.broadcast.face.check') {
+        assert.equal(facePending, true);
+        return { ...snapshots(), result: { verified: faceVerified } };
       } else if (action === 'bili.broadcast.stop') {
         assert.equal(payload.confirmed, true);
         // The fixture supplies the backend ledger result. SQLite reopen/count
@@ -379,7 +384,13 @@ async function noOverlap(selectors, label) {
     await page.locator('#onair [data-action="broadcast.start"]').click();
     assert.match(await page.locator('#onair-panel').textContent(), /完成验证后会自动开播/);
     assert.equal(await page.locator('#onair-panel [data-action="broadcast.start"]').count(), 0);
+    const faceDeadline = Date.now() + 8000;
+    while (actionCalls('bili.broadcast.face.check').length === 0 && Date.now() < faceDeadline) await page.waitForTimeout(50);
+    assert.equal(actionCalls('bili.broadcast.face.check').length, 1, 'should check verification status');
+    assert.equal(actionCalls('bili.broadcast.start').length, 1, 'unverified status must not restart');
+    faceVerified = true;
     await page.waitForFunction(() => document.querySelector('#onair').textContent.includes('ON AIR'), { timeout: 8000 });
+    assert.equal(actionCalls('bili.broadcast.face.check').length, 2);
     assert.equal(actionCalls('bili.broadcast.start').length, 2);
     assert.equal(await page.locator('#onair-panel').isHidden(), true);
     check('explicit start enters face check and bounded verified retry continues automatically');
