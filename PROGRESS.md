@@ -1510,3 +1510,16 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 用户授权同步最新主分支并更新 Microsoft Store。GitHub 远端 main 经联网核对已指向本地 `bfe086857326f84c190cec88cdbb3f1da779a45e`；该提交的 Windows CI 40493021679 已成功。准备将应用版本递增至 0.3.5、商店包版本 1.3.5.0，并更新中英文版本说明。此时尚未完成新版构建、源码发布或商店送审；Partner Center 登录和实际产品状态仍需核对。真实直播、在线 TTS、物理音频及签名商店包升级不由离线 CI 证明。
 
 - 发布前复核：新增直播设备标识的本机 DPAPI 保护、跨登出保留、发送给平台和删除范围已补入隐私说明。商店更新说明不再声称未经实播验证的人脸验证效果。GitHub Actions 40498090308 首次运行在下载 FFmpeg 官方源码时出现 TLS 连接重置（curl 35），Windows 作业未执行；对同一提交的重跑及最终冻结提交的 CI 需分别核实，不将失败视为通过。
+
+### 2026-10-27 本地发布材料复核
+
+- 冻结构建提交 `306ca4e61993c8ed98b99f8e299d7fa3fa32828f`。首次本地打包因主工作树 `Cargo.lock` 为 CRLF 而 Git 源码为 LF，源码配对检查拒绝；失败材料保留在 `target/release-0.3.5-20261027/`，未降低检查标准。
+- 另用干净 LF 检出，打包前后 214 个跟踪文件与冻结 Git 对象逐字节一致；审计包、源码配对、325 项 Rust 依赖许可证副本、隔离原生启动、MakeAppx 语义及 MSIX 全部 staged 文件校验通过。日志和独立核对见 `target/release-0.3.5-20261027-lf/`。
+- 未签名提交包 `dist/release-0.3.5-20261027-lf/store/DanmakuVoice-store-submission.msix` SHA-256 `eb2a806bc1645ca47bef836717d031beffebe3e509ec05e6a17a987050510688`；完整配套源码 ZIP SHA-256 `1053f55bda765cfb31c9ec4e3b3596c861f4835ba1ca0b995a001c207d7428b5`。实际清单为 1.3.5.0、既有产品身份、x64、仅 runFullTrust、StartupTask 默认关闭。
+- 精确提交的独立 Windows CI `40508725441` 当前仍在运行，商店后台尚未核对、没有上传或提交。离线打包不证明商店认证、签名安装升级、真实账号、在线 TTS 或物理出声。
+- 补充源码可重建验证：将上述完整源码 ZIP 展开到独立目录，使用全新空 Cargo 缓存按项目脚本 `--offline --locked --release` 构建成功，校验 325 个 Windows 构建依赖和全部 504 个锁定 crate 档案；日志与退出码在 `target/source-offline-rebuild-20261027/`。初次准备检查误将源码提交标记当作裸 SHA，构建未启动即中止，原始错误同目录保留；复核标记后重建退出码 0。本机离线重建不代替独立 Windows CI 或商店验收。
+
+### 2026-10-27 商店草稿与 CI 下载修复
+
+- Partner Center 已确认 Submission 5 在商店上架；为本次 1.3.5.0 创建 Submission 6（1152921505702246771）草稿，并填写中英文版本说明。草稿尚未上传新包、尚未送审。
+- GitHub Actions 40508725441 终态失败：交叉编译器安装最终成功，但 FFmpeg 官方源码下载再次被对端重置（curl 35），Windows 作业未运行。为可靠获取同一官方归档，脚本增加有界重试和镜像传输，保留固定源码 SHA-256、官方发布公钥指纹及分离签名校验；哈希或签名错误拒绝。模拟官方地址失败后从镜像取得的源码通过校验，完整 MinGW 构建产物的 SHA-256 与锁定值一致；错误归档和错误签名拒绝测试通过，Python 打包测试 28/28。证据位于 `target/ffmpeg-mirror-check/`。此修复改变源码提交，必须重新构建和配对商店包及源码，再取得新提交的 CI 结果。

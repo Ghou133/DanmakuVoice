@@ -11,6 +11,8 @@
 
 在 Ubuntu 22.04 / WSL 中执行 `scripts/build-minimal-ffmpeg-wsl.sh <输出目录>`。脚本固定官方源码哈希及裁剪参数，验证签名，不修改上游源码。使用 MinGW 交叉编译。`scripts/verify-minimal-ffmpeg.py` 检查支持的音频格式及变速音高；完整格式检查需提供参考编码器。
 
+脚本随仓库保留 FFmpeg 官方发布公钥和该版本的分离签名（`scripts/ffmpeg-verification/`）；构建时校验固定公钥指纹、归档 SHA-256 和签名。官方归档地址不可用时，会尝试 Slackware 和 MacPorts 的源码镜像；镜像只提供传输，不改变上述校验。若收到的归档哈希不符，立即失败，不继续使用其他镜像掩盖错误。
+
 主程序发布配置启用体积优化（`opt-level="s"`）、Fat LTO、单代码生成单元和符号剥离，并保留 panic 展开行为。正式打包使用静态 CRT：
 
 ```powershell

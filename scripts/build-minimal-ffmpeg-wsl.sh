@@ -26,27 +26,50 @@ mkdir -p "$build_root" "$output_dir" "$build_root/gnupg"
 chmod 700 "$build_root/gnupg"
 cd "$build_root"
 source_archive="ffmpeg-$version.tar.xz"
-source_signature="$source_archive.asc"
+source_signature="$script_dir/ffmpeg-verification/$source_archive.asc"
+release_public_key="$script_dir/ffmpeg-verification/ffmpeg-devel.asc"
 if [[ ! -f "$source_archive" ]]; then
-    curl --fail --location --silent --show-error \
-        "https://ffmpeg.org/releases/$source_archive" -o "$source_archive"
-fi
-if [[ ! -f "$source_signature" ]]; then
-    curl --fail --location --silent --show-error \
-        "https://ffmpeg.org/releases/$source_signature" -o "$source_signature"
-fi
-if [[ ! -f ffmpeg-devel.asc ]]; then
-    curl --fail --location --silent --show-error \
-        https://ffmpeg.org/ffmpeg-devel.asc -o ffmpeg-devel.asc
+    # The primary server may be unreachable from a CI runner. Mirrors are
+    # transport only: the same pinned checksum and detached signature remain
+    # mandatory regardless of where the archive was downloaded.
+    temporary_archive="$source_archive.download.$$"
+    for url in \
+        "https://ffmpeg.org/releases/$source_archive" \
+        "https://mirrors.slackware.com/slackware/slackware64-current/source/l/ffmpeg/$source_archive" \
+        "https://mse.uk.distfiles.macports.org/ffmpeg/$source_archive"; do
+        rm -f "$temporary_archive"
+        if curl --fail --location --silent --show-error --connect-timeout 10 \
+            --max-time 45 --retry 1 --retry-all-errors "$url" -o "$temporary_archive"; then
+            # Fail closed on a checksum mismatch; do not silently try another
+            # mirror after receiving unexpected content.
+            if ! printf '%s  %s\n' "$source_sha256" "$temporary_archive" | sha256sum --check -; then
+                rm -f "$temporary_archive"
+                exit 1
+            fi
+            mv "$temporary_archive" "$source_archive"
+            break
+        fi
+        printf 'FFmpeg download failed: %s\n' "$url" >&2
+    done
+    rm -f "$temporary_archive"
+    if [[ ! -f "$source_archive" ]]; then
+        echo 'Unable to download the FFmpeg source archive' >&2
+        exit 1
+    fi
 fi
 printf '%s  %s\n' "$source_sha256" "$source_archive" | sha256sum --check -
-gpg --homedir "$build_root/gnupg" --import ffmpeg-devel.asc >/dev/null 2>&1
+gpg --homedir "$build_root/gnupg" --import "$release_public_key" >/dev/null 2>&1
 if ! gpg --homedir "$build_root/gnupg" --with-colons --fingerprint \
     | grep -Fq "$release_key"; then
     echo 'FFmpeg release key fingerprint mismatch' >&2
     exit 1
 fi
-gpg --homedir "$build_root/gnupg" --verify "$source_signature" "$source_archive"
+signature_status=$(gpg --homedir "$build_root/gnupg" --status-fd 1 \
+    --verify "$source_signature" "$source_archive")
+if ! printf '%s\n' "$signature_status" | grep -Fq "[GNUPG:] VALIDSIG $release_key "; then
+    echo 'FFmpeg archive was not signed by the pinned release key' >&2
+    exit 1
+fi
 
 source_dir="$build_root/source"
 if [[ ! -f "$source_dir/configure" ]]; then
