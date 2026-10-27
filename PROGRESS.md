@@ -1503,3 +1503,8 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - 验证：新增 **24 项测试全部通过**，涵盖新旧协议、匿名/风控、压缩帧、畸形输入、独立开关、旧配置兼容、名字/音色、UID 冷却、暂停/停止、缓存边界及 OBS 回放隔离。协议定向 40/40、规则定向 21/21、事件管线定向 7/7；最终 `cargo fmt --all --check`、`cargo clippy --offline --locked --workspace --all-targets -- -D warnings`、`git diff --check` 通过，Node **198/198**。
 - 完整 `cargo test --offline --locked --workspace --no-fail-fast` 为 **565 通过、4 失败、10 忽略、0 筛除**。失败仍是 `embedded_ffmpeg::cache_directory_redirection_is_rejected`、`local_service::service_log_redirection_is_rejected_and_rotation_preserves_link_targets`、`diagnostics::redirected_log_file_is_rejected_before_open_or_clear`、`voice_library::linked_version_roots_are_not_scanned` 创建符号链接返回 Windows 1314；已核对这四个源文件与 HEAD 无差异。未跳过失败或更改权限来宣称全量通过。日志保存在 `target/entry-backend-20261020/` 的 `rust-workspace.log`、`clippy.log`、`fmt.log`、`node-tests.log` 和聚焦日志。
 - 验收边界：本次为静态协议来源核对及离线夹具/队列/IPC 验证，**尚未验证真实直播间入场推送、在线 TTS 或物理出声**，也没有重新构建 Release。只能播报 B站实际推送的入场事件，不从观众计数推断入场，也不保证平台为每一个进入者完整发送事件。本次不改线上版本或商店送审状态。
+
+
+## 2026-10-27 0.3.5 / Store 1.3.5.0 发布准备
+
+用户授权同步最新主分支并更新 Microsoft Store。GitHub 远端 main 经联网核对已指向本地 `bfe086857326f84c190cec88cdbb3f1da779a45e`；该提交的 Windows CI 40493021679 已成功。准备将应用版本递增至 0.3.5、商店包版本 1.3.5.0，并更新中英文版本说明。此时尚未完成新版构建、源码发布或商店送审；Partner Center 登录和实际产品状态仍需核对。真实直播、在线 TTS、物理音频及签名商店包升级不由离线 CI 证明。

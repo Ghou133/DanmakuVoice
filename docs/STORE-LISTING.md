@@ -10,7 +10,7 @@
 
 - 对应构建：水月重设计（本地分支 `lake-redesign`，提交 `453985e` 起）。主界面、设置抽屉和初次设置都已换新；旧的待读列表、控制坞、音频输出设备选择和平铺设置页不再存在，文案不再提及。
 - 商店一览的公开内容（名称、介绍、描述、功能、截图及说明、搜索词、版本新增内容、版权）**不出现“豆包”“哔哩哔哩”**，也不写 B站、Bilibili、Doubao（2026-10-18 用户要求）。直播平台写作“受支持的直播平台／直播间”，语音服务写作“支持的云端语音服务”“自行部署的本地语音服务”。GitHub README 不受此限制。
-- 本次应用版本 0.3.4，包版本 1.3.4.0；Partner Center 的“版本新增内容”在下述变化正文前加 `0.3.4` 版本行。
+- 本次准备应用版本 0.3.5，包版本 1.3.5.0；Partner Center 的“版本新增内容”在下述变化正文前加 `0.3.5` 版本行。
 
 ## 简体中文（zh-CN）
 
@@ -77,11 +77,9 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 
 ### 版本新增内容
 
-- OBS 叠加层中的单个表情按新旧位置放大显示，重复次数贴在表情旁边
-- 预览下方可调整暗角深浅和历史弹幕清晰度，亮色直播画面上也更容易看清
-- 主界面可原地修改 OBS 叠加层主标题，保存后保留当前画面与动效
-- 记住的读法和直播间号在原位编辑、自动保存，切换页面不再反复提示放弃未完成填写
-- 改进声音参考音频的连续保存，保留期间修改的名字、语速和音量；精简旧设置流程
+- 改进开播身份识别，减少重复的人脸验证提示
+- 支持播报普通观众进入直播间，可在设置中开启，默认关闭
+- 改进入场事件处理与播报队列的稳定性
 
 ### 截图说明（与截图依次对应）
 
@@ -168,11 +166,9 @@ danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 
 ### What's new in this version
 
-- Single emoticons in the OBS overlay are larger according to their position, with repeat counts beside them
-- Adjust background shading and older-message visibility below the preview for better readability on bright scenes
-- Edit the OBS overlay title directly on the main screen while preserving the current scene and animations
-- Saved readings and the live-room number edit in place and save automatically, without repeated discard-draft prompts
-- Improve consecutive reference-audio saves so recent name, speed and volume edits are preserved, and simplify older settings flows
+- Improve broadcast identity handling to reduce repeated face-verification prompts
+- Optionally announce ordinary viewers entering the live room; this is off by default
+- Improve entry-event processing and speech queue reliability
 
 ### Screenshot captions
 
@@ -223,10 +219,10 @@ OBS features are optional. Settings > OBS connects to the user's own OBS WebSock
 Only runFullTrust is requested, matching the approved capability set. Windows manages Store app data virtualization. Store and portable builds do not promise a shared physical database or retention after uninstall. Package identity is unchanged. No old database is overwritten and no credentials are automatically imported.
 
 The submission includes FFmpeg (LGPL-2.1-or-later), original third-party license notices, bundled serif fonts with their copyright and SIL OFL 1.1 notices, and a link to the exact complete source archive. The application's own source is AGPL-3.0-only. Source and support: https://github.com/Ghou133/DanmakuVoice
-Corresponding complete source for package 1.3.4.0 (app 0.3.4): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.4.0
+Corresponding complete source for package 1.3.5.0 (app 0.3.5): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.5.0
 The exact source commit is recorded in the submission package's SUBMISSION-README.txt and in the source release. Publish and verify the matching source archive before submitting the package.
 
-This update improves in-place editing, automatic saving and OBS overlay readability, and removes unreachable legacy settings pages. Supported platforms, speech providers and the approved capability set are unchanged. Generic search terms are retained. Certification and publication require a separate Microsoft decision.
+This update improves broadcast identity handling and adds optional viewer-entry announcements, disabled by default. Supported platforms, speech providers and the approved capability set are unchanged. Generic search terms are retained. Certification and publication require a separate Microsoft decision.
 
 ### runFullTrust 说明（500 字以内）
 
