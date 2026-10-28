@@ -562,9 +562,10 @@ async fn run_request(
     }
 }
 
-fn process_event(inner: &Inner, event: &Value, adts: &AdtsDecoder) -> Result<bool, TtsError> {
-    let event = event.as_object().ok_or_else(|| protocol("事件格式无效"))?;
-    let code = [
+/// Upstream codes appear at the top level, under `error`, or as
+/// `status_code`; a zero code means success.
+fn upstream_code(event: &serde_json::Map<String, Value>) -> Option<String> {
+    [
         event.get("code"),
         event.get("error").and_then(|error| error.get("code")),
         event.get("status_code"),
@@ -575,32 +576,49 @@ fn process_event(inner: &Inner, event: &Value, adts: &AdtsDecoder) -> Result<boo
         Value::String(code) if code != "0" => Some(code.clone()),
         Value::Number(code) if code.to_string() != "0" => Some(code.to_string()),
         _ => None,
-    });
+    })
+}
+
+/// Pauses on known account codes; the remote message is never echoed.
+fn upstream_error(inner: &Inner, code: Option<&str>) -> TtsError {
+    let reason = match code {
+        Some("710012001") => Some(DoubaoPauseReason::Authentication),
+        Some("710022002") => Some(DoubaoPauseReason::AccountBlocked),
+        Some("671000003") => Some(DoubaoPauseReason::RateLimited),
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        inner.set_pause(reason);
+    }
+    match reason {
+        Some(DoubaoPauseReason::Authentication) => {
+            protocol("登录状态无效，请重新登录（710012001）")
+        }
+        Some(DoubaoPauseReason::AccountBlocked) => protocol("账号或设备语音请求受限（710022002）"),
+        Some(DoubaoPauseReason::RateLimited) => protocol("请求频率过高（671000003）"),
+        None => protocol("服务拒绝了语音合成请求"),
+    }
+}
+
+/// A rejected handshake keeps only the body bytes read with its headers,
+/// possibly chunk-framed, so parse the outermost JSON object among them.
+fn handshake_code(body: &[u8]) -> Option<String> {
+    let start = body.iter().position(|byte| *byte == b'{')?;
+    let end = body.iter().rposition(|byte| *byte == b'}')?;
+    let body: Value = serde_json::from_slice(body.get(start..=end)?).ok()?;
+    upstream_code(body.as_object()?)
+}
+
+fn process_event(inner: &Inner, event: &Value, adts: &AdtsDecoder) -> Result<bool, TtsError> {
+    let event = event.as_object().ok_or_else(|| protocol("事件格式无效"))?;
+    let code = upstream_code(event);
     if code.is_some()
         || event
             .get("error")
             .is_some_and(|value| !value.is_null() && value != false)
         || event.get("event").and_then(Value::as_str) == Some("error")
     {
-        let reason = match code.as_deref() {
-            Some("710012001") => Some(DoubaoPauseReason::Authentication),
-            Some("710022002") => Some(DoubaoPauseReason::AccountBlocked),
-            Some("671000003") => Some(DoubaoPauseReason::RateLimited),
-            _ => None,
-        };
-        if let Some(reason) = reason {
-            inner.set_pause(reason);
-        }
-        return Err(match reason {
-            Some(DoubaoPauseReason::Authentication) => {
-                protocol("登录状态无效，请重新登录（710012001）")
-            }
-            Some(DoubaoPauseReason::AccountBlocked) => {
-                protocol("账号或设备语音请求受限（710022002）")
-            }
-            Some(DoubaoPauseReason::RateLimited) => protocol("请求频率过高（671000003）"),
-            None => protocol("服务拒绝了语音合成请求"),
-        });
+        return Err(upstream_error(inner, code.as_deref()));
     }
     if event.get("event").and_then(Value::as_str) == Some("finish") {
         if !adts.has_audio || !adts.pending.is_empty() {
@@ -628,7 +646,14 @@ fn ws_error(inner: &Inner, error: tungstenite::Error, stage: &'static str) -> Tt
                 "请求频率过高"
             }
             300..=399 => "连接被重定向",
-            _ => "服务未接受连接",
+            // An expired login is answered with HTTP 200 and an upstream
+            // code in the body instead of an authentication status.
+            _ => {
+                if let Some(code) = response.body().as_deref().and_then(handshake_code) {
+                    return upstream_error(inner, Some(&code));
+                }
+                "服务未接受连接"
+            }
         };
         return TtsError::HttpStatus {
             service: SERVICE,
@@ -748,6 +773,41 @@ mod tests {
             "连接",
         );
         assert!(error.to_string().contains("TLS"));
+    }
+
+    #[test]
+    fn rejected_handshakes_are_classified_by_the_upstream_code_in_the_body() {
+        let client = DoubaoClient::with_endpoint(
+            config(),
+            Url::parse(WS_ENDPOINT).unwrap(),
+            Arc::new(Mutex::new(GateState::default())),
+            Arc::new(AtomicU64::new(0)),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let rejected = |body: &[u8]| {
+            let response = tungstenite::http::Response::builder()
+                .status(200)
+                .body(Some(body.to_vec()))
+                .unwrap();
+            ws_error(
+                &client.inner,
+                tungstenite::Error::Http(Box::new(response)),
+                "连接",
+            )
+        };
+        for body in [&b""[..], b"<html></html>", br#"{"code":0}"#] {
+            let error = rejected(body);
+            assert_eq!(error.code(), "DV-TD05");
+            assert!(error.to_string().contains("服务未接受连接"), "{error}");
+            assert_eq!(client.pause_reason(), None);
+        }
+        let error =
+            rejected(b"2a\r\n{\"code\":\"671000003\",\"msg\":\"private-value\"}\r\n0\r\n\r\n");
+        assert_eq!(error.code(), "DV-TD08");
+        assert!(error.to_string().contains("671000003"), "{error}");
+        assert!(!error.to_string().contains("private-value"));
+        assert_eq!(client.pause_reason(), Some(DoubaoPauseReason::RateLimited));
     }
 
     fn config() -> DoubaoConfig {
@@ -873,6 +933,44 @@ mod tests {
         assert!(client.stream("again", &parent).is_err());
         client.resume_after_user_action();
         assert_eq!(client.pause_reason(), None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_login_answered_with_http_200_pauses_and_asks_for_login() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(&listener, 5);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let body = r#"{"code":710012001,"msg":"登录已过期，请重新登录"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut stream = client.stream("测试", &CancellationToken::new()).unwrap();
+        let error = stream.recv().await.unwrap().unwrap_err();
+        assert_eq!(error.code(), "DV-TD08");
+        assert!(
+            error.to_string().contains("请重新登录（710012001）"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("服务未接受连接"));
+        assert!(!error.to_string().contains("已过期"));
+        assert_eq!(
+            client.pause_reason(),
+            Some(DoubaoPauseReason::Authentication)
+        );
         server.await.unwrap();
     }
 
