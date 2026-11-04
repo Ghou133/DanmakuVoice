@@ -1897,6 +1897,19 @@ test('face verification opens its own panel instead of claiming the room is live
   assert.equal(vm.runInContext('snapshot.broadcast.room.live_status', context), 0);
 });
 
+test('face checks Rust can query wait on their own, whatever the code; others stay manual', () => {
+  const context = appContext();
+  const image = 'data:image/png;base64,AA==';
+  for (const [kind, waits] of [[60024, true], [60043, true], [60043, false]]) {
+    context.view = broadcastSnapshot({ face_image: image, face_kind: kind, face_waits: waits });
+    vm.runInContext(`snapshot.broadcast = view; snapshot.account = { user_id: 42 }; beginLakeFaceWait();`, context);
+    const attempt = vm.runInContext('lakeFaceAttempt', context);
+    assert.equal(!!attempt, waits, `${kind} waits=${waits}`);
+    if (attempt) assert.equal(attempt.kind, kind);
+    vm.runInContext('cancelLakeFaceWait()', context);
+  }
+});
+
 test('ending the stream is one click, reports the OBS link and never touches chat reception', async () => {
   const context = appContext();
   context.calls = [];

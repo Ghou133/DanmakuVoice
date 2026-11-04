@@ -24,7 +24,7 @@ const state = {
   queue: { current: null, pending: [], history: [] }, rules: { default_preset_id: null, preferred_presets: {}, user_words: [] },
   connections: [], presets: [], bindings: [], assets: [], devices: [], local_services: {},
   account: { user_id: 42, name: '虚构主播' }, qr: { status: 'idle' }, status: {},
-  broadcast: { room: null, areas: [], has_stream_key: false, busy: false, face_image: null, face_kind: null },
+  broadcast: { room: null, areas: [], has_stream_key: false, busy: false, face_image: null, face_kind: null, face_waits: false },
   obs: { settings: { enabled: false, host: '127.0.0.1', port: 4455, auto_launch: true, executable: null }, has_password: false, status: { state: 'idle' }, detected: 'C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe', local: true },
   overlay: { settings: { enabled: true, style: 'spine', corner: 'top_left', scale: 1, vignette: .6, title: '今晚的弹幕', tagline: '', show_danmaku: true, show_gift: true, show_super_chat: true, show_guard: true, names: 'special', merge_duplicates: true, linger_seconds: 14, port: 47823, token: '0123456789abcdef0123456789abcdef' }, running: true, port: 47823, url: 'http://127.0.0.1:47823/overlay?token=0123456789abcdef0123456789abcdef', error: null, clients: [] },
 };
@@ -90,12 +90,14 @@ const until = async (predicate, timeout = 5000) => {
         assert.equal(payload.area_id, state.broadcast.room.area_id);
         if (failNextStart) {
           failNextStart = false;
-          state.broadcast.has_stream_key = false; state.broadcast.face_image = null; state.broadcast.face_kind = null;
+          state.broadcast.has_stream_key = false; state.broadcast.face_image = null; state.broadcast.face_kind = null; state.broadcast.face_waits = false;
           throw new Error('虚构开播连接失败 [DV-B01]');
         }
         state.broadcast.has_stream_key = !requireFace;
         state.broadcast.face_image = requireFace ? 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS1sAAAAASUVORK5CYII=' : null;
         state.broadcast.face_kind = requireFace ? faceKind : null;
+        // Rust reports whether the challenge can be queried; a voucher-less 60043 cannot.
+        state.broadcast.face_waits = requireFace && faceKind === 60024;
         if (!requireFace) Object.assign(state.broadcast.room, { live_status: 1, live_since: Math.floor(Date.now() / 1000) - 3725 });
         if (!requireFace && state.obs.settings.enabled) result = { obs: obsFailStart ? { error: '无法连接 OBS（连接被拒绝）：请确认 OBS 已打开，并在「工具 → WebSocket 服务器设置」中开启服务器，端口与弹幕姬一致 [DV-OB01]' } : { outcome: 'started' } };
       } else if (action === 'bili.broadcast.face.check') {

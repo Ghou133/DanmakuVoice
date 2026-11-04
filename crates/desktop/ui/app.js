@@ -3063,8 +3063,8 @@ function cancelLakeFaceWait() {
 
 function beginLakeFaceWait() {
   cancelLakeFaceWait(); lakeFaceError = '';
-  if (snapshot.broadcast?.face_kind !== 60024) return;
-  lakeFaceAttempt = { account: broadcastAccount(), room: String(snapshot.broadcast?.room?.room_id || ''), area: snapshot.broadcast?.room?.area_id, image: snapshot.broadcast.face_image, until: Date.now() + 120000 };
+  if (snapshot.broadcast?.face_waits !== true) return;
+  lakeFaceAttempt = { account: broadcastAccount(), room: String(snapshot.broadcast?.room?.room_id || ''), area: snapshot.broadcast?.room?.area_id, kind: snapshot.broadcast.face_kind, image: snapshot.broadcast.face_image, until: Date.now() + 120000 };
   scheduleLakeFaceWait(lakeFaceAttempt);
 }
 
@@ -3072,7 +3072,7 @@ function scheduleLakeFaceWait(attempt) {
   clearTimeout(lakeFaceTimer);
   lakeFaceTimer = setTimeout(async () => {
     const same = () => lakeFaceAttempt === attempt && broadcastEnabled() && broadcastAccount() === attempt.account && String(snapshot.broadcast?.room?.room_id || '') === attempt.room && snapshot.broadcast?.room?.area_id === attempt.area && !snapshot.network_disabled;
-    const sameChallenge = () => same() && snapshot.broadcast?.face_kind === 60024 && snapshot.broadcast?.face_image === attempt.image;
+    const sameChallenge = () => same() && snapshot.broadcast?.face_waits === true && snapshot.broadcast?.face_kind === attempt.kind && snapshot.broadcast?.face_image === attempt.image;
     if (!sameChallenge() || broadcastLive(snapshot.broadcast?.room)) { cancelLakeFaceWait(); if (onAirPanelMode === 'face') closeOnAirPanel(); return; }
     if (Date.now() >= attempt.until) {
       lakeFaceError = t('验证等待已超时，请重新开播。'); cancelLakeFaceWait(); renderOnAirPanel(); return;
@@ -3081,7 +3081,7 @@ function scheduleLakeFaceWait(attempt) {
     try {
       const checked = await runBroadcastAction('face.check', {}, {
         quiet: true, silent: true,
-        accept: next => sameChallenge() && String(next.account?.user_id || '') === attempt.account && String(next.broadcast?.room?.room_id || '') === attempt.room && next.broadcast?.room?.area_id === attempt.area && next.broadcast?.face_kind === 60024 && next.broadcast?.face_image === attempt.image,
+        accept: next => sameChallenge() && String(next.account?.user_id || '') === attempt.account && String(next.broadcast?.room?.room_id || '') === attempt.room && next.broadcast?.room?.area_id === attempt.area && next.broadcast?.face_waits === true && next.broadcast?.face_kind === attempt.kind && next.broadcast?.face_image === attempt.image,
       });
       if (!sameChallenge() || !checked) { if (lakeFaceAttempt === attempt) cancelLakeFaceWait(); return; }
       if (checked?.result?.verified !== true) { scheduleLakeFaceWait(attempt); return; }
@@ -3239,7 +3239,7 @@ function renderOnAirPanel() {
   } else if (onAirPanelMode === 'obs') {
     panel.innerHTML = `<div class="lake-edit-halo" aria-hidden="true"></div><form data-form="overlay-title" class="onair-info lake-title-form" novalidate>${lakeOverlayTitleFields()}</form>`;
   } else if (onAirPanelMode === 'face' && view.face_image) {
-    const manual = view.face_kind !== 60024;
+    const manual = view.face_waits !== true;
     const note = manual ? '用哔哩哔哩 App 扫一扫，完成验证后点击继续开播。' : '用哔哩哔哩 App 扫一扫，完成验证后会自动开播。';
     const action = lakeFaceError ? `<span role="alert">${esc(lakeFaceError)}</span><button type="button" class="onair-text-button" data-action="broadcast.start">${esc(t('重试'))}</button>` : manual ? `<button type="button" class="onair-text-button" data-action="broadcast.start">${esc(t('继续开播'))}</button>` : `<span class="lake-face-waiting" role="status">${esc(t('等待验证…'))}</span>`;
     panel.innerHTML = `<span class="lake-face-kicker">FACE CHECK</span><h3>${esc(t('开播前需要验证本人'))}</h3><div class="onair-face-qr"><img src="${esc(safeQrUrl(view.face_image))}" alt="${esc(t('开播人脸验证二维码'))}"></div><p class="lake-face-note">${esc(t(note))}</p><div class="onair-panel-foot">${action}</div>`;

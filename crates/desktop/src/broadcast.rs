@@ -10,7 +10,8 @@ use super::{Application, confirmed, display, qr_url_png};
 use danmakuvoice_engine::{
     bilibili::{BiliError, BiliSession},
     broadcast::{
-        BroadcastClient, BroadcastRoom, LiveArea, LivehimeDevice, PushCredentials, StartBroadcast,
+        BroadcastClient, BroadcastRoom, FaceChallenge, LiveArea, LivehimeDevice, PushCredentials,
+        StartBroadcast,
     },
     obs::{self, ObsError, ObsPush, ObsSettings},
     obs_process,
@@ -25,7 +26,7 @@ pub(super) struct BroadcastState {
     areas: Vec<LiveArea>,
     credentials: Option<PushCredentials>,
     face_image: Option<Zeroizing<String>>,
-    face_kind: Option<u64>,
+    face_challenge: Option<FaceChallenge>,
     busy: bool,
     epoch: u64,
     cancel: CancellationToken,
@@ -35,7 +36,9 @@ impl BroadcastState {
     pub(super) fn view(&self) -> Value {
         json!({"room":self.room, "areas":self.areas, "busy":self.busy,
             "has_stream_key":self.credentials.is_some(),
-            "face_image":self.face_image.as_deref().map(|s| s.as_str()), "face_kind": self.face_kind})
+            "face_image":self.face_image.as_deref().map(|s| s.as_str()),
+            "face_kind": self.face_challenge.as_ref().map(FaceChallenge::code),
+            "face_waits": self.face_challenge.as_ref().is_some_and(FaceChallenge::can_check)})
     }
 
     pub(super) fn invalidate(&mut self) {
@@ -271,7 +274,7 @@ impl Application {
         if !self.lock()?.prefs.broadcast_console {
             return Err("请先在设置中启用开播台 [DV-B10]".into());
         }
-        let (session, device, epoch, cancel, obs_cancel, face_room) = {
+        let (session, device, epoch, cancel, obs_cancel, face) = {
             let mut state = self.lock()?;
             if state.broadcast.busy {
                 return Err("开播管理正在处理请求，请稍候 [DV-B10]".into());
@@ -290,26 +293,31 @@ impl Application {
                 .store
                 .load_or_create_livehime_device()
                 .map_err(display)?;
-            let face_room = if action == "bili.broadcast.face.check" {
-                if state.broadcast.face_kind != Some(60024) || state.broadcast.face_image.is_none()
-                {
-                    return Err("当前没有可查询的 60024 人脸验证 [DV-B10]".into());
-                }
-                Some(
+            let face = if action == "bili.broadcast.face.check" {
+                let challenge = state
+                    .broadcast
+                    .face_challenge
+                    .clone()
+                    .filter(|challenge| {
+                        challenge.can_check() && state.broadcast.face_image.is_some()
+                    })
+                    .ok_or("当前没有可查询的人脸验证 [DV-B10]")?;
+                Some((
                     state
                         .broadcast
                         .room
                         .as_ref()
                         .ok_or("请先加载自己的开播信息 [DV-B10]")?
                         .room_id,
-                )
+                    challenge,
+                ))
             } else {
                 None
             };
             if action == "bili.broadcast.start" {
                 state.broadcast.credentials = None;
                 state.broadcast.face_image = None;
-                state.broadcast.face_kind = None;
+                state.broadcast.face_challenge = None;
             }
             state.broadcast.busy = true;
             (
@@ -318,7 +326,7 @@ impl Application {
                 state.broadcast.epoch,
                 state.broadcast.cancel.clone(),
                 state.obs_activity.cancel.clone(),
-                face_room,
+                face,
             )
         };
         let _guard = BroadcastGuard(self.clone(), epoch);
@@ -369,7 +377,7 @@ impl Application {
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err("账号已变更，开播管理请求已取消；请刷新房间状态 [DV-B10]".into()),
-            result = perform(action, payload, &session, device, face_room) => result,
+            result = perform(action, payload, &session, device, face) => result,
         };
         let obs_push = {
             let mut state = self.lock()?;
@@ -425,11 +433,11 @@ impl Application {
                             ));
                             state.broadcast.credentials = Some(credentials);
                             state.broadcast.face_image = None;
-                            state.broadcast.face_kind = None;
+                            state.broadcast.face_challenge = None;
                         }
-                        StartBroadcast::FaceVerification { url, code } => {
+                        StartBroadcast::FaceVerification { url, challenge } => {
                             state.broadcast.face_image = Some(Zeroizing::new(qr_url_png(&url)?));
-                            state.broadcast.face_kind = Some(code);
+                            state.broadcast.face_challenge = Some(challenge);
                         }
                     }
                 }
@@ -437,7 +445,7 @@ impl Application {
                     state.broadcast.room = Some(room);
                     state.broadcast.credentials = None;
                     state.broadcast.face_image = None;
-                    state.broadcast.face_kind = None;
+                    state.broadcast.face_challenge = None;
                 }
                 Operation::FaceChecked(_) => unreachable!("handled above"),
             }
@@ -976,7 +984,7 @@ async fn perform(
     payload: &Value,
     session: &BiliSession,
     device: LivehimeDevice,
-    face_room: Option<u64>,
+    face: Option<(u64, FaceChallenge)>,
 ) -> Result<Operation, BiliError> {
     let client = BroadcastClient::new(device)?;
     match action {
@@ -1002,14 +1010,14 @@ async fn perform(
             let (room, result) = client.start(session, area).await?;
             Ok(Operation::Started(room, result))
         }
-        "bili.broadcast.face.check" => Ok(Operation::FaceChecked(
-            client
-                .face_verification_status(
-                    session,
-                    face_room.ok_or(BiliError::Protocol("没有待验证的直播间"))?,
-                )
-                .await?,
-        )),
+        "bili.broadcast.face.check" => {
+            let (room, challenge) = face.ok_or(BiliError::Protocol("没有待验证的直播间"))?;
+            Ok(Operation::FaceChecked(
+                client
+                    .face_verification_status(session, room, &challenge)
+                    .await?,
+            ))
+        }
         "bili.broadcast.stop" => Ok(Operation::Stopped(client.stop(session).await?)),
         _ => unreachable!("validated action"),
     }
@@ -1254,32 +1262,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn face_check_requires_active_60024_challenge_and_logout_clears_it() {
+    async fn face_check_requires_a_checkable_challenge_and_logout_clears_it() {
         let (_directory, app) = isolated(false);
         add_credentials(&app);
         assert!(
             app.dispatch("bili.broadcast.face.check", json!({}))
                 .await
                 .unwrap_err()
-                .contains("60024")
+                .contains("没有可查询的人脸验证")
         );
         {
             let mut state = app.lock().unwrap();
-            state.broadcast.face_kind = Some(60043);
+            state.broadcast.face_challenge = Some(FaceChallenge::Manual);
             state.broadcast.face_image = Some(Zeroizing::new("fictional-qr".into()));
         }
         let view = app.snapshot().unwrap();
         assert_eq!(view["broadcast"]["face_kind"], 60043);
+        assert_eq!(view["broadcast"]["face_waits"], false);
         assert!(
             app.dispatch("bili.broadcast.face.check", json!({}))
                 .await
                 .unwrap_err()
-                .contains("60024")
+                .contains("没有可查询的人脸验证")
         );
         {
             let mut state = app.lock().unwrap();
-            state.broadcast.face_kind = Some(60024);
+            state.broadcast.face_challenge = Some(FaceChallenge::Risk {
+                token: Zeroizing::new("fictional-risk-token".into()),
+            });
         }
+        let view = app.snapshot().unwrap();
+        assert_eq!(view["broadcast"]["face_kind"], 60043);
+        assert_eq!(view["broadcast"]["face_waits"], true);
+        // The check token stays in Rust; the page only learns that it can wait.
+        assert!(!view.to_string().contains("fictional-risk-token"));
         let cancel = app.lock().unwrap().broadcast.cancel.clone();
         app.dispatch("bili.logout", json!({"confirmed":true}))
             .await
@@ -1287,6 +1303,7 @@ mod tests {
         assert!(cancel.is_cancelled());
         let view = app.snapshot().unwrap();
         assert!(view["broadcast"]["face_kind"].is_null());
+        assert_eq!(view["broadcast"]["face_waits"], false);
         assert!(view["broadcast"]["face_image"].is_null());
     }
 

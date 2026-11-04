@@ -24,6 +24,9 @@ use crate::bilibili::{BiliError, BiliSession, http_client, read_json};
 const APP_KEY: &str = "aae92bc66f3edfab";
 const APP_SECRET: &str = "af125a0d5279fd576c1b4418a3e8276d";
 const API: &str = "https://api.live.bilibili.com";
+const RISK_API: &str = "https://api.bilibili.com";
+
+mod risk;
 /// The desktop client identifies itself to the app-blink API with this exact
 /// shape (`LiveHime/{version} os/Windows pc_app/livehime build/{build}
 /// osVer/{os}_{arch}`, from `bililive_secret.dll`). Browser-style requests to
@@ -144,20 +147,65 @@ impl Drop for PushCredentials {
 
 pub enum StartBroadcast {
     Started(PushCredentials),
-    FaceVerification { url: Zeroizing<String>, code: u64 },
+    FaceVerification {
+        url: Zeroizing<String>,
+        challenge: FaceChallenge,
+    },
 }
 
 impl fmt::Debug for StartBroadcast {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Started(_) => f.write_str("Started([redacted])"),
-            Self::FaceVerification { code, .. } => f
+            Self::FaceVerification { challenge, .. } => f
                 .debug_struct("FaceVerification")
-                .field("code", code)
+                .field("challenge", challenge)
                 .field("url", &"[redacted]")
                 .finish(),
         }
     }
+}
+
+/// The face check startLive asked for, and how its result can be learned.
+#[derive(Clone)]
+pub enum FaceChallenge {
+    /// 60024: the desktop client's check, queried by room.
+    Livehime,
+    /// 60043 without a voucher: no status query exists; the user retries.
+    Manual,
+    /// 60043 with a `v_voucher`: the risk-control real-name check, queried
+    /// with the obfuscated token from its registration.
+    Risk { token: Zeroizing<String> },
+}
+
+impl FaceChallenge {
+    pub fn code(&self) -> u64 {
+        match self {
+            Self::Livehime => 60024,
+            Self::Manual | Self::Risk { .. } => 60043,
+        }
+    }
+
+    /// Whether `face_verification_status` can report this challenge's result.
+    pub fn can_check(&self) -> bool {
+        !matches!(self, Self::Manual)
+    }
+}
+
+impl fmt::Debug for FaceChallenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Livehime => f.write_str("Livehime"),
+            Self::Manual => f.write_str("Manual"),
+            Self::Risk { .. } => f.write_str("Risk([redacted])"),
+        }
+    }
+}
+
+/// startLive's answer before a 60043 voucher has been registered.
+enum StartReply {
+    Ready(StartBroadcast),
+    RiskVoucher(Zeroizing<String>),
 }
 
 /// Who the request pretends to be. `room/v1` endpoints serve both the web
@@ -165,15 +213,27 @@ impl fmt::Debug for StartBroadcast {
 /// decides which headers accompany the call. Opening a broadcast and its face
 /// check are performed as the desktop client, always with a known version so
 /// no request mixes a browser User-Agent with desktop headers.
+/// The risk-control face check runs in the desktop client's embedded browser,
+/// so it is a page request from `live.bilibili.com` that still names the
+/// desktop build and device.
 #[derive(Clone, Copy)]
 enum ClientIdentity<'a> {
     Web,
     Desktop { build: u64, version: &'a str },
+    Embedded { build: u64 },
+}
+
+fn embedded_user_agent(build: u64) -> String {
+    format!(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36 pc_app/livehime build/{build}"
+    )
 }
 
 pub struct BroadcastClient {
     http: Client,
     base: Url,
+    /// `api.bilibili.com`, which hosts the risk-control (gaia-vgate) endpoints.
+    risk_base: Url,
     device: LivehimeDevice,
     /// Version and build announced by the app-blink API. The desktop client
     /// signs with the same pair and repeats it in its User-Agent. Production
@@ -186,6 +246,7 @@ impl BroadcastClient {
         Ok(Self {
             http: http_client()?,
             base: Url::parse(API).expect("fixed API URL"),
+            risk_base: Url::parse(RISK_API).expect("fixed API URL"),
             device,
             versions: &ANNOUNCED_VERSION,
         })
@@ -233,7 +294,11 @@ impl BroadcastClient {
         post: bool,
         identity: ClientIdentity<'_>,
     ) -> reqwest::RequestBuilder {
-        let url = self.base.join(path).expect("fixed relative API path");
+        let base = match identity {
+            ClientIdentity::Embedded { .. } => &self.risk_base,
+            _ => &self.base,
+        };
+        let url = base.join(path).expect("fixed relative API path");
         let mut request = if post {
             self.http.post(url)
         } else {
@@ -245,6 +310,14 @@ impl BroadcastClient {
             ClientIdentity::Desktop { build, version } => {
                 request = request
                     .header(USER_AGENT, livehime_user_agent(version, build))
+                    .header(BUVID, self.device.as_str());
+                session.map(|s| s.desktop_cookie_header(self.device.as_str()))
+            }
+            ClientIdentity::Embedded { build } => {
+                request = request
+                    .header(USER_AGENT, embedded_user_agent(build))
+                    .header(ORIGIN, "https://live.bilibili.com")
+                    .header(REFERER, "https://live.bilibili.com/")
                     .header(BUVID, self.device.as_str());
                 session.map(|s| s.desktop_cookie_header(self.device.as_str()))
             }
@@ -369,7 +442,7 @@ impl BroadcastClient {
             ("type".into(), "2".into()),
         ]);
         let params = signed_params(params);
-        let result = parse_start(
+        let result = match parse_start(
             &self
                 .post(
                     "/room/v1/Room/startLive",
@@ -382,7 +455,12 @@ impl BroadcastClient {
                 )
                 .await?,
             session.user_id(),
-        )?;
+        )? {
+            StartReply::Ready(result) => result,
+            StartReply::RiskVoucher(voucher) => {
+                self.register_risk_check(session, &voucher, build).await?
+            }
+        };
         room.area_id = area_id;
         if matches!(result, StartBroadcast::Started(_)) {
             room.live_status = 1;
@@ -391,9 +469,96 @@ impl BroadcastClient {
         Ok((room, result))
     }
 
-    /// Check the server-side result of an existing 60024 challenge. This does
-    /// not open the room, create a new challenge, or establish a reusable grant.
+    /// Register a 60043 voucher with the risk-control service and turn it into
+    /// the real-name page the phone opens. Nothing here opens the room.
+    async fn register_risk_check(
+        &self,
+        session: &BiliSession,
+        voucher: &str,
+        build: u64,
+    ) -> Result<StartBroadcast, BiliError> {
+        let params = Zeroizing::new(vec![
+            ("v_voucher".to_owned(), voucher.to_owned()),
+            ("dm_track".to_owned(), "[]".to_owned()),
+            ("csrf".to_owned(), session.csrf().to_owned()),
+        ]);
+        let value = self
+            .post(
+                "/x/gaia-vgate/v2/register",
+                session,
+                &params,
+                ClientIdentity::Embedded { build },
+            )
+            .await?;
+        api_ok(&value)?;
+        let content = value["data"]["content"]
+            .as_str()
+            .filter(|content| !content.is_empty() && content.len() <= 64 * 1024)
+            .ok_or(BiliError::Protocol("人脸验证数据无效"))?;
+        let token = risk::decode_register(voucher, content)?;
+        Ok(StartBroadcast::FaceVerification {
+            url: risk::realname_url(&token),
+            challenge: FaceChallenge::Risk {
+                token: risk::obfuscate(&token),
+            },
+        })
+    }
+
+    /// Check the server-side result of an existing challenge. This does not
+    /// open the room, create a new challenge, or establish a reusable grant.
     pub async fn face_verification_status(
+        &self,
+        session: &BiliSession,
+        room_id: u64,
+        challenge: &FaceChallenge,
+    ) -> Result<bool, BiliError> {
+        match challenge {
+            FaceChallenge::Livehime => self.livehime_face_status(session, room_id).await,
+            FaceChallenge::Risk { token } => self.risk_face_status(session, token).await,
+            FaceChallenge::Manual => Err(BiliError::Protocol("此人脸验证无法查询结果")),
+        }
+    }
+
+    /// The risk-control check reports 1 once passed and 2 or more once it
+    /// expired or failed. Negative codes are request errors (CSRF, bad
+    /// parameters); a positive business code while the check is still open
+    /// means keep waiting, as does any other status.
+    async fn risk_face_status(
+        &self,
+        session: &BiliSession,
+        token: &str,
+    ) -> Result<bool, BiliError> {
+        let (build, _) = self.desktop_version(session).await?;
+        let params = Zeroizing::new(vec![
+            ("token".to_owned(), token.to_owned()),
+            ("dm_track".to_owned(), risk::dm_track()),
+            ("csrf".to_owned(), session.csrf().to_owned()),
+        ]);
+        let value = self
+            .post(
+                "/x/gaia-vgate/v2/validatePreCheck",
+                session,
+                &params,
+                ClientIdentity::Embedded { build },
+            )
+            .await?;
+        match value.get("code").and_then(Value::as_i64) {
+            Some(-101) => return Err(BiliError::SessionExpired),
+            Some(0) => {}
+            Some(code) if code < 0 => return Err(BiliError::Api(code)),
+            Some(_) => return Ok(false),
+            None => return Err(BiliError::Protocol("缺少接口状态码")),
+        }
+        match value["data"]["status"].as_i64() {
+            Some(1) => Ok(true),
+            Some(status) if status >= 2 => {
+                Err(BiliError::Protocol("人脸验证已过期或未通过，请重新开播"))
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn livehime_face_status(
         &self,
         session: &BiliSession,
         room_id: u64,
@@ -645,17 +810,19 @@ fn parse_version(value: &Value) -> Result<(u64, String), BiliError> {
     Ok((build, version))
 }
 
-fn parse_start(value: &Value, uid: u64) -> Result<StartBroadcast, BiliError> {
+fn parse_start(value: &Value, uid: u64) -> Result<StartReply, BiliError> {
     match value["code"].as_i64() {
         Some(60024 | 60043) => {
             if value["code"] == 60043
-                && value["data"]["risk_extra"]["v_voucher"]
+                && let Some(voucher) = value["data"]["risk_extra"]["v_voucher"]
                     .as_str()
-                    .is_some_and(|voucher| !voucher.trim().is_empty())
+                    .map(str::trim)
+                    .filter(|voucher| !voucher.is_empty())
             {
-                return Err(BiliError::Protocol(
-                    "B站新版人脸验证暂不支持，请使用官方直播姬开播",
-                ));
+                if voucher.len() > 4096 || !voucher.is_ascii() {
+                    return Err(BiliError::Protocol("人脸验证数据无效"));
+                }
+                return Ok(StartReply::RiskVoucher(Zeroizing::new(voucher.to_owned())));
             }
             let url = if value["code"] == 60043 {
                 format!(
@@ -676,10 +843,14 @@ fn parse_start(value: &Value, uid: u64) -> Result<StartBroadcast, BiliError> {
             {
                 return Err(BiliError::Protocol("人脸验证地址无效"));
             }
-            return Ok(StartBroadcast::FaceVerification {
+            return Ok(StartReply::Ready(StartBroadcast::FaceVerification {
                 url: Zeroizing::new(url),
-                code: value["code"].as_u64().expect("matched positive code"),
-            });
+                challenge: if value["code"] == 60024 {
+                    FaceChallenge::Livehime
+                } else {
+                    FaceChallenge::Manual
+                },
+            }));
         }
         _ => api_ok(value)?,
     }
@@ -694,10 +865,12 @@ fn parse_start(value: &Value, uid: u64) -> Result<StartBroadcast, BiliError> {
     {
         return Err(BiliError::Protocol("推流地址无效"));
     }
-    Ok(StartBroadcast::Started(PushCredentials {
-        address,
-        stream_key,
-    }))
+    Ok(StartReply::Ready(StartBroadcast::Started(
+        PushCredentials {
+            address,
+            stream_key,
+        },
+    )))
 }
 
 #[cfg(test)]
@@ -772,6 +945,7 @@ mod tests {
         (
             BroadcastClient {
                 http,
+                risk_base: base.clone(),
                 base,
                 device: LivehimeDevice::parse(DEVICE).unwrap(),
                 // Each fixture starts like a fresh process.
@@ -810,25 +984,25 @@ mod tests {
         .await;
         assert!(
             !client
-                .face_verification_status(&session(), 123)
+                .face_verification_status(&session(), 123, &FaceChallenge::Livehime)
                 .await
                 .unwrap()
         );
         assert!(
             client
-                .face_verification_status(&session(), 123)
+                .face_verification_status(&session(), 123, &FaceChallenge::Livehime)
                 .await
                 .unwrap()
         );
         assert!(
             client
-                .face_verification_status(&session(), 123)
+                .face_verification_status(&session(), 123, &FaceChallenge::Livehime)
                 .await
                 .is_err()
         );
         assert!(
             client
-                .face_verification_status(&session(), 123)
+                .face_verification_status(&session(), 123, &FaceChallenge::Livehime)
                 .await
                 .is_err()
         );
@@ -940,12 +1114,15 @@ mod tests {
         let (_, started) = client.start(&session, 86).await.unwrap();
         assert!(matches!(
             started,
-            StartBroadcast::FaceVerification { code: 60024, .. }
+            StartBroadcast::FaceVerification {
+                challenge: FaceChallenge::Livehime,
+                ..
+            }
         ));
         // Reuses the version startLive announced instead of fetching again.
         assert!(
             client
-                .face_verification_status(&session, 123)
+                .face_verification_status(&session, 123, &FaceChallenge::Livehime)
                 .await
                 .unwrap()
         );
@@ -977,6 +1154,81 @@ mod tests {
             assert!(!request.contains(DEVICE));
         }
         assert!(requests[3].contains("buvid3=WEB-BROWSER-BUVID"));
+    }
+
+    #[tokio::test]
+    async fn voucher_challenge_registers_the_realname_check_and_polls_its_result() {
+        let voucher = "prefix00ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let content = risk::register_content(voucher, "realname", "fictional-check-token");
+        let (client, task) = fixture(vec![
+            areas(),
+            json!({"code":0,"data":{"room_id":123}}),
+            room(),
+            version(),
+            json!({"code":60043,"message":"需要人脸认证","data":{"risk_extra":{"v_voucher":voucher}}}),
+            json!({"code":0,"data":{"content":content}}),
+            json!({"code":0,"data":{"status":0}}),
+            json!({"code":1,"data":null}),
+            json!({"code":0,"data":{"status":1}}),
+            json!({"code":0,"data":{"status":2}}),
+            json!({"code":-111}),
+        ])
+        .await;
+        let (room, started) = client.start(&session(), 86).await.unwrap();
+        // A pending check never claims the room is live.
+        assert_eq!(room.live_status, 0);
+        let StartBroadcast::FaceVerification { url, challenge } = started else {
+            panic!("expected a face check")
+        };
+        assert!(challenge.can_check());
+        assert_eq!(challenge.code(), 60043);
+        assert!(!format!("{challenge:?}").contains("fictional"));
+        assert!(url.starts_with("https://www.bilibili.com/h5/risk-control/realname?t="));
+        assert!(!url.contains("fictional-check-token"));
+        let FaceChallenge::Risk { token } = &challenge else {
+            panic!("expected a risk challenge")
+        };
+        let session = session();
+        let status = || client.face_verification_status(&session, 123, &challenge);
+        assert_eq!(status().await, Ok(false));
+        assert_eq!(status().await, Ok(false));
+        assert_eq!(status().await, Ok(true));
+        assert!(status().await.unwrap_err().to_string().contains("重新开播"));
+        assert_eq!(status().await, Err(BiliError::Api(-111)));
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 11);
+        let register = &requests[5];
+        assert!(register.starts_with("POST /x/gaia-vgate/v2/register "));
+        let params = form(register);
+        assert_eq!(params["v_voucher"], voucher);
+        assert_eq!(params["dm_track"], "[]");
+        assert_eq!(params["csrf"], "fictional-csrf");
+        for request in &requests[5..] {
+            let lower = request.to_ascii_lowercase();
+            // The desktop client's embedded page, on its device.
+            assert!(lower.contains("user-agent: mozilla/5.0 "));
+            assert!(lower.contains(" pc_app/livehime build/9999\r\n"));
+            assert!(lower.contains("origin: https://live.bilibili.com\r\n"));
+            assert!(request.contains(&format!("buvid: {DEVICE}\r\n")));
+            assert!(request.contains(&format!("buvid3={DEVICE}")));
+        }
+        for request in &requests[6..] {
+            assert!(request.starts_with("POST /x/gaia-vgate/v2/validatePreCheck "));
+            let params = form(request);
+            // The obfuscated token from registration, the same on every poll.
+            assert_eq!(&params["token"], token.as_str());
+            assert_eq!(params["csrf"], "fictional-csrf");
+            let track: Value = serde_json::from_str(&params["dm_track"]).unwrap();
+            assert!(track["dm_img_inter"].is_string());
+        }
+        // Never a second startLive while the check is open.
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("startLive"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1072,32 +1324,37 @@ mod tests {
 
     #[test]
     fn face_verification_is_allowlisted_and_never_claims_started() {
-        let result = parse_start(
+        let Ok(StartReply::Ready(result)) = parse_start(
             &json!({"code":60024,"data":{"qr":"https://live.bilibili.com/face?token=fictional"}}),
             42,
-        )
-        .unwrap();
+        ) else {
+            panic!("expected a 60024 challenge")
+        };
         assert!(matches!(
             result,
-            StartBroadcast::FaceVerification { code: 60024, .. }
+            StartBroadcast::FaceVerification {
+                challenge: FaceChallenge::Livehime,
+                ..
+            }
         ));
         assert!(!format!("{result:?}").contains("fictional"));
-        let error = parse_start(
-            &json!({"code":60043,"data":{"risk_extra":{"v_voucher":"fictional-private-voucher"}}}),
+        let Ok(StartReply::RiskVoucher(voucher)) = parse_start(
+            &json!({"code":60043,"data":{"risk_extra":{"v_voucher":" fictional-private-voucher "}}}),
             42,
-        )
-        .err()
-        .unwrap()
-        .to_string();
-        assert!(error.contains("新版人脸验证暂不支持"));
-        assert!(error.contains("官方直播姬"));
-        assert!(!error.contains("fictional-private-voucher"));
-        let StartBroadcast::FaceVerification { url, code: 60043 } =
-            parse_start(&json!({"code":60043}), 42).unwrap()
+        ) else {
+            panic!("expected a voucher to register")
+        };
+        assert_eq!(voucher.as_str(), "fictional-private-voucher");
+        let Ok(StartReply::Ready(StartBroadcast::FaceVerification {
+            url,
+            challenge: FaceChallenge::Manual,
+        })) = parse_start(&json!({"code":60043}), 42)
         else {
             panic!()
         };
         assert!(url.ends_with("mid=42"));
+        assert!(!FaceChallenge::Manual.can_check());
+        assert_eq!(FaceChallenge::Manual.code(), 60043);
         for url in [
             "https://www.bilibili.com.evil.example/qr",
             "http://live.bilibili.com/qr",

@@ -1,5 +1,23 @@
 # 唯一进度记录
 
+## 2026-11-04：豆包扫码登录反复换码、扫了进不去
+
+- **用户反馈**：豆包登录二维码一直更换，扫码确认后仍无法登录又刷新二维码；另报开播人脸验证显示“接口已更换”。
+- **根因（已对线上接口实测）**：`get_qrcode` 会下发 `passport_csrf_token` Cookie，此后 `check_qrconnect` 要求请求头 `x-tt-passport-csrf-token` 与该 Cookie 相同；本程序一直发自己随机生成的值，于是每次查询状态都返回 `error_code 2035`（非法请求），程序报“二维码登录状态暂时不可用”并停止轮询，用户只能换码重来。用与 Cookie 一致的请求头重试，同一接口返回 `status: "new"`。实测还发现 `qrcode` 字段现为 `data:image/png;base64,` 前缀，旧代码因此总是退回本地生成矩阵（不影响扫码）。
+- **修改**（`crates/engine/src/tts/dobao_auth.rs`）：服务端下发 `passport_csrf_token` 后请求头改用该值；接受带 data URL 前缀的服务端 PNG；扫码确认时若响应未带 `sessionid`，沿 `redirect_url` 在豆包站点内最多跟随 4 跳收集 Set-Cookie（非 https 豆包域名、带端口或用户信息的地址一律不发送 Cookie）。
+- **证据**：更新 1 项、新增 3 项离线测试（状态查询必须带服务端 CSRF；确认后跟随重定向取得登录 Cookie；拒绝把 Cookie 发往非豆包站点；data URL PNG），`dobao_auth` 5/5 通过；引擎全库 356 通过、3 忽略；`cargo fmt --check`、引擎 `clippy -D warnings` 通过。一次性线上探测（临时测试，已删除）：真实接口取码得到服务端 PNG，两次状态查询均为 `Waiting`，修复前同样请求为 2035。
+- **仍未验证**：没有真实扫码确认登录。确认那一步豆包是直接在状态响应里下发 `sessionid`，还是需要跟随 `redirect_url`，未经实测；两条路径都已处理，但需用户实际扫码验收。桌面 crate 未改动，未重新打包。
+- **人脸验证“接口已更换”**：本程序没有这段文案。用户随后补充当时报错为 `DV-B05`，即 60043 带 `v_voucher` 时程序自己报的“B站新版人脸验证暂不支持，请使用官方直播姬开播”（此前推测是写死的 `face-auth-middle.html` 页面，已被这条证据推翻）。该流程见下一节。
+
+## 2026-11-04：实现开播新版人脸验证（60043 + v_voucher）
+
+- **参考**：Radekyspec/StartLive（GPL-3.0，与本项目 AGPL-3.0-only 兼容）当前源码的 `core/sign/captcha_codec.py`、`gen_dm_track.py`、`core/workers/face_auth/`。按其协议独立用 Rust 实现，未链接其代码。
+- **流程**（`crates/engine/src/broadcast.rs`、新增 `crates/engine/src/broadcast/risk.rs`）：startLive 返回 60043 且带 `v_voucher` 时，以直播姬内嵌页面身份（Chrome UA + `pc_app/livehime build/<build>`、Origin/Referer `live.bilibili.com`、`buvid` 头与 `buvid3=<设备>` Cookie）向 `api.bilibili.com/x/gaia-vgate/v2/register` 提交 voucher；解出 `data.content`（base64 `时间戳|salt|secretIndex|密文`，密钥为 SHA-256(voucher 去前 8 位后按 secretIndex 两个最低置位截取的片段 + 时间戳) 前 16 字节，XOR 解密），只接受 `type: realname`；生成 `https://www.bilibili.com/h5/risk-control/realname?t=<混淆 token，两次百分号编码>` 作为二维码；随后轮询 `x/gaia-vgate/v2/validatePreCheck`（混淆 token、`dm_track`、csrf）：status 1 通过、≥2 过期/失败报错、其他继续等；负数返回码报错，正数视为仍在等待，-101 为登录失效。WebGL 指纹字符串由明文现场编码，不内嵌参考实现的常量。
+- **未改动**：60024 流程不变；不带 voucher 的 60043 仍是原写死链接并手动“继续开播”。未实现参考实现的 `ReportFaceRecognition` 上报（参考实现中与轮询并行、结果不参与流程）。
+- **桌面/界面**：`face_kind` 改由 `FaceChallenge` 推出，新增快照字段 `face_waits`（可查询结果的挑战为 true）；混淆 token 只留在 Rust，不进快照。界面自动等待改为看 `face_waits`，因此新版验证与 60024 一样扫码通过后自动重新开播；`face.check` 只接受可查询的挑战。
+- **证据**：引擎新增 5 项测试（register 内容解密及错误 voucher/非 realname/损坏数据拒绝、token 混淆可还原且每次不同、realname 链接主机与双重编码、指纹结构、完整 60043 流程：仅一次 startLive、注册参数、内嵌身份头、每次轮询同一 token、状态 0/正码/1/2/负码的处理），桌面测试改为覆盖 Manual/Risk 挑战与快照不泄露 token，前端新增 1 项（60024 与带 voucher 的 60043 自动等待，无 voucher 的 60043 不等待）。`cargo fmt --check`、`cargo clippy --workspace --all-targets -D warnings` 通过；引擎 361、桌面 222 通过；前端 `node --test` 199/199。三个 headless 浏览器脚本（`test-ui-broadcast.cjs`、`test-ui-lake*.cjs`）的夹具已补 `face_waits`，但本机未安装 Playwright（`MODULE_NOT_FOUND`），未运行。
+- **仍未验证**：没有用真实账号触发 60043、扫码完成实名人脸、或确认通过后 startLive 返回推流地址；解密格式只与参考实现及自造夹具对照，未见过真实 register 响应。没有重新打包。
+
 ## 2026-10-27：开播反复人脸验证调查
 
 - 复核当前 `crates/engine/src/broadcast.rs`：开播使用 `pc_link`、动态获取直播姬版本与签名，调用 `room/v1/Room/startLive`；只有服务端返回 60024/60043 时进入人脸验证处理。该实现原本参考 Zarosmm/obs-bilibili-stream；上游目前同样调用此接口并处理人脸验证，不能据此声称其解决了重复验证。上游用户也曾报告插件要求验证而手机开播不要求：https://github.com/Zarosmm/obs-bilibili-stream/issues/12 。

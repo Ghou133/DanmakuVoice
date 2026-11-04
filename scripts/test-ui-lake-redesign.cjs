@@ -149,8 +149,8 @@ async function noOverlap(selectors, label) {
       } else if (action === 'bili.broadcast.start') {
         assert.equal(state.preferences.broadcast_console, true);
         assert.equal(payload.confirmed, true);
-        if (faceNextStart) { faceNextStart = false; facePending = true; faceVerified = false; state.broadcast.face_kind = 60024; state.broadcast.face_image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yN+UAAAAASUVORK5CYII='; }
-        else { if (facePending) assert.equal(faceVerified, true, 'must not restart before verification'); facePending = false; state.broadcast.face_kind = null; state.broadcast.face_image = null; Object.assign(state.broadcast.room, { live_status: 1, live_since: Math.floor(Date.now() / 1000) - 1 }); }
+        if (faceNextStart) { faceNextStart = false; facePending = true; faceVerified = false; state.broadcast.face_kind = 60024; state.broadcast.face_waits = true; state.broadcast.face_image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yN+UAAAAASUVORK5CYII='; }
+        else { if (facePending) assert.equal(faceVerified, true, 'must not restart before verification'); facePending = false; state.broadcast.face_kind = null; state.broadcast.face_waits = false; state.broadcast.face_image = null; Object.assign(state.broadcast.room, { live_status: 1, live_since: Math.floor(Date.now() / 1000) - 1 }); }
         return { ...snapshots(), result: { obs: { outcome: state.broadcast.face_image ? 'needs_face' : 'started' } } };
       } else if (action === 'bili.broadcast.face.check') {
         assert.equal(facePending, true);
