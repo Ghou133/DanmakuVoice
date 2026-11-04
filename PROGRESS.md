@@ -1571,3 +1571,12 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - `dobao.rs`：握手被拒且状态不是 401/403/429/3xx 时，从 tungstenite 随响应头读到的响应体（兼容 chunked 分块包装）提取上游 `code`，与流内错误事件共用 `upstream_error` 映射。710012001 现报 `豆包 响应无效：登录状态无效，请重新登录（710012001） [DV-TD08]` 并置登录暂停，不再对每条弹幕继续用过期凭据请求；710022002、671000003 同理。远端 `msg` 文本不进入错误。空响应体、非 JSON 或 code 为 0 仍为原 `服务未接受连接 [DV-TD05]`。前端已识别该 710012001 文案并有中英文翻译，未改 UI。
 - 验证：新增本地原始 HTTP 200 握手夹具和响应体分类两项测试；豆包定向 15/15，`cargo fmt --all -- --check`、`cargo clippy -p danmakuvoice-engine --all-targets -- -D warnings` 通过。引擎全量除已知 Windows 1314 符号链接权限的 `diagnostics::redirected_log_file_is_rejected_before_open_or_clear`、`voice_library::linked_version_roots_are_not_scanned` 外 351 通过、3 忽略，集成测试通过；这两项失败与本次改动无关，未跳过来宣称全量通过。
 - 验收边界：仅离线夹具验证，**未用真实过期账号联网复现**，未重新构建 Release，未提交。用户仍需在应用内重新扫码登录豆包才能恢复播报。
+
+## 2026-11-04 0.3.6 / Store 1.3.6.0 更新准备
+
+用户要求检查本地最新提交，无阻断问题则同步 GitHub 并更新 Microsoft Store。检查范围是本地领先远端的 `6d43cde`、`79ec31a`、`c354a72`、`d0abc0f`：豆包过期登录诊断、扫码状态检查及确认跳转、设置页重新扫码引导、B站 `v_voucher` 开播前人脸验证。检查开始时工作区干净，`origin/main` 为 `4af3aaf`；从远端重新 fetch 后仍是该提交。
+
+- 逐项复核新增风险验证解码、令牌处理、Cookie 跳转范围及前后端验证状态流；未发现可由现有代码与夹具确认的阻断问题。线上协议与真实账号结果仍需实测，不能把离线夹具当作成功开播或成功扫码。
+- 在原 0.3.5 源码上，本机 `cargo fmt --all --check`、严格 `cargo clippy --workspace --all-targets --locked -- -D warnings`、UI 201/201、Python 28/28 均通过；`cargo test --workspace --locked --no-fail-fast` 为 584 通过、0 失败、10 项按项目条件忽略。无真实直播账号开播、豆包扫码、在线语音或物理出声验收。
+- 应用版本准备升至 0.3.6、MSIX 1.3.6.0；Cargo/Tauri/锁文件和中英文更新说明已配套修改。商店公开文案仍不写第三方品牌名，审核说明指向待公开的 `store-v1.3.6.0` 对应完整源码。正式提交前须核对精确提交、独立 Windows CI、MSIX 身份与内容、配套源码公开及 Partner Center 实际状态。
+- 版本递增后 fmt、严格 Clippy 再次通过。首次完整 Rust 回归在未修改的 `diagnostics::tests::rotation_is_bounded_and_only_uses_fixed_fields` 断言上偶发失败；单项重跑通过，随后完整回归为 584 通过、0 失败、10 忽略。失败没有被抹去；该测试的并发/文件系统偶发性未在本轮定位到稳定根因，独立 CI 仍需验证。
