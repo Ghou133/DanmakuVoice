@@ -1765,10 +1765,14 @@ function renderDockVoice() {
 
 const lakeVolumeIcon = muted => muted ? icon('muted') : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h3l5 4V6L7 10H4z"></path><path d="M16 9.5a3.5 3.5 0 0 1 0 5"></path></svg>';
 
+// Doubao rejected the saved login: it still exists on disk but cannot speak.
+const doubaoLoginExpired = () => snapshot?.doubao_login_expired === true;
+const cloudLoginUsable = (provider, connection) => !!connection?.has_credential && !(provider === 'doubao' && doubaoLoginExpired());
+
 function lakeVoiceReady(preset) {
   const connection = snapshot.connections?.find(item => item.id === preset.connection_id);
   return ['dots', 'gpt_sovits'].includes(preset.provider)
-    ? localServiceState(preset.provider, connection).state === 'ready' : !!connection?.has_credential;
+    ? localServiceState(preset.provider, connection).state === 'ready' : cloudLoginUsable(preset.provider, connection);
 }
 
 function lakeVoiceWave(active = false, asleep = false) {
@@ -2374,7 +2378,7 @@ function serviceConnection(provider) {
 }
 
 function cloudPresetConnected(preset) {
-  return !!(preset && (snapshot.connections || []).some(connection => connection.id === preset.connection_id && connection.has_credential));
+  return !!(preset && (snapshot.connections || []).some(connection => connection.id === preset.connection_id && cloudLoginUsable(preset.provider, connection)));
 }
 
 function doubaoConnection(preset) {
@@ -2386,7 +2390,8 @@ async function guideDoubaoLogin(preferredPresetId = '') {
   const connection = doubaoConnection(preset);
   if (settingsDialog.open && !await allowLeaveSettings()) return false;
   const nextEditor = { type: 'qr', provider: 'doubao', id: connection?.id || '', makePreferred: true, preferredPresetId: preset?.id || '' };
-  if (settingsDialog.open) { editor = nextEditor; renderSettings(); }
+  // The QR page lives under 声音; from any other page (the home warning) go there.
+  if (settingsDialog.open && settingsTab === 'voices') { editor = nextEditor; renderSettings(); }
   else await openViewerSettings('voices', nextEditor);
   await startQr('doubao', connection?.id);
   return true;
@@ -2412,6 +2417,7 @@ function providerStatus(provider, connection) {
       : { tone: 'idle', label: t('未配置'), detail: t('先在服务设置中选择安装目录。') };
   }
   // The light reports saved account configuration, not a continuous cloud health probe.
+  if (provider === 'doubao' && connection?.has_credential && doubaoLoginExpired()) return { tone: 'error', label: t('登录已失效'), detail: t('重新扫码登录豆包后即可继续播报。') };
   if (provider === 'doubao' && connection?.has_credential) return { tone: 'ready', label: t('已登录'), detail: t('已在本机保存登录。可通过试听确认当前音色是否可用。') };
   if (provider === 'fish_audio' && connection?.has_credential) return { tone: 'ready', label: t('已连接'), detail: t('已在本机保存 API Key。可通过试听确认当前音色是否可用。') };
   return { tone: 'idle', label: provider === 'doubao' ? t('未登录') : t('未连接'), detail: provider === 'doubao' ? t('在设置中扫码登录豆包。') : t('在设置中连接 Fish Audio 账号。') };
@@ -3630,7 +3636,7 @@ let lakeReferenceLoad = 0;
 function lakeProviderConfigured(provider) {
   const connection = serviceConnection(provider);
   if (!connection) return false;
-  if (provider === 'doubao' || provider === 'fish_audio') return !!connection.has_credential;
+  if (provider === 'doubao' || provider === 'fish_audio') return cloudLoginUsable(provider, connection);
   const service = localServiceState(provider, connection);
   return !!service.directory || (!!service.state && !['unconfigured', 'unknown'].includes(service.state));
 }
@@ -3665,7 +3671,8 @@ function renderLakeVoiceAdd() {
 }
 
 function renderVoiceAddHead(title, provider) {
-  return `<header class="voice-add-head"><h2>${esc(title)}</h2>${button(t('连接设置'), 'service.configure', { id: provider, class: 'quiet' })}</header>`;
+  // Doubao's only connection setting is its QR login, so say so.
+  return `<header class="voice-add-head"><h2>${esc(title)}</h2>${button(t(provider === 'doubao' ? '重新扫码登录' : '连接设置'), 'service.configure', { id: provider, class: 'quiet' })}</header>`;
 }
 
 function renderReferenceFile(path, id) {
@@ -3739,7 +3746,8 @@ function renderVoiceAddDots() {
 function renderVoiceConnect(provider, connection) {
   if (provider === 'doubao') {
     const scanning = editor?.type === 'qr';
-    return `<section class="voice-connect"><h2>${esc(t('连接豆包'))}</h2><p class="voice-add-lead">${esc(t('用豆包 App 扫码，在手机上确认登录。'))}</p>${scanning ? `${qrMarkup('doubao', true)}<p class="lake-note"><button type="button" class="text-button" data-action="qr.retry">${esc(t('换一张'))}</button></p>` : `<div class="voice-add-actions">${button(t('扫码连接'), 'voice.doubao.connect', { id: connection?.id || '', class: 'primary' })}</div>`}<p class="voice-note">${esc(t('登录只存在这台电脑上，不会跟着备份导出。'))}</p></section>`;
+    const expired = !!connection?.has_credential && doubaoLoginExpired();
+    return `<section class="voice-connect"><h2>${esc(t(expired ? '豆包登录已失效' : '连接豆包'))}</h2><p class="voice-add-lead">${esc(t(expired ? '用豆包 App 重新扫码，在手机上确认登录。' : '用豆包 App 扫码，在手机上确认登录。'))}</p>${scanning ? `${qrMarkup('doubao', true)}<p class="lake-note"><button type="button" class="text-button" data-action="qr.retry">${esc(t('换一张'))}</button></p>` : `<div class="voice-add-actions">${button(t(expired ? '重新扫码' : '扫码连接'), 'voice.doubao.connect', { id: connection?.id || '', class: 'primary' })}</div>`}<p class="voice-note">${esc(t('登录只存在这台电脑上，不会跟着备份导出。'))}</p></section>`;
   }
   if (provider === 'fish_audio') {
     return `<section class="voice-connect"><h2>${esc(t('连接 Fish Audio'))}</h2><p class="voice-add-lead">${esc(t('在 Fish Audio 新建一个 API 密钥，复制到这里。'))} ${button(t('打开密钥页面'), 'fish.open_keys', { class: 'quiet', icon: 'external' })}</p><form data-form="service-fish">${field('credential', t('API 密钥'), '', 'type="password" required autocomplete="off" spellcheck="false"')}<p class="voice-note">${esc(t('只存在这台电脑上，不会被导出。'))}</p><div class="voice-add-actions">${saveButton(t('连接'))}</div></form></section>`;
@@ -4235,7 +4243,9 @@ function renderLakeSettingsHome() {
   const avatar = `<span class="s-avatar color-${identityColor(identity.name)}">${esc(initial(identity.name))}${identity.avatar ? `<img src="${esc(identity.avatar)}" alt="" referrerpolicy="no-referrer">` : ''}</span>`;
   const obsConnected = snapshot.obs?.status?.state === 'ok' || !!snapshot.obs?.status?.connected;
   const obsDetail = obsConnected ? t('已连接') : lakeObsConfigured() ? t('OBS 还没打开') : t('还没连上');
-  const warning = snapshot.live?.state === 'session_expired' ? `<button type="button" class="lake-settings-warning" data-action="lake.room.relogin">${esc(t('哔哩哔哩登录已失效 · 重新扫码'))}${icon('arrow')}</button>` : '';
+  const biliWarning = snapshot.live?.state === 'session_expired' ? `<button type="button" class="lake-settings-warning" data-action="lake.room.relogin">${esc(t('哔哩哔哩登录已失效 · 重新扫码'))}${icon('arrow')}</button>` : '';
+  const doubaoWarning = doubaoLoginExpired() ? `<button type="button" class="lake-settings-warning" data-action="voice.login">${esc(t('豆包登录已失效 · 重新扫码'))}${icon('arrow')}</button>` : '';
+  const warning = biliWarning + doubaoWarning;
   return `<div class="lake-settings-page lake-home">${warning}<nav class="lake-home-primary" aria-label="${esc(t('设置分类'))}">${row('room', avatar, '直播间', snapshot.account?.user_id ? identity.name : t('还没登录'))}${row('voices', lakeMiniWave(), '声音', `${voice ? presetLabel(voice) : t('还没有默认声音')} · ${snapshot.presets.length}`)}${row('overlay', `<span class="lake-overlay-mini${obsConnected ? ' on' : ''}"><i></i><b></b><b></b><b></b></span>`, 'OBS', obsDetail)}${row('readings', `<i class="lake-home-count">${count}</i>`, '记住的读法', t('观众名字、词和表情'))}</nav><div class="lake-home-foot"><nav class="lake-home-secondary" aria-label="${esc(t('更多设置'))}">${minor('general', '通用')}${minor('advanced', '高级')}</nav><footer class="lake-settings-footer">${lakeVersionRow()}</footer></div></div>`;
 }
 
@@ -5117,8 +5127,8 @@ async function handleAction(action, id, target) {
     await settleVoiceAuditionChoice();
     const preset = snapshot.presets.find(item => item.id === id);
     if (!preset) return;
+    if (preset.provider === 'doubao' && !cloudLoginUsable('doubao', doubaoConnection(preset))) { closeVoicePanel(); return guideDoubaoLogin(preset.id); }
     if (preset.id === snapshot.rules?.default_preset_id) return;
-    if (preset.provider === 'doubao' && !doubaoConnection(preset)?.has_credential) { closeVoicePanel(); return guideDoubaoLogin(preset.id); }
     await command('presets.default', { id: preset.id }, { quiet: true });
     showToast(getLanguage() === 'en' ? `Future chat will use “${presetLabel(preset)}”.` : `之后的弹幕用「${presetLabel(preset)}」播报`);
     renderVoicePanel();

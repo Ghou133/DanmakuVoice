@@ -2080,6 +2080,8 @@ async fn exports_and_snapshots_never_contain_protected_credentials() {
         .unwrap();
     let snapshot = app.snapshot().unwrap();
     assert_eq!(snapshot["connections"][0]["has_credential"], true);
+    // A saved login is not reported as rejected until Doubao rejects it.
+    assert_eq!(snapshot["doubao_login_expired"], false);
     assert!(!snapshot.to_string().contains(secret));
     let export = directory.path().join("configuration.json");
     app.dispatch("configuration.export", json!({"path":export}))

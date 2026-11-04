@@ -334,6 +334,13 @@ impl DoubaoClient {
             });
     }
 
+    /// Whether Doubao rejected the saved login, pausing every client until a
+    /// new QR login is confirmed. Read-only; it never contacts the service.
+    pub fn login_rejected() -> bool {
+        DoubaoPauseReason::from_byte(process_pause().load(Ordering::Acquire) as u8)
+            == Some(DoubaoPauseReason::Authentication)
+    }
+
     /// A confirmed QR login replaces the credential used by all new clients.
     /// Clear their shared pause only after the new credential is persisted.
     pub fn resume_after_confirmed_login() {

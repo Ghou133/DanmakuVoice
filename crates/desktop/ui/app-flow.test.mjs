@@ -540,6 +540,50 @@ test('Doubao QR setup waits for pending settings saves before replacing the page
   assert.equal(vm.runInContext('editor.type', context), 'qr');
 });
 
+test('a Doubao login the service rejected points straight back to its QR page', async () => {
+  const context = appContext();
+  vm.runInContext(`snapshot.connections.push({ id: 'doubao-connection', settings: { provider: 'doubao' }, has_credential: true });
+    snapshot.presets = [{ id: 'doubao-voice', provider: 'doubao', connection_id: 'doubao-connection' }];
+    snapshot.doubao_voices = [{ id: 'available', name: '温柔' }];
+    snapshot.rules.default_preset_id = 'doubao-voice';`, context);
+  const status = vm.runInContext('providerStatus', context);
+  const home = () => vm.runInContext('renderLakeSettingsHome()', context);
+  const addPage = () => vm.runInContext(`editor = { type: 'voice-add', provider: 'doubao' }; renderLakeVoiceAdd()`, context);
+  // Still accepted: signed in, no warning, the catalog and a plain re-login link.
+  assert.equal(status('doubao', { has_credential: true }).tone, 'ready');
+  assert.doesNotMatch(home(), /豆包登录已失效/);
+  assert.match(addPage(), /voice\.catalog\.add/);
+  assert.match(addPage(), /data-action="service\.configure" data-id="doubao"[^>]*>[^<]*重新扫码登录/);
+
+  vm.runInContext('snapshot.doubao_login_expired = true', context);
+  assert.deepEqual({ ...status('doubao', { has_credential: true }) }, { tone: 'error', label: '登录已失效', detail: '重新扫码登录豆包后即可继续播报。' });
+  assert.match(home(), /class="lake-settings-warning" data-action="voice\.login">豆包登录已失效 · 重新扫码/);
+  const page = addPage();
+  assert.match(page, /豆包登录已失效/);
+  assert.match(page, /data-action="voice\.doubao\.connect"[^>]*>[^<]*重新扫码/);
+  assert.doesNotMatch(page, /voice\.catalog\.add/);
+
+  // Picking the Doubao voice, even the current default, asks for the QR login.
+  const calls = [];
+  context.mockGuide = async id => { calls.push(id); };
+  context.mockCommand = async action => { throw new Error(`unexpected ${action}`); };
+  vm.runInContext('guideDoubaoLogin = mockGuide; command = mockCommand; closeVoicePanel = () => {}', context);
+  await vm.runInContext('handleAction', context)('voice.pick', 'doubao-voice', null);
+  assert.deepEqual(calls, ['doubao-voice']);
+});
+
+test('the Doubao QR login opened from the settings home lands on the voices page', async () => {
+  const context = appContext();
+  vm.runInContext(`snapshot.connections.push({ id: 'doubao-connection', settings: { provider: 'doubao' }, has_credential: true });
+    settingsDialog.open = true; settingsTab = 'home'; editor = null;`, context);
+  const calls = [];
+  context.mockOpen = async (tab, next) => { calls.push(['open', tab, next.type, next.provider]); };
+  context.mockStart = async (provider, id) => { calls.push(['qr', provider, id]); };
+  vm.runInContext('allowLeaveSettings = async () => true; openViewerSettings = mockOpen; startQr = mockStart', context);
+  assert.equal(await vm.runInContext('guideDoubaoLogin', context)(), true);
+  assert.deepEqual(calls, [['open', 'voices', 'qr', 'doubao'], ['qr', 'doubao', 'doubao-connection']]);
+});
+
 test('completed Doubao QR promotes the voice chosen before login', async () => {
   const context = appContext();
   vm.runInContext(`snapshot.connections.push({ id: 'doubao-connection', settings: { provider: 'doubao' }, has_credential: false });

@@ -932,6 +932,9 @@ impl Application {
             "status":{"error":state.status_error || device_lost,"message":status_message},
             "data_dir":state.store.data_dir(),
             "network_disabled":state.network_disabled,
+            // The saved Doubao login still exists but the service rejected it;
+            // settings offer a new QR login until one is confirmed.
+            "doubao_login_expired": dobao::DoubaoClient::login_rejected(),
             "overlay":state.overlay_view(),
             "obs":{"settings":state.obs_settings,"has_password":state.obs_has_password,"status":state.obs_view_status(),"detected":state.obs_detected,"local":state.obs_settings.is_local()}
         });

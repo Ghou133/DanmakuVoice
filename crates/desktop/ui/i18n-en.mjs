@@ -882,6 +882,11 @@ TA 的声音	Their voice
 可以用一段录音克隆声音	Clone a voice from a recording
 名字	Name
 哔哩哔哩登录已失效 · 重新扫码	Bilibili sign-in expired · Scan again
+豆包登录已失效 · 重新扫码	Doubao sign-in expired · Scan again
+豆包登录已失效	Doubao sign-in expired
+重新扫码登录	Sign in again by scanning
+重新扫码登录豆包后即可继续播报。	Scan to sign in to Doubao again to resume reading.
+用豆包 App 重新扫码，在手机上确认登录。	Scan again with the Doubao app and confirm on your phone.
 在 OBS 里打开「工具 › WebSocket 服务器设置」，勾上「开启 WebSocket 服务器」，把端口和密码填在下面。	In OBS, open Tools › WebSocket Server Settings, enable the server, then enter its port and password below.
 在下面选一个声音，设为默认。	Choose a voice below and make it your default.
 地址	Address
