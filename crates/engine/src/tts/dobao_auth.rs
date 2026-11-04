@@ -25,6 +25,10 @@ const QR_TTL: Duration = Duration::from_secs(60);
 const CONFIRMED_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
+const CSRF_COOKIE: &str = "passport_csrf_token";
+/// Hops followed from a confirmed scan's `redirect_url` while the login Cookie
+/// is still missing; each must stay on the Doubao origin.
+const MAX_LOGIN_REDIRECTS: usize = 4;
 
 /// Display the PNG directly or draw the bool matrix as black modules, with a
 /// quiet zone of at least two modules. The QR content is an opaque login token.
@@ -223,13 +227,22 @@ impl DoubaoQrAuth {
             .get("data")
             .and_then(Value::as_object)
             .ok_or_else(|| protocol("二维码登录状态暂时不可用"))?;
+        let redirect = data
+            .get("redirect_url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty());
         if data.get("status").and_then(Value::as_str) == Some("expired") {
             session.expire();
         } else if data.get("status").and_then(Value::as_str) == Some("confirmed")
-            || data
-                .get("redirect_url")
-                .is_some_and(|value| value.as_str().is_some_and(|url| !url.is_empty()))
+            || redirect.is_some()
         {
+            if !has_login_cookie(&session.jar)
+                && let Some(redirect) = redirect
+            {
+                let redirect = Zeroizing::new(redirect.to_owned());
+                self.follow_login_redirects(&redirect, session, cancellation)
+                    .await?;
+            }
             let cookie = cookie_header(&session.jar);
             session.confirmed_cookie = Some(
                 validate_cookie_header(&cookie)
@@ -245,6 +258,73 @@ impl DoubaoQrAuth {
             return Err(protocol("二维码登录状态暂时不可用"));
         }
         Ok(session.status)
+    }
+
+    /// A confirmed scan may hand the login Cookie out only on the page its
+    /// `redirect_url` names, as a browser would receive it while following
+    /// that link. Follow it on the Doubao origin, collecting Set-Cookie, and
+    /// stop once a session Cookie arrives. Bodies are discarded unread.
+    async fn follow_login_redirects(
+        &self,
+        first: &str,
+        session: &mut QrSession,
+        cancellation: &CancellationToken,
+    ) -> Result<(), TtsError> {
+        let mut next = Url::parse(first).ok();
+        for _ in 0..MAX_LOGIN_REDIRECTS {
+            let Some(url) = next.take().filter(|url| self.login_redirect_allowed(url)) else {
+                break;
+            };
+            let mut headers = HeaderMap::new();
+            headers.insert(header::USER_AGENT, HeaderValue::from_static(USER_AGENT));
+            headers.insert(
+                header::ACCEPT_LANGUAGE,
+                HeaderValue::from_static("zh-CN,zh;q=0.9"),
+            );
+            if !session.jar.is_empty() {
+                let cookie = cookie_header(&session.jar);
+                headers.insert(
+                    header::COOKIE,
+                    HeaderValue::from_str(&cookie).map_err(|_| configuration("登录会话无效"))?,
+                );
+            }
+            let response = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(TtsError::Cancelled),
+                result = self.http.get(url.clone()).headers(headers).send() => result,
+            }
+            .map_err(|_| TtsError::Network {
+                service: SERVICE,
+                stage: "",
+                reason: "登录服务暂时无法连接",
+            })?;
+            merge_set_cookies(&mut session.jar, response.headers());
+            if has_login_cookie(&session.jar) || !response.status().is_redirection() {
+                break;
+            }
+            next = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|location| url.join(location).ok());
+        }
+        Ok(())
+    }
+
+    /// Only the Doubao site (or the configured origin) may receive the
+    /// in-progress login Cookie.
+    fn login_redirect_allowed(&self, url: &Url) -> bool {
+        if !url.username().is_empty() || url.password().is_some() {
+            return false;
+        }
+        if url.origin() == self.origin.origin() {
+            return true;
+        }
+        url.scheme() == "https"
+            && url.port().is_none()
+            && url
+                .host_str()
+                .is_some_and(|host| host == "doubao.com" || host.ends_with(".doubao.com"))
     }
 
     async fn upstream(
@@ -285,9 +365,16 @@ impl DoubaoQrAuth {
             header::REFERER,
             HeaderValue::from_static("https://www.doubao.com/chat/?from_logout=1"),
         );
+        // The passport rejects `check_qrconnect` as 非法请求 (error_code 2035)
+        // unless this header repeats the `passport_csrf_token` Cookie it set on
+        // `get_qrcode`; the locally generated value only covers the first call.
+        let csrf = session
+            .jar
+            .get(CSRF_COOKIE)
+            .map_or(session.csrf.as_str(), |value| value.as_str());
         headers.insert(
             "x-tt-passport-csrf-token",
-            HeaderValue::from_str(&session.csrf).map_err(|_| configuration("登录会话无效"))?,
+            HeaderValue::from_str(csrf).map_err(|_| configuration("登录会话无效"))?,
         );
         headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
         headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
@@ -324,6 +411,12 @@ impl DoubaoQrAuth {
         }
         Ok(body)
     }
+}
+
+fn has_login_cookie(jar: &BTreeMap<String, Zeroizing<String>>) -> bool {
+    ["sessionid", "sessionid_ss"]
+        .iter()
+        .any(|key| jar.get(*key).is_some_and(|value| !value.is_empty()))
 }
 
 fn nonzero_error(value: &Value) -> bool {
@@ -365,8 +458,12 @@ fn merge_set_cookies(jar: &mut BTreeMap<String, Zeroizing<String>>, headers: &He
 }
 
 fn qr_visual(data: &serde_json::Map<String, Value>) -> Result<QrVisual, TtsError> {
-    if let Some(base64_png) = data.get("qrcode").and_then(Value::as_str)
-        && base64_png.starts_with("iVBORw0KGgo")
+    // Currently sent as a `data:image/png;base64,` URL; earlier as bare base64.
+    if let Some(base64_png) = data.get("qrcode").and_then(Value::as_str).map(|value| {
+        value
+            .strip_prefix("data:image/png;base64,")
+            .unwrap_or(value)
+    }) && base64_png.starts_with("iVBORw0KGgo")
     {
         let compact = Zeroizing::new(
             base64_png
@@ -447,18 +544,23 @@ mod tests {
                 assert!(request.contains("aid=497858"));
                 assert!(request.contains("verifyFp=verify_"));
                 assert!(request.contains("fp=verify_"));
+                let lower = request.to_ascii_lowercase();
                 let (json, cookies) = match index {
                     0 => {
                         assert!(request.starts_with("GET /passport/web/get_qrcode/?"));
+                        assert!(!lower.contains("x-tt-passport-csrf-token: server-csrf"));
                         (
                             r#"{"data":{"token":"secret-qr-token","qrcode_index_url":"https://www.doubao.com/qr/secret-qr-token"}}"#,
-                            "Set-Cookie: csrf=abc; Path=/\r\n",
+                            "Set-Cookie: passport_csrf_token=server-csrf; Path=/\r\n",
                         )
                     }
                     1 => {
                         assert!(request.starts_with("GET /passport/web/check_qrconnect/?"));
                         assert!(request.contains("token=secret-qr-token"));
-                        assert!(request.contains("csrf=abc"));
+                        assert!(request.contains("passport_csrf_token=server-csrf"));
+                        // The status check repeats the server's CSRF Cookie,
+                        // otherwise the passport answers error_code 2035.
+                        assert!(lower.contains("x-tt-passport-csrf-token: server-csrf"));
                         (r#"{"data":{"status":"scanned"}}"#, "")
                     }
                     _ => (
@@ -496,6 +598,113 @@ mod tests {
         assert_eq!(session.status(), QrStatus::Consumed);
         assert!(session.take_confirmed_cookie().is_err());
         server.await.unwrap();
+    }
+
+    async fn respond(socket: &mut tokio::net::TcpStream, head: &str, json: &str) {
+        socket
+            .write_all(
+                format!(
+                    "{head}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn confirmed_scan_follows_doubao_redirect_for_the_login_cookie() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = Url::parse(&format!("http://{address}")).unwrap();
+        let server = tokio::spawn(async move {
+            for index in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = super::super::test_http::read_request(&mut socket).await;
+                let request = String::from_utf8(request).unwrap();
+                match index {
+                    0 => respond(
+                        &mut socket,
+                        "HTTP/1.1 200 OK\r\nSet-Cookie: passport_csrf_token=server-csrf; Path=/",
+                        r#"{"data":{"token":"secret-qr-token","qrcode":"data:image/png;base64,bm90LWEtcG5n","qrcode_index_url":"https://www.doubao.com/qr/secret-qr-token"}}"#,
+                    )
+                    .await,
+                    1 => {
+                        assert!(request.starts_with("GET /passport/web/check_qrconnect/?"));
+                        let json = format!(
+                            r#"{{"data":{{"status":"confirmed","redirect_url":"http://{address}/passport/callback?ticket=secret"}}}}"#
+                        );
+                        respond(&mut socket, "HTTP/1.1 200 OK", &json).await;
+                    }
+                    2 => {
+                        assert!(request.starts_with("GET /passport/callback?ticket=secret "));
+                        assert!(request.contains("passport_csrf_token=server-csrf"));
+                        respond(
+                            &mut socket,
+                            "HTTP/1.1 302 Found\r\nLocation: /chat/\r\nSet-Cookie: sid_guard=guard; Path=/",
+                            "",
+                        )
+                        .await;
+                    }
+                    _ => {
+                        assert!(request.starts_with("GET /chat/ "));
+                        respond(
+                            &mut socket,
+                            "HTTP/1.1 200 OK\r\nSet-Cookie: sessionid=redirect-secret; Path=/",
+                            "",
+                        )
+                        .await;
+                    }
+                }
+            }
+        });
+        let auth = DoubaoQrAuth::with_origin(origin).unwrap();
+        let cancellation = CancellationToken::new();
+        let mut session = auth.start_qr_login(&cancellation).await.unwrap();
+        assert!(matches!(session.qr_visual(), QrVisual::Matrix { .. }));
+        assert_eq!(
+            auth.poll_qr_login(&mut session, &cancellation)
+                .await
+                .unwrap(),
+            QrStatus::Confirmed
+        );
+        let cookie = session.take_confirmed_cookie().unwrap();
+        assert!(cookie.contains("sessionid=redirect-secret"));
+        assert!(cookie.contains("sid_guard=guard"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn login_cookie_is_never_sent_off_the_doubao_site() {
+        let auth = DoubaoQrAuth::new().unwrap();
+        for allowed in [
+            "https://www.doubao.com/passport/callback",
+            "https://doubao.com/",
+        ] {
+            assert!(auth.login_redirect_allowed(&Url::parse(allowed).unwrap()));
+        }
+        for refused in [
+            "https://evil.example/",
+            "https://doubao.com.evil.example/",
+            "http://www.doubao.com/",
+            "https://www.doubao.com:8443/",
+            "https://user@www.doubao.com/",
+        ] {
+            assert!(!auth.login_redirect_allowed(&Url::parse(refused).unwrap()));
+        }
+    }
+
+    #[test]
+    fn server_png_is_used_from_a_data_url() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend(200u32.to_be_bytes());
+        png.extend(200u32.to_be_bytes());
+        let data = serde_json::json!({
+            "qrcode": format!("data:image/png;base64,{}", STANDARD.encode(&png)),
+        });
+        let visual = qr_visual(data.as_object().unwrap()).unwrap();
+        assert!(matches!(&visual, QrVisual::Png(bytes) if *bytes == png));
     }
 
     #[tokio::test]
