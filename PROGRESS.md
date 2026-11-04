@@ -1580,3 +1580,11 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - 在原 0.3.5 源码上，本机 `cargo fmt --all --check`、严格 `cargo clippy --workspace --all-targets --locked -- -D warnings`、UI 201/201、Python 28/28 均通过；`cargo test --workspace --locked --no-fail-fast` 为 584 通过、0 失败、10 项按项目条件忽略。无真实直播账号开播、豆包扫码、在线语音或物理出声验收。
 - 应用版本准备升至 0.3.6、MSIX 1.3.6.0；Cargo/Tauri/锁文件和中英文更新说明已配套修改。商店公开文案仍不写第三方品牌名，审核说明指向待公开的 `store-v1.3.6.0` 对应完整源码。正式提交前须核对精确提交、独立 Windows CI、MSIX 身份与内容、配套源码公开及 Partner Center 实际状态。
 - 版本递增后 fmt、严格 Clippy 再次通过。首次完整 Rust 回归在未修改的 `diagnostics::tests::rotation_is_bounded_and_only_uses_fixed_fields` 断言上偶发失败；单项重跑通过，随后完整回归为 584 通过、0 失败、10 忽略。失败没有被抹去；该测试的并发/文件系统偶发性未在本轮定位到稳定根因，独立 CI 仍需验证。
+
+### 2026-11-04 独立 CI、配套源码与正式送审
+
+- 冻结提交 `6af1c96ab1e6cab28c4777a319f03ffe4efd85c6` 已推送 GitHub main。[Windows CI 41853279881](https://github.com/Ghou133/DanmakuVoice/actions/runs/41853279881) 两个作业均成功：FFmpeg 官方源码与锁定哈希核验、版本与打包测试、格式、UI、严格 Clippy、Rust 全量测试、EXE/源码配对、空 Cargo 缓存离线重建、MSIX 打包与内容验证。正式构建来自该提交，未将本地首次偶发诊断测试失败抹去。
+- 下载的 CI artifact ZIP 为 144,007,069 字节，CRC 正常；其 `SUBMISSION-README.txt` 标识应用 0.3.6、源码提交为上述完整 SHA、非开发快照。配套完整源码 `DanmakuVoice-source.zip` SHA-256 `3d46b37fb43fcd75a7d313431145651d6410130744d25103e8a40a27a4dc55d1`；未签名提交包 `DanmakuVoice-store-submission.msix` SHA-256 `bf3cc06cbe1d894756100026304e3ce53aaed192f0782663321af8274eaaecae`。二者与 artifact 的校验文件一致且 ZIP CRC 正常；源码内提交标记和 MSIX 内源码位置均指向同一提交。实际 MSIX 清单为 1.3.6.0、x64、既有包身份与 Publisher CN、仅 `runFullTrust`。证据文件位于 `target/release-0.3.6-20261104/`。
+- [store-v1.3.6.0 配套完整源码](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.6.0) 已公开，标签指向冻结提交；GitHub 源码资产摘要与本地 SHA-256 一致，匿名 HEAD 返回 HTTP 200。仅发布配套源码和校验文件，没有把未签名 MSIX 作为普通用户安装包公开。
+- Partner Center 产品 `9P4DFD8HGN03` 显示 Submission 6 已在 Microsoft Store 上架。本次创建 Submission 7（`1152921505702315166`），保存中英文 0.3.6 更新说明；沿用原有桌面截图、产品资料、年龄分级和认证通过后自动发布设置。认证说明更新为新版源码提交、公开链接及校验值，没有填写审核凭据。上传本地上述 CI MSIX 后，后台识别 1.3.6.0 x64、Windows Desktop，显示 `Validated`；保存并重新打开 Packages 时仅有该新包，旧 1.3.5.0 已从本次草稿替换。Partner Center 没有显示上传文件 SHA-256，文件来源依据本次选择的已核验本地路径与后台显示的版本/架构。
+- 已点击“提交进行认证”。后台最终显示 **正在认证更新**：Submission 7 提交完成、预处理进行中，认证和发布尚未开始；页面明确“产品在通过认证后立即开始发布”。状态截图为 `target/release-0.3.6-20261104/store-submission-7-in-certification.png`。此时尚未证实微软认证通过、1.3.6.0 上架、签名商店包安装升级、真实账号人脸验证、豆包扫码登录、在线语音或物理出声；离线 CI 和送审不能替代这些验收。
