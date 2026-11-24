@@ -236,12 +236,15 @@ impl DoubaoQrAuth {
         } else if data.get("status").and_then(Value::as_str) == Some("confirmed")
             || redirect.is_some()
         {
-            if !has_login_cookie(&session.jar)
-                && let Some(redirect) = redirect
-            {
+            if let Some(redirect) = redirect {
                 let redirect = Zeroizing::new(redirect.to_owned());
-                self.follow_login_redirects(&redirect, session, cancellation)
-                    .await?;
+                if let Err(error) = self
+                    .follow_login_redirects(&redirect, session, cancellation)
+                    .await
+                    && !has_login_cookie(&session.jar)
+                {
+                    return Err(error);
+                }
             }
             let cookie = cookie_header(&session.jar);
             session.confirmed_cookie = Some(
@@ -299,7 +302,7 @@ impl DoubaoQrAuth {
                 reason: "登录服务暂时无法连接",
             })?;
             merge_set_cookies(&mut session.jar, response.headers());
-            if has_login_cookie(&session.jar) || !response.status().is_redirection() {
+            if !response.status().is_redirection() {
                 break;
             }
             next = response
@@ -439,7 +442,8 @@ fn cookie_header(jar: &BTreeMap<String, Zeroizing<String>>) -> Zeroizing<String>
 fn merge_set_cookies(jar: &mut BTreeMap<String, Zeroizing<String>>, headers: &HeaderMap) {
     for raw in headers.get_all(header::SET_COOKIE) {
         let Ok(raw) = raw.to_str() else { continue };
-        let pair = raw.split(';').next().unwrap_or_default().trim();
+        let mut parts = raw.split(';');
+        let pair = parts.next().unwrap_or_default().trim();
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
@@ -451,6 +455,18 @@ fn merge_set_cookies(jar: &mut BTreeMap<String, Zeroizing<String>>, headers: &He
                 .bytes()
                 .any(|byte| byte <= 32 || byte == 127 || byte == b';')
         {
+            continue;
+        }
+        let expired = parts.any(|attr| {
+            attr.trim().split_once('=').is_some_and(|(name, val)| {
+                name.trim().eq_ignore_ascii_case("max-age")
+                    && val.trim().parse::<i64>().is_ok_and(|secs| secs <= 0)
+            })
+        });
+        if value.is_empty() || expired {
+            if !matches!(key, "sessionid" | "sessionid_ss") {
+                jar.remove(key);
+            }
             continue;
         }
         jar.insert(key.to_owned(), Zeroizing::new(value.to_owned()));
@@ -716,5 +732,35 @@ mod tests {
             auth.start_qr_login(&cancellation).await.unwrap_err(),
             TtsError::Cancelled
         );
+    }
+
+    #[test]
+    fn merge_set_cookies_ignores_deletions_without_clobbering_session_cookie() {
+        let mut jar = BTreeMap::new();
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("temp=old; Path=/"),
+        );
+        headers.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("sessionid=live-token; Domain=.doubao.com; Path=/"),
+        );
+        merge_set_cookies(&mut jar, &headers);
+        assert_eq!(jar.get("sessionid").map(|v| v.as_str()), Some("live-token"));
+        assert_eq!(jar.get("temp").map(|v| v.as_str()), Some("old"));
+
+        let mut cleanup = HeaderMap::new();
+        cleanup.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("temp=; Max-Age=0; Path=/"),
+        );
+        cleanup.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("sessionid=; Max-Age=0; Path=/passport"),
+        );
+        merge_set_cookies(&mut jar, &cleanup);
+        assert!(!jar.contains_key("temp"));
+        assert_eq!(jar.get("sessionid").map(|v| v.as_str()), Some("live-token"));
     }
 }

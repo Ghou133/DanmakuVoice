@@ -37,7 +37,7 @@ const MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(3200);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
 
 pub const DEFAULT_VOICE_ID: &str = "zh_female_wenroutaozi_uranus_bigtts";
 pub const CLASSIC_VOICE_ID: &str = "zh_female_wenroutaozi_v2_mars_bigtts";
@@ -221,6 +221,20 @@ impl DoubaoPauseReason {
             Self::RateLimited => 3,
         }
     }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::AccountBlocked => "account_blocked",
+            Self::RateLimited => "rate_limited",
+        }
+    }
+    fn paused_message(self) -> &'static str {
+        match self {
+            Self::Authentication => "豆包登录已失效，请重新扫码登录",
+            Self::AccountBlocked => "豆包账号或设备请求受限，请稍后手动恢复或重新登录",
+            Self::RateLimited => "豆包请求频率过高已暂停，请稍后手动恢复",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -334,11 +348,29 @@ impl DoubaoClient {
             });
     }
 
+    /// Current process-wide pause reason, if any. Read-only; never contacts the service.
+    pub fn process_pause_reason() -> Option<DoubaoPauseReason> {
+        DoubaoPauseReason::from_byte(process_pause().load(Ordering::Acquire) as u8)
+    }
+
     /// Whether Doubao rejected the saved login, pausing every client until a
     /// new QR login is confirmed. Read-only; it never contacts the service.
     pub fn login_rejected() -> bool {
-        DoubaoPauseReason::from_byte(process_pause().load(Ordering::Acquire) as u8)
-            == Some(DoubaoPauseReason::Authentication)
+        Self::process_pause_reason() == Some(DoubaoPauseReason::Authentication)
+    }
+
+    /// Manually resume a non-authentication pause (rate limit or temporary block).
+    /// An authentication rejection still requires a new confirmed login.
+    pub fn resume_recoverable_pause() -> bool {
+        process_pause()
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                matches!(
+                    DoubaoPauseReason::from_byte(state as u8),
+                    Some(DoubaoPauseReason::AccountBlocked | DoubaoPauseReason::RateLimited)
+                )
+                .then_some(state & !255)
+            })
+            .is_ok()
     }
 
     /// A confirmed QR login replaces the credential used by all new clients.
@@ -354,8 +386,8 @@ impl DoubaoClient {
         if text.trim().is_empty() || text.chars().count() > 10_000 {
             return Err(configuration("朗读文本须为 1 到 10000 个字符"));
         }
-        if self.pause_reason().is_some() {
-            return Err(configuration("豆包请求已暂停，请检查登录或稍后手动恢复"));
+        if let Some(reason) = self.pause_reason() {
+            return Err(configuration(reason.paused_message()));
         }
         let inner = Arc::clone(&self.inner);
         let text = text.trim().to_owned();
@@ -371,8 +403,10 @@ impl DoubaoClient {
                 if !inner.current_login() {
                     return Err(configuration("登录已更新，请重新提交语音任务"));
                 }
-                if inner.pause.load(Ordering::Acquire) as u8 != 0 {
-                    return Err(configuration("豆包请求已暂停，请检查登录或稍后手动恢复"));
+                if let Some(reason) =
+                    DoubaoPauseReason::from_byte(inner.pause.load(Ordering::Acquire) as u8)
+                {
+                    return Err(configuration(reason.paused_message()));
                 }
                 if let Some(instant) = gate.next_start {
                     tokio::select! {
@@ -516,8 +550,10 @@ async fn run_request(
     let mut adts = AdtsDecoder::default();
     loop {
         // Time spent while playback takes earlier frames is not counted.
+        // Before the first audio frame arrives, honor the configured
+        // first-audio timeout instead of cutting off early at `idle_timeout`.
         let idle = Instant::now() + inner.idle_timeout;
-        let awaiting_first_audio = !adts.has_audio && first_audio < idle;
+        let awaiting_first_audio = !adts.has_audio;
         let message = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Ok(()),
@@ -1223,6 +1259,86 @@ mod tests {
         assert_eq!(second.recv().await.unwrap().unwrap(), FRAME);
         assert!(first.recv().await.is_none());
         assert!(second.recv().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn recoverable_pause_can_be_resumed_while_auth_pause_still_requires_relogin() {
+        let pause = process_pause();
+        DoubaoClient::resume_after_confirmed_login();
+        let generation = pause.load(Ordering::Acquire) & !255;
+
+        pause.store(
+            generation | u64::from(DoubaoPauseReason::RateLimited.as_byte()),
+            Ordering::Release,
+        );
+        assert_eq!(
+            DoubaoClient::process_pause_reason(),
+            Some(DoubaoPauseReason::RateLimited)
+        );
+        assert!(!DoubaoClient::login_rejected());
+        let client = DoubaoClient::new(config()).unwrap();
+        let Err(err) = client.stream("测试", &CancellationToken::new()) else {
+            panic!("expected rate-limited pause error");
+        };
+        assert!(err.to_string().contains("频率过高"), "{err}");
+        assert!(DoubaoClient::resume_recoverable_pause());
+        assert_eq!(DoubaoClient::process_pause_reason(), None);
+
+        pause.store(
+            generation | u64::from(DoubaoPauseReason::Authentication.as_byte()),
+            Ordering::Release,
+        );
+        assert!(DoubaoClient::login_rejected());
+        assert!(!DoubaoClient::resume_recoverable_pause());
+        assert_eq!(
+            DoubaoClient::process_pause_reason(),
+            Some(DoubaoPauseReason::Authentication)
+        );
+        DoubaoClient::resume_after_confirmed_login();
+        assert_eq!(DoubaoClient::process_pause_reason(), None);
+    }
+
+    #[tokio::test]
+    async fn first_audio_timeout_is_not_cut_off_by_shorter_idle_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!(
+            "ws://{}/samantha/audio/tts",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            for _ in 0..2 {
+                ws.next().await.unwrap().unwrap();
+            }
+            // Wait longer than the test's 40 ms idle_timeout, but shorter than
+            // the 2 s first-audio timeout.
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            ws.send(Message::Binary(FRAME.to_vec().into()))
+                .await
+                .unwrap();
+            ws.send(Message::Text(r#"{"event":"finish"}"#.into()))
+                .await
+                .unwrap();
+        });
+        let mut cfg = config();
+        cfg.timeout_secs = 2;
+        let client = DoubaoClient {
+            inner: Arc::new(Inner {
+                config: cfg,
+                endpoint,
+                gate: Arc::new(Mutex::new(GateState::default())),
+                interval: Duration::ZERO,
+                idle_timeout: Duration::from_millis(40),
+                pause: Arc::new(AtomicU64::new(0)),
+                login_generation: 0,
+            }),
+        };
+        let mut stream = client.stream("测试", &CancellationToken::new()).unwrap();
+        assert_eq!(stream.recv().await.unwrap().unwrap(), FRAME);
+        assert!(stream.recv().await.is_none());
         server.await.unwrap();
     }
 }

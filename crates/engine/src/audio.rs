@@ -63,17 +63,20 @@ impl AudioError {
     }
 }
 
+const MAX_FRAME_CHANNELS: usize = 16;
+
 #[derive(Clone, Copy)]
-struct TaggedSample {
+struct TaggedFrame {
     job_id: u64,
-    value: f32,
+    values: [f32; MAX_FRAME_CHANNELS],
 }
 
 struct Shared {
     /// Serialize only job activation/invalidation. The CPAL callback and
-    /// per-sample producers never take this control lock.
+    /// per-frame producers never take this control lock.
     control: Mutex<()>,
-    samples: ArrayQueue<TaggedSample>,
+    channels: usize,
+    samples: ArrayQueue<TaggedFrame>,
     active_job: AtomicU64,
     volume_bits: AtomicU32,
     disconnected: AtomicBool,
@@ -197,7 +200,7 @@ impl AudioWriter {
         self.shared.underruns.load(Ordering::Relaxed)
     }
     pub fn queued_samples(&self) -> usize {
-        self.shared.samples.len()
+        self.shared.samples.len() * self.shared.channels
     }
 
     /// Backpressure is on the producer, never the CPAL callback. The caller
@@ -252,16 +255,18 @@ impl AudioWriter {
         stall_timeout: Duration,
         progress: Option<&AtomicBool>,
     ) -> Result<(), AudioError> {
+        let channels = self.shared.channels;
         let mut marked_progress = false;
-        for value in samples {
-            let sample = TaggedSample {
-                job_id,
-                value: if value.is_finite() {
+        for chunk in samples.chunks(channels) {
+            let mut values = [0.0f32; MAX_FRAME_CHANNELS];
+            for (slot, value) in values.iter_mut().zip(chunk.iter()) {
+                *slot = if value.is_finite() {
                     value.clamp(-1.0, 1.0)
                 } else {
                     0.0
-                },
-            };
+                };
+            }
+            let frame = TaggedFrame { job_id, values };
             let mut stalled_since = None;
             loop {
                 if cancel.is_cancelled() || self.shared.active_job.load(Ordering::Acquire) != job_id
@@ -271,8 +276,10 @@ impl AudioWriter {
                 if self.disconnected() {
                     return Err(AudioError::Disconnected);
                 }
-                if self.shared.samples.push(sample).is_ok() {
-                    self.shared.pushed_samples.fetch_add(1, Ordering::Relaxed);
+                if self.shared.samples.push(frame).is_ok() {
+                    self.shared
+                        .pushed_samples
+                        .fetch_add(channels as u64, Ordering::Relaxed);
                     if !marked_progress {
                         if let Some(progress) = progress {
                             progress.store(true, Ordering::Release);
@@ -431,10 +438,12 @@ impl AudioOutput {
         let supported = device.default_output_config()?;
         let sample_rate = supported.sample_rate();
         let channels = supported.channels();
-        let capacity = (sample_rate as usize * channels as usize * 2).clamp(4096, 768_000);
+        let frame_channels = usize::from(channels).max(1);
+        let capacity_frames = (sample_rate as usize * 2).clamp(2048, 192_000);
         let shared = Arc::new(Shared {
             control: Mutex::new(()),
-            samples: ArrayQueue::new(capacity),
+            channels: frame_channels,
+            samples: ArrayQueue::new(capacity_frames),
             active_job: AtomicU64::new(0),
             volume_bits: AtomicU32::new(master_volume.clamp(0.0, 2.0).to_bits()),
             disconnected: AtomicBool::new(false),
@@ -520,30 +529,42 @@ fn default_route_changed(
 
 fn fill<T: Copy>(data: &mut [T], shared: &Shared, convert: impl Fn(f32) -> T) {
     let volume = f32::from_bits(shared.volume_bits.load(Ordering::Relaxed));
+    let channels = shared.channels;
     let mut empty = false;
     let mut played = 0u64;
-    for index in 0..data.len() {
-        let value = loop {
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let end = (offset + channels).min(data.len());
+        let frame = loop {
             match shared.samples.pop() {
                 Some(tagged) if tagged.job_id == shared.active_job.load(Ordering::Acquire) => {
-                    played += 1;
-                    break tagged.value;
+                    break Some(tagged);
                 }
                 Some(_) => continue,
                 None => {
                     empty = true;
-                    break 0.0;
+                    break None;
                 }
             }
         };
-        if empty {
+        let Some(frame) = frame else {
             // The producer may refill during this callback. Consume it on the
             // next callback rather than repeatedly probing an empty queue on
             // the real-time thread (including all idle callbacks).
-            data[index..].fill(convert(0.0));
+            data[offset..].fill(convert(0.0));
             break;
+        };
+        let frame_len = end - offset;
+        for (channel, slot) in data[offset..end].iter_mut().enumerate() {
+            let value = if channel < MAX_FRAME_CHANNELS {
+                frame.values[channel]
+            } else {
+                0.0
+            };
+            *slot = convert((value * volume).clamp(-1.0, 1.0));
         }
-        data[index] = convert((value * volume).clamp(-1.0, 1.0));
+        played += frame_len as u64;
+        offset = end;
     }
     if played > 0 {
         shared.played_samples.fetch_add(played, Ordering::Relaxed);
@@ -555,10 +576,13 @@ fn fill<T: Copy>(data: &mut [T], shared: &Shared, convert: impl Fn(f32) -> T) {
 
 #[cfg(test)]
 pub(crate) fn test_writer(sample_rate: u32, channels: u16, capacity: usize) -> AudioWriter {
+    let frame_channels = usize::from(channels).max(1);
+    let capacity_frames = capacity.div_ceil(frame_channels).max(1);
     AudioWriter {
         shared: Arc::new(Shared {
             control: Mutex::new(()),
-            samples: ArrayQueue::new(capacity),
+            channels: frame_channels,
+            samples: ArrayQueue::new(capacity_frames),
             active_job: AtomicU64::new(0),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             disconnected: AtomicBool::new(false),
@@ -579,8 +603,9 @@ impl AudioWriter {
 
     pub(crate) fn take_test_samples(&self) -> Vec<f32> {
         let mut result = Vec::new();
-        while let Some(sample) = self.shared.samples.pop() {
-            result.push(sample.value);
+        let channels = self.shared.channels.min(MAX_FRAME_CHANNELS);
+        while let Some(frame) = self.shared.samples.pop() {
+            result.extend_from_slice(&frame.values[..channels]);
         }
         result
     }
@@ -595,6 +620,14 @@ impl AudioWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_frame(job_id: u64, samples: &[f32]) -> TaggedFrame {
+        let mut values = [0.0f32; MAX_FRAME_CHANNELS];
+        for (slot, value) in values.iter_mut().zip(samples.iter()) {
+            *slot = *value;
+        }
+        TaggedFrame { job_id, values }
+    }
 
     #[test]
     fn empty_callback_fills_all_formats_and_preserves_later_pcm() {
@@ -613,34 +646,25 @@ mod tests {
         writer
             .shared
             .samples
-            .push(TaggedSample {
-                job_id: 99,
-                value: 0.9,
-            })
+            .push(test_frame(99, &[0.9, -0.9]))
             .unwrap_or_else(|_| panic!("test queue unexpectedly full"));
         writer
             .shared
             .samples
-            .push(TaggedSample {
-                job_id: 1,
-                value: 0.5,
-            })
+            .push(test_frame(1, &[0.5, -0.5]))
             .unwrap_or_else(|_| panic!("test queue unexpectedly full"));
         let mut values = [9.0; 16];
         fill(&mut values, &writer.shared, |sample| sample);
-        assert_eq!(values[0], 0.5);
-        assert_eq!(values[1..], [0.0; 15]);
-        assert_eq!(writer.shared.played_samples.load(Ordering::Relaxed), 1);
+        assert_eq!(values[..2], [0.5, -0.5]);
+        assert_eq!(values[2..], [0.0; 14]);
+        assert_eq!(writer.shared.played_samples.load(Ordering::Relaxed), 2);
         assert_eq!(writer.shared.underruns.load(Ordering::Relaxed), 3);
         writer
             .shared
             .samples
-            .push(TaggedSample {
-                job_id: 1,
-                value: 0.25,
-            })
+            .push(test_frame(1, &[0.25, -0.25]))
             .unwrap_or_else(|_| panic!("test queue unexpectedly full"));
-        assert_eq!(writer.render_test_frames(2), vec![0.25, 0.0]);
+        assert_eq!(writer.render_test_frames(2), vec![0.25, -0.25]);
     }
 
     #[tokio::test]
@@ -748,6 +772,7 @@ mod tests {
     async fn fixed_buffer_cancellation_and_volume() {
         let shared = Arc::new(Shared {
             control: Mutex::new(()),
+            channels: 1,
             samples: ArrayQueue::new(2),
             active_job: AtomicU64::new(0),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
@@ -845,5 +870,26 @@ mod tests {
         .expect("stalled drain did not finish");
         assert!(matches!(result, Err(AudioError::Stalled)));
         assert!(writer.disconnected());
+    }
+
+    #[tokio::test]
+    async fn stereo_frames_never_misalign_after_underrun() {
+        let writer = test_writer(48_000, 2, 8);
+        writer.activate(95);
+        let cancel = CancellationToken::new();
+        writer
+            .push_interleaved(95, &[0.25, -0.25], &cancel)
+            .await
+            .unwrap();
+        // Callback buffer larger than queued audio causes an underrun; the next
+        // pushed stereo frame must still land on [L, R] = [0, 1].
+        let first = writer.render_test_frames(4);
+        assert_eq!(first, vec![0.25, -0.25, 0.0, 0.0]);
+        writer
+            .push_interleaved(95, &[0.75, -0.75], &cancel)
+            .await
+            .unwrap();
+        let second = writer.render_test_frames(2);
+        assert_eq!(second, vec![0.75, -0.75]);
     }
 }

@@ -794,7 +794,7 @@ impl JobExecutor for PlaybackExecutor {
                 // reached the output queue.
                 self.writer
                     .activate_for(job.id, &cancel)
-                    .map_err(|_| "播放已取消".to_owned())?;
+                    .map_err(|error| error.to_string())?;
                 self.play_plan(default, job.id, part_index, &cancel)
                     .await
                     .map_err(|failure| with_route_notice(&notice, failure.error.message()))?;

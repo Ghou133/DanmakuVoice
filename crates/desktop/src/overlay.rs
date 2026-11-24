@@ -440,6 +440,7 @@ impl Drop for ClientGuard {
 pub struct OverlayServer {
     cancel: CancellationToken,
     port: u16,
+    accept_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for OverlayServer {
@@ -481,9 +482,10 @@ impl OverlayServer {
     fn serve(listener: TcpListener, port: u16, hub: Arc<OverlayHub>, assets: AssetLoader) -> Self {
         let cancel = CancellationToken::new();
         let accept_cancel = cancel.clone();
-        tokio::spawn(async move {
+        let accept_task = tokio::spawn(async move {
             loop {
                 let accepted = tokio::select! {
+                    biased;
                     _ = accept_cancel.cancelled() => break,
                     accepted = listener.accept() => accepted,
                 };
@@ -503,7 +505,18 @@ impl OverlayServer {
                 });
             }
         });
-        Self { cancel, port }
+        Self {
+            cancel,
+            port,
+            accept_task: Some(accept_task),
+        }
+    }
+
+    pub async fn stop(mut self) {
+        self.cancel.cancel();
+        if let Some(task) = self.accept_task.take() {
+            let _ = task.await;
+        }
     }
 
     pub fn port(&self) -> u16 {

@@ -591,7 +591,7 @@ function acceptSnapshot(next) {
   if (!step) { step = replaySetup ? 'welcome' : startingStep(snapshot); setupTts = snapshot.setup?.tts_enabled ?? true; renderApp(); }
   else if (languageChanged) renderApp();
   if (languageChanged && settingsDialog.open) renderSettings();
-  if (snapshot.onboarding_done && !replaySetup && step !== 'main') { stopQrPolling(); step = 'main'; renderApp(); }
+  if (snapshot.onboarding_done && startingStep(snapshot) === 'main' && !replaySetup && step !== 'main') { stopQrPolling(); step = 'main'; renderApp(); }
   if (step === 'main') updateLive();
   if (settingsDialog.open) { updateVoiceSettings(); updateServiceIndicators(); updateOverlayStatus(); updateObsSettings(); }
   updateQr();
@@ -1326,8 +1326,9 @@ async function startQr(provider, connectionId) {
     await command(`${provider === 'bilibili' ? 'bili' : 'doubao'}.qr.begin`, connectionId ? { connection_id: connectionId } : {}, { silent: true });
     if (generation === qrGeneration && !disposed) scheduleQrPoll(provider, generation);
   } catch (error) {
+    if (generation !== qrGeneration || disposed) return;
     qrFailure = errorMessage(error, provider === 'bilibili' ? 'DV-X01' : 'DV-X02');
-  } finally { qrBusy = false; updateQr(); }
+  } finally { if (generation === qrGeneration && !disposed) { qrBusy = false; updateQr(); } }
 }
 
 function scheduleQrPoll(provider, generation) {
@@ -1351,6 +1352,10 @@ function scheduleQrPoll(provider, generation) {
             try { await command('presets.default', { id: preferredId }, { quiet: true, silent: true }); }
             catch (error) { preferenceError = error; }
           }
+          if (provider === 'bilibili' && snapshot.onboarding_done && next.setup?.room_id && !next.live?.running && !next.live?.connecting) {
+            try { await command('live.connect', {}, { quiet: true, silent: true }); }
+            catch { /* Room settings expose a Connect button if automatic reconnect fails. */ }
+          }
           editor = provider === 'doubao' && editor.returnTo === 'voice-add' ? { type: 'voice-add', provider: 'doubao', connectionId: serviceConnection('doubao')?.id } : null;
           renderSettings();
           if (preferenceError) showError(ui`豆包已连接，但设为首选失败：${preferenceError}`);
@@ -1360,6 +1365,7 @@ function scheduleQrPoll(provider, generation) {
         else if (provider === 'doubao' && step === 'doubaoQr') { setupTts = true; setStep('ready'); }
       } else if (next.qr?.status !== 'expired') scheduleQrPoll(provider, generation);
     } catch (error) {
+      if (generation !== qrGeneration || disposed) return;
       const needsRoom = qrNeedsRoomFallback(snapshot);
       qrFailure = needsRoom ? '' : errorMessage(error, provider === 'bilibili' ? 'DV-X01' : 'DV-X02');
       if (needsRoom && settingsDialog.open && editor?.type === 'qr' && editor.provider === 'bilibili') {
@@ -1767,6 +1773,8 @@ const lakeVolumeIcon = muted => muted ? icon('muted') : '<svg viewBox="0 0 24 24
 
 // Doubao rejected the saved login: it still exists on disk but cannot speak.
 const doubaoLoginExpired = () => snapshot?.doubao_login_expired === true;
+const doubaoPauseReason = () => snapshot?.doubao_pause_reason || (doubaoLoginExpired() ? 'authentication' : null);
+const doubaoPausedRecoverable = () => ['rate_limited', 'account_blocked'].includes(doubaoPauseReason());
 const cloudLoginUsable = (provider, connection) => !!connection?.has_credential && !(provider === 'doubao' && doubaoLoginExpired());
 
 function lakeVoiceReady(preset) {
@@ -2027,8 +2035,9 @@ async function moderateViewer(action, minutes = 60) {
 }
 
 async function undoLakeMute(context) {
-  const sameRoom = next => broadcastEnabled() && !snapshot.network_disabled && String(snapshot.account?.user_id || '') === context.account && String(snapshot.broadcast?.room?.room_id || '') === String(context.room_id) && next?.preferences?.broadcast_console && String(next.account?.user_id || '') === context.account && String(next.moderation?.user_id || '') === context.user_id && String(next.moderation?.room_id || '') === String(context.room_id);
-  if (!broadcastEnabled() || snapshot.network_disabled || viewerModerationBusy || String(snapshot.account?.user_id || '') !== context.account || String(snapshot.broadcast?.room?.room_id || '') !== String(context.room_id)) return;
+  const roomOf = view => String(view?.live?.room_id || view?.setup?.room_id || view?.broadcast?.room?.room_id || '');
+  const sameRoom = next => broadcastEnabled() && !snapshot.network_disabled && String(snapshot.account?.user_id || '') === context.account && roomOf(snapshot) === String(context.room_id) && next?.preferences?.broadcast_console && String(next.account?.user_id || '') === context.account && String(next.moderation?.user_id || '') === context.user_id && String(next.moderation?.room_id || '') === String(context.room_id);
+  if (!broadcastEnabled() || snapshot.network_disabled || viewerModerationBusy || String(snapshot.account?.user_id || '') !== context.account || roomOf(snapshot) !== String(context.room_id)) return;
   viewerModerationBusy = true;
   updateViewerModeration();
   try {
@@ -2254,7 +2263,7 @@ function updateLive() {
   void settleLakeWake().catch(showError);
   syncLakeReadingProgress();
   const notice = updateFallbackStatus(snapshot.queue || {});
-  const renderSignature = JSON.stringify([snapshot.live, snapshot.live_history, snapshot.queue, snapshot.setup, snapshot.account, snapshot.broadcast, snapshot.preferences?.broadcast_console, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, notice, viewerOpenIdentity, lakeObsTitle()]);
+  const renderSignature = JSON.stringify([snapshot.live, snapshot.live_history, snapshot.queue, snapshot.setup, snapshot.account, snapshot.broadcast, snapshot.preferences?.broadcast_console, snapshot.bindings, snapshot.rules?.user_words, snapshot.preferences?.tts_enabled, snapshot.preferences?.master_volume, snapshot.preferences?.muted, volumeDraft, snapshot.rules?.default_preset_id, snapshot.presets, snapshot.connections, snapshot.local_services, snapshot.status, snapshot.received_emotes_error, snapshot.doubao_login_expired, snapshot.doubao_pause_reason, notice, viewerOpenIdentity, lakeObsTitle()]);
   if (viewerContext) updateViewerModeration();
   if (liveRenderSignature === renderSignature) return;
   liveRenderSignature = renderSignature;
@@ -2418,6 +2427,8 @@ function providerStatus(provider, connection) {
   }
   // The light reports saved account configuration, not a continuous cloud health probe.
   if (provider === 'doubao' && connection?.has_credential && doubaoLoginExpired()) return { tone: 'error', label: t('登录已失效'), detail: t('重新扫码登录豆包后即可继续播报。') };
+  if (provider === 'doubao' && connection?.has_credential && doubaoPauseReason() === 'rate_limited') return { tone: 'error', label: t('请求已暂停'), detail: t('豆包请求频率过高已暂停，稍后点击恢复即可继续播报。') };
+  if (provider === 'doubao' && connection?.has_credential && doubaoPauseReason() === 'account_blocked') return { tone: 'error', label: t('请求受限'), detail: t('豆包账号或设备请求受限，可稍后手动恢复或重新扫码登录。') };
   if (provider === 'doubao' && connection?.has_credential) return { tone: 'ready', label: t('已登录'), detail: t('已在本机保存登录。可通过试听确认当前音色是否可用。') };
   if (provider === 'fish_audio' && connection?.has_credential) return { tone: 'ready', label: t('已连接'), detail: t('已在本机保存 API Key。可通过试听确认当前音色是否可用。') };
   return { tone: 'idle', label: provider === 'doubao' ? t('未登录') : t('未连接'), detail: provider === 'doubao' ? t('在设置中扫码登录豆包。') : t('在设置中连接 Fish Audio 账号。') };
@@ -2473,6 +2484,28 @@ function updateServiceIndicators() {
     start.disabled = !serviceConnection(provider) || !state.directory || !!state.owned || ['checking', 'starting'].includes(state.state);
     const stop = settingsDialog.querySelector('[data-action="service.stop"]');
     if (stop) stop.disabled = !state.owned;
+  }
+  const localConnect = settingsDialog.querySelector('[data-action="voice.local.connect"]');
+  if (localConnect) {
+    const provider = localConnect.dataset.id;
+    const service = localServiceState(provider, serviceConnection(provider));
+    const directory = settingsDialog.querySelector(`form[data-form="service-local"][data-provider="${provider}"] input[name="directory"]`)?.value?.trim() || service.directory || '';
+    const starting = service.state === 'starting';
+    localConnect.disabled = !directory || starting;
+    const label = t(starting ? '正在启动…' : '连接');
+    if (localConnect.textContent !== label) localConnect.textContent = label;
+    const messageNode = settingsDialog.querySelector('.voice-connect [data-service-message]');
+    const message = service.state === 'failed' && service.message ? localizeDiagnostic(service.message) : '';
+    if (messageNode) {
+      messageNode.textContent = message;
+      messageNode.hidden = !message;
+    } else if (message) {
+      const p = document.createElement('p');
+      p.className = 'voice-status error';
+      p.dataset.serviceMessage = '';
+      p.textContent = message;
+      settingsDialog.querySelector('.voice-connect')?.append(p);
+    }
   }
 }
 
@@ -2837,7 +2870,9 @@ function renderRoomSettings() {
   const hero = scanning
     ? `<section class="lake-room-qr">${qrMarkup('bilibili', true)}<p class="lake-note">${esc(t('用哔哩哔哩 App 扫一扫'))}<br>${esc(t('在手机上确认登录'))}</p><p class="lake-note">${esc(t('二维码两分钟后会过期'))} · <button type="button" class="text-button" data-action="qr.retry">${esc(t('换一张'))}</button></p>${button(t('取消扫码'), 'editor.cancel', { class: 'small quiet' })}</section>`
     : ui`<section class="lake-room-account">${avatar}<div class="s-account-text"><strong>${esc(name)}</strong><span class="${expired ? 'lake-gold' : ''}">哔哩哔哩账号 · ${esc(state)}</span>${note ? `<small>${esc(note)}</small>` : ''}</div><div class="s-hero-actions">${heroActions}</div></section>`;
-  const card = `<div class="lake-room-number"><span>${esc(t('直播间号'))}</span><div>${lakeRoomNumberField()}</div><small>${esc(t('现在'))} · ${esc(snapshot.broadcast?.room?.live_status === 1 ? t('直播中') : t('还没开播'))}</small></div>`;
+  const room = snapshot.setup?.room_id || snapshot.live_settings?.room_id;
+  const canReconnect = loggedIn && !expired && !snapshot.live?.running && !snapshot.live?.connecting && !!room;
+  const card = `<div class="lake-room-number"><span>${esc(t('直播间号'))}</span><div>${lakeRoomNumberField()}</div><small>${esc(t('现在'))} · ${esc(snapshot.broadcast?.room?.live_status === 1 ? t('直播中') : t('还没开播'))}</small>${canReconnect ? `<div class="lake-room-connect">${button(t('连接直播间'), 'live.toggle', { class: 'small primary' })}</div>` : ''}</div>`;
   const targetNote = needsRoom ? t('未找到本账号直播间，请先在 B站开通直播间后重新扫码') : '';
   return `<div class="lake-settings-page lake-room">${hero}${scanning ? '' : card}${targetNote ? `<p class="lake-note lake-gold">${esc(targetNote)}</p>` : ''}<footer class="lake-settings-footer">${loggedIn ? button(t('退出这个账号'), 'bili.logout', { class: 'quiet' }) : ''}</footer></div>`;
 }
@@ -2998,6 +3033,7 @@ async function refreshBroadcast(force = false) {
     if (sequence !== broadcastRefreshSequence || broadcastAccount() !== account || !broadcastEnabled()) return;
     if (String(next.account?.user_id || '') !== account) return;
     if (Number.isSafeInteger(next.config_revision) && Number.isSafeInteger(snapshot.config_revision) && next.config_revision < snapshot.config_revision) return;
+    snapshotSequence.settled();
     acceptSnapshot(next);
     broadcastRefreshError = '';
   } catch (error) {
@@ -3327,6 +3363,7 @@ const obsPageActive = () => !disposed && !!snapshot && !snapshot.network_disable
 function acceptObsObservation(next, key) {
   if (disposed || key !== obsConnectionKey() || !next?.obs) return false;
   if (Number.isSafeInteger(next.config_revision) && Number.isSafeInteger(snapshot.config_revision) && next.config_revision < snapshot.config_revision) return false;
+  snapshotSequence.settled();
   acceptSnapshot(next);
   return true;
 }
@@ -3756,8 +3793,8 @@ function renderVoiceConnect(provider, connection) {
   const service = localServiceState(provider, connection);
   const directory = service.directory || '';
   const starting = service.state === 'starting';
-  const failed = service.state === 'failed' && service.message;
-  return `<section class="voice-connect"><h2>${esc(t('连接'))} ${esc(providerLabel(provider))}</h2><p class="voice-add-lead">${esc(t('选一下它在这台电脑上的安装目录。'))}</p><form data-form="service-local" data-provider="${provider}">${pathField('directory', t('安装目录'), directory, 'service.pick_directory', t('选择安装目录'))}${autoStatus()}</form><div class="voice-add-actions">${button(t(starting ? '正在启动…' : '连接'), 'voice.local.connect', { id: provider, class: 'primary', disabled: !directory || starting })}</div>${failed ? `<p class="voice-status error" data-service-message>${esc(service.message)}</p>` : ''}</section>`;
+  const failed = service.state === 'failed' && service.message ? localizeDiagnostic(service.message) : '';
+  return `<section class="voice-connect"><h2>${esc(t('连接'))} ${esc(providerLabel(provider))}</h2><p class="voice-add-lead">${esc(t('选一下它在这台电脑上的安装目录。'))}</p><form data-form="service-local" data-provider="${provider}">${pathField('directory', t('安装目录'), directory, 'service.pick_directory', t('选择安装目录'))}${autoStatus()}</form><div class="voice-add-actions">${button(t(starting ? '正在启动…' : '连接'), 'voice.local.connect', { id: provider, class: 'primary', disabled: !directory || starting })}</div>${failed ? `<p class="voice-status error" data-service-message>${esc(failed)}</p>` : ''}</section>`;
 }
 
 // Inline edit: what matters first (the name, and for local voices the reference
@@ -3834,6 +3871,12 @@ function refreshVoiceDraftState() {
   if (text && editor?.provider === 'gpt_sovits') text.disabled = !!lakeVoiceDraft.text_free;
 }
 
+function cancelFishLookup() {
+  clearTimeout(lakeFishLookupTimer);
+  lakeFishLookupTimer = null;
+  lakeFishLookupRevision++;
+}
+
 function scheduleFishLookup() {
   clearTimeout(lakeFishLookupTimer);
   const value = String(lakeVoiceDraft.fish || '').trim();
@@ -3845,17 +3888,18 @@ function scheduleFishLookup() {
     return;
   }
   lakeFishLookupTimer = setTimeout(async () => {
+    if (revision !== lakeFishLookupRevision || editor?.provider !== 'fish_audio') return;
     lakeVoiceDraft.fishState = 'looking'; lakeVoiceDraft.fishFound = null;
     const node = result(); if (node) node.innerHTML = renderFishResult();
     try {
       const found = await command('fish.voice.lookup', { connection_id: serviceConnection('fish_audio')?.id, id_or_url: value }, { quiet: true, silent: true });
-      if (revision !== lakeFishLookupRevision) return;
+      if (revision !== lakeFishLookupRevision || editor?.provider !== 'fish_audio') return;
       const name = String(found.result?.name || '').slice(0, 100).trim();
       lakeVoiceDraft.fishFound = { voice_id: found.result?.voice_id || value, name: name || t('Fish 声音') };
       lakeVoiceDraft.name = lakeVoiceDraft.fishFound.name;
       lakeVoiceDraft.fishState = '';
     } catch (error) {
-      if (revision !== lakeFishLookupRevision) return;
+      if (revision !== lakeFishLookupRevision || editor?.provider !== 'fish_audio') return;
       lakeVoiceDraft.fishState = 'error'; lakeVoiceDraft.fishError = errorMessage(error);
     }
     const next = result(); if (next) next.innerHTML = renderFishResult();
@@ -3863,6 +3907,7 @@ function scheduleFishLookup() {
 }
 
 async function finishVoiceAdd(id, name) {
+  cancelFishLookup();
   lakeVoiceDraft = {}; lakeVoiceChoice = ''; lakeVoiceFlash = id || '';
   editor = null; lakeVoiceEditId = '';
   renderSettings();
@@ -3870,6 +3915,7 @@ async function finishVoiceAdd(id, name) {
 }
 async function selectLakeVoiceProvider(provider) {
   if (!await allowLeaveSettings()) return;
+  cancelFishLookup();
   if (qrProvider) await cancelQr();
   const connection = serviceConnection(provider);
   lakeVoiceQuery = ''; lakeVoiceChoice = ''; lakeVoiceDraft = {}; lakeVoiceTab = provider;
@@ -4113,7 +4159,7 @@ async function flushExitEdits() {
   // Exit is one action: flush pending automatic saves, but never prompt about
   // an unsubmitted form or keep an owned service running because a save failed.
   exitFlushing = true;
-  try { await Promise.allSettled([volumeSave.flush(), flushViewerAlias(), settleVoiceAuditionChoice(), flushAutosaves()]); }
+  try { await Promise.allSettled([volumeSave.flush(), flushViewerAlias(), settleVoiceAuditionChoice(), saveLakeObsPassword(), flushAutosaves()]); }
   finally { exitFlushing = false; }
   return true;
 }
@@ -4244,7 +4290,11 @@ function renderLakeSettingsHome() {
   const obsConnected = snapshot.obs?.status?.state === 'ok' || !!snapshot.obs?.status?.connected;
   const obsDetail = obsConnected ? t('已连接') : lakeObsConfigured() ? t('OBS 还没打开') : t('还没连上');
   const biliWarning = snapshot.live?.state === 'session_expired' ? `<button type="button" class="lake-settings-warning" data-action="lake.room.relogin">${esc(t('哔哩哔哩登录已失效 · 重新扫码'))}${icon('arrow')}</button>` : '';
-  const doubaoWarning = doubaoLoginExpired() ? `<button type="button" class="lake-settings-warning" data-action="voice.login">${esc(t('豆包登录已失效 · 重新扫码'))}${icon('arrow')}</button>` : '';
+  const doubaoWarning = doubaoLoginExpired()
+    ? `<button type="button" class="lake-settings-warning" data-action="voice.login">${esc(t('豆包登录已失效 · 重新扫码'))}${icon('arrow')}</button>`
+    : doubaoPausedRecoverable()
+      ? `<button type="button" class="lake-settings-warning" data-action="doubao.resume">${esc(t(doubaoPauseReason() === 'rate_limited' ? '豆包请求频率过高已暂停 · 恢复播报' : '豆包请求受限已暂停 · 恢复播报'))}${icon('arrow')}</button>`
+      : '';
   const warning = biliWarning + doubaoWarning;
   return `<div class="lake-settings-page lake-home">${warning}<nav class="lake-home-primary" aria-label="${esc(t('设置分类'))}">${row('room', avatar, '直播间', snapshot.account?.user_id ? identity.name : t('还没登录'))}${row('voices', lakeMiniWave(), '声音', `${voice ? presetLabel(voice) : t('还没有默认声音')} · ${snapshot.presets.length}`)}${row('overlay', `<span class="lake-overlay-mini${obsConnected ? ' on' : ''}"><i></i><b></b><b></b><b></b></span>`, 'OBS', obsDetail)}${row('readings', `<i class="lake-home-count">${count}</i>`, '记住的读法', t('观众名字、词和表情'))}</nav><div class="lake-home-foot"><nav class="lake-home-secondary" aria-label="${esc(t('更多设置'))}">${minor('general', '通用')}${minor('advanced', '高级')}</nav><footer class="lake-settings-footer">${lakeVersionRow()}</footer></div></div>`;
 }
@@ -4364,7 +4414,7 @@ async function saveLakeReadingRow(element, leaving) {
   const from = (field('from') ? field('from').value : element.dataset.from).trim();
   const to = field('to').value.trim();
   const presetId = kind === 'user_words' ? field('preset_id')?.value || '' : '';
-  if (!from || (!to && !presetId)) {
+  if (!from || (!to && !presetId && (fresh || (!original?.to && !original?.bindingId)))) {
     // Unfinished: an existing row keeps what it had; a new line stays where it
     // is until the page is left, and an untouched one simply goes away.
     if (!fresh) return closeLakeReadingRow(element, original);
@@ -4527,7 +4577,7 @@ function installLakeSettingsEvents() {
   // Pages slide in sideways; focus landing mid-slide must not leave the page scrolled sideways.
   settingsDialog.addEventListener('scroll', event => { if (event.target.id === 'settings-content' && event.target.scrollLeft) event.target.scrollLeft = 0; }, true);
   const scrim = document.createElement('button'); scrim.type = 'button'; scrim.className = 'lake-settings-scrim'; scrim.hidden = true; scrim.tabIndex = -1; scrim.setAttribute('aria-label', t('关闭设置')); document.body.append(scrim);
-  scrim.addEventListener('click', () => { void closeSettings(); });
+  scrim.addEventListener('click', () => { void closeSettings().catch(showError); });
   const syncOpen = () => { scrim.hidden = !settingsDialog.open; document.body.classList.toggle('lake-settings-open', settingsDialog.open); };
   new MutationObserver(syncOpen).observe(settingsDialog, { attributes: true, attributeFilter: ['open'] }); syncOpen();
   settingsDialog.addEventListener('input', event => {
@@ -4584,7 +4634,7 @@ function installLakeSettingsEvents() {
   });
   document.addEventListener('keydown', event => {
     if (!settingsDialog.open || confirmationDialog.open) return;
-    if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); void closeSettings(); }
+    if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); void closeSettings().catch(showError); }
     if (event.key !== 'Tab') return;
     const controls = [...document.querySelectorAll('#titlebar button, #settings button, #settings input, #settings select, #settings textarea, #settings [contenteditable="true"]')].filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
     const index = controls.indexOf(document.activeElement);
@@ -4878,7 +4928,7 @@ function installLakeObsEvents() {
   });
   settingsDialog.addEventListener('keydown', event => {
     const node = event.target.closest('[data-ovp-edit]');
-    if (node && ['Enter', 'Escape'].includes(event.key) && !event.isComposing) { event.preventDefault(); if (node.contentEditable !== 'true') { if (event.key === 'Enter') beginEdit(node); } else { if (event.key === 'Escape') node.dataset.cancelled = 'true'; node.blur(); } return; }
+    if (node && ['Enter', 'Escape'].includes(event.key) && !event.isComposing) { event.preventDefault(); event.stopPropagation(); if (node.contentEditable !== 'true') { if (event.key === 'Enter') beginEdit(node); } else { if (event.key === 'Escape') node.dataset.cancelled = 'true'; node.blur(); } return; }
     if (event.target.closest('[contenteditable="true"]')) return;
     const block = event.target.closest('[data-ovp-drag]'); if (!block || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '+', '-', '='].includes(event.key)) return;
     event.preventDefault(); const form = block.closest('form'), frame = block.closest('.lake-obs-canvas'); const m = lakeOverlayMeasure(frame, block);
@@ -4957,8 +5007,10 @@ async function connectFishCredential(credential, form = null) {
 }
 
 async function allowLeaveSettings() {
+  cancelFishLookup();
   await commitLakeReadingRows(true);
   await commitLakeRoomNumber().catch(() => { /* The command already showed its error. */ });
+  await saveLakeObsPassword().catch(error => { showToast(errorMessage(error), true); });
   if (!await flushAutosaves(true)) return false;
   // This app never asks to discard a draft: what saves itself is saved by now,
   // and an unfinished form is simply left behind.
@@ -4970,7 +5022,7 @@ async function closeSettings() {
   if (!await allowLeaveSettings()) return;
   if (!await settleVoiceAuditionChoice()) return;
   closeSelect();
-  if (editor?.type === 'qr') await cancelQr();
+  if (editor?.type === 'qr') await cancelQr().catch(() => {});
   if (editor?.type === 'qr') editor = null;
   tabEditors.set(settingsTab, editor);
   settingsDirty = false;
@@ -5123,6 +5175,11 @@ async function handleAction(action, id, target) {
   }
   if (action === 'voice.browse') { voiceBrowse = id; renderVoicePanel(); return; }
   if (action === 'voice.login') { closeVoicePanel(); return guideDoubaoLogin(rememberedPreset('doubao')?.id); }
+  if (action === 'doubao.resume') {
+    await command('doubao.resume', {}, { success: t('已恢复豆包播报') });
+    if (settingsDialog.open) renderSettings();
+    return;
+  }
   if (action === 'voice.pick') {
     await settleVoiceAuditionChoice();
     const preset = snapshot.presets.find(item => item.id === id);
@@ -5208,9 +5265,10 @@ async function handleAction(action, id, target) {
     const limit = snapshot.chat_send?.message_limit || 20;
     chatMessageDraft = truncateUtf16(`@${name} ${chatMessageDraft}`, limit);
     await closeViewerDrawer();
-    updateChatCompose();
     const input = document.querySelector('#chat-message');
-    if (input) { input.value = chatMessageDraft; input.focus({ preventScroll: true }); }
+    if (input) input.value = chatMessageDraft;
+    updateChatCompose();
+    if (input) input.focus({ preventScroll: true });
     return;
   }
   if (action === 'chat.emoticons') { chatEmoticonsOpen = !chatEmoticonsOpen; updateChatCompose(); if (chatEmoticonsOpen) return refreshChatEmoticons(); return; }
@@ -5677,7 +5735,7 @@ document.addEventListener('submit', async event => {
   }
 });
 
-settingsDialog.addEventListener('cancel', event => { event.preventDefault(); void closeSettings(); });
+settingsDialog.addEventListener('cancel', event => { event.preventDefault(); void closeSettings().catch(showError); });
 settingsDialog.addEventListener('compositionstart', event => { composingInputs.add(event.target); });
 // Remember the person's own unfolding of the OBS connection details across re-renders.
 // (A details element rendered open also fires "toggle", so only summary clicks count.)

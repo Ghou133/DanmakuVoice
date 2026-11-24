@@ -1,5 +1,32 @@
 # 唯一进度记录
 
+## 2026-11-25：登录掉线排查与全仓审查修复
+
+- **背景**：用户私聊反馈豆包/账号登录异常且电脑弹提醒（无截图，已确认在最新版）。核对本程序不含 Windows 桌面通知插件，运行期不弹系统通知（仅启动致命失败弹 `MessageBoxW`），外部系统弹窗应来自豆包/B站客户端或系统安全软件；同时对引擎、桌面后端、前端与叠加层做了四路只读全仓审查，集中修复已确认的高置信度缺陷。
+- **豆包登录与播报修复**：
+  - `crates/engine/src/tts/dobao.rs`：统一 TTS WebSocket UA 为 `Chrome/144.0.0.0`（与扫码登录一致）；新增 `DoubaoClient::process_pause_reason()` 与 `DoubaoClient::resume_recoverable_pause()`（仅解除 `RateLimited`/`AccountBlocked`，`Authentication` 仍须重新扫码），按暂停原因返回准确错误文案；修复首段音频超时被 20 秒 `idle_timeout` 提前截断的缺陷（`awaiting_first_audio = !adts.has_audio`）。
+  - `crates/engine/src/tts/dobao_auth.rs`：`merge_set_cookies` 忽略空值与 `Max-Age<=0` 删除头且不覆盖已取得的 `sessionid`/`sessionid_ss`；扫码确认后如有豆包同源 `redirect_url`，持续跟完 3xx 跳转收集伴随 Cookie（已有登录 Cookie 时跳转网络失败不阻断登录）。
+  - `crates/desktop/src/app.rs`、`crates/desktop/ui/app.js`、`i18n-en.mjs`、`i18n-diagnostics.mjs`：快照新增 `doubao_pause_reason` 与 `doubao.resume` 命令；设置首页与服务状态区分豆包限流/受限暂停并提供“恢复播报”入口；清除数据、清除/删除豆包凭据、手动保存新豆包 Cookie 时一并清除进程内暂停态。
+- **B站登录、凭据存储与接口健壮性修复**：
+  - `crates/engine/src/bilibili.rs`：`collect_pair` 不再将有效 `DedeUserID` 覆盖为 `None`；`Set-Cookie` 已齐备时不再因 `data.url` 失败；`exchange_ticket` 后续同源跳转携带已收集 Cookie。
+  - `crates/desktop/src/app.rs`：启动读取 `load_bili_session()` 失败时不再静默吞错，写入带原错误码（如 `DV-K04`）的启动状态；`poll_bili`/`apply_bili_poll` 在凭证交换失败后过期二维码避免无限 `DV-B06` 轮询，换号登录时立即停掉旧账号的运行中直播会话并清掉 `overlay_broadcast_observation`，`commit_room_resolution` 后复核 `qr_generation`。
+  - `crates/engine/src/storage.rs`：退出登录与清除凭据/密码/连接时先删除当前库内凭据再执行 `maintain_backups()`，避免损坏或被占用的备份阻断登出；`dobao_device`/`livehime_device` 遇 Windows DPAPI 解密失败（`SecretError::Unprotect`）时自动重新生成本机随机设备标识（保留明文内容损坏报 `DV-S27`/`DV-S49`）。
+  - `crates/engine/src/audience.rs`、`crates/engine/src/moderation.rs`：兼容 B站空列表返回 `null`（`OnlineRankItem: null` 与首页空房管 `data.data: null`）。
+- **播报管线、音频与桌面生命周期修复**：
+  - `crates/engine/src/audio.rs`：CPAL 环形队列改为按完整交错音频帧（`TaggedFrame`）原子入队/出队，消除并发欠载后的左右声道/多声道永久错位。
+  - `crates/engine/src/playback.rs`、`crates/engine/src/live.rs`、`crates/engine/src/tts/dots.rs`、`crates/engine/src/tts/mod.rs`：回退重激活输出设备保留断开错误（不再误报“播放已取消”）；`LiveController::start` 拉取表情后复核调度器接收状态；绑定豆包设备缺失时允许回退默认声音；`dots` 能力探测不再把网络/503/超时误报为不兼容服务；`confirmed_loopback_offline` 先做短 TCP 连接探测，避免 Windows 上 `0.0.0.0` 监听被误判离线。
+  - `crates/desktop/src/app.rs`、`crates/desktop/src/local_service.rs`、`crates/desktop/src/overlay.rs`：`preferences.save` 不改动输出设备时不再因音频断开要求确认；开启播报前先校验默认声音再断开仅接收会话；`reconcile_default_output` 锁内复核状态；`check_local_service` 保留已退出崩溃态；`ensure_local_service_running` 不打断同端口启动中的自有进程；`Endpoint::parse` 将 `localhost` 规范化为 `127.0.0.1` 避免 Windows IPv6 探测超时误判端口占用；连接变更/删除/导入后清理旧端口自有进程；串行化 `apply_overlay()` 并在停服时等待监听任务退出防止端口漂移。
+- **前端界面、国际化与 OBS 叠加层修复**：
+  - `crates/desktop/ui/app.js`、`helpers.mjs`、`i18n-en.mjs`、`i18n-diagnostics.mjs`：修复 B站设置内重新扫码后未自动重连且无可用连接按钮的死路（扫码后自动尝试 `live.connect`，直播间设置断开时提供“连接直播间”按钮）；修复 `acceptSnapshot` 绕过 `startingStep` 登录门禁的问题；修复“记住的读法”仅绑声观众无法重置为“跟随默认”；修复房管禁言撤销 toast 错误校验 `broadcast.room`；补全 `liveRenderSignature` 缺失字段、`startQr`/`scheduleQrPoll` 世代校验、`refreshBroadcast`/`refreshObsStatus` 序列定界、`viewer.at` 禁用发送按钮、OBS 标题编辑 `Escape` 冒泡、退出/关闭设置保存 OBS 密码与取消扫码异常捕获、切服务取消 Fish 查找、本地连接页状态刷新与本地化、缺失英文诊断文案。
+  - `crates/desktop/overlay/overlay.html`：醒目留言语音失败/跳过/关闭后超时自动点亮并折叠；重连 `hello` 回放按醒目留言时长保留而非 14 秒丢弃。
+- **证据（本机实测）**：
+  - `cargo fmt --all -- --check` 通过；`cargo clippy --offline --locked --workspace --all-targets -- -D warnings` 零警告通过。
+  - `cargo test --offline --locked --workspace`（按名跳过 4 项已知需 Windows `SeCreateSymbolicLinkPrivilege` 1314 的符号链接测试：`redirected_log_file_is_rejected_before_open_or_clear`、`linked_version_roots_are_not_scanned`、`cache_directory_redirection_is_rejected`、`service_log_redirection_is_rejected_and_rotation_preserves_link_targets`）：引擎 364 通过 / 0 失败 / 3 忽略；桌面 222 通过 / 0 失败 / 4 忽略；`fish_system_proxy` 1 通过 / 2 忽略；`account_emote_endpoint` 0 通过 / 1 忽略。
+  - `node --check crates/desktop/ui/app.js` 与 `node --test crates/desktop/ui/*.test.mjs`：205/205 通过；`python -m unittest discover -s scripts -p 'test_*.py'`：28/28 通过。
+- **未验证与保留项**：
+  - 均为离线单测与本地夹具验证，**未做真实账号线上豆包扫码/429/710012001、真实 B站直播开播、真实 OBS 渲染或物理扬声器验收**；已按用户指令同步至 GitHub `main`（应用版本保持 0.3.6，未构建新 Release 或提交微软商店，待后续商店更新流程递增版本号并复核独立 CI）。
+  - 架构层两项已知限制未在本轮盲改（需线上实测验收）：B站 `refresh_token` 自动刷新 Cookie 流程、以及 B站弹幕 WebSocket 走 Windows 系统 HTTP CONNECT 代理隧道。
+
 ## 2026-11-04：豆包登录失效后找不到重新扫码入口
 
 - **用户反馈**：豆包登录过期后，花了约两分钟才找到重新扫码的入口。

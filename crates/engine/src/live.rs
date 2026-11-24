@@ -349,6 +349,13 @@ impl LiveController {
             self.emote_catalog
                 .send_replace(Arc::new(ReceivedEmoteCatalog::default()));
         }
+        if self
+            .scheduler
+            .as_ref()
+            .is_some_and(|scheduler| !scheduler.state().borrow().accepting)
+        {
+            return Err(LiveError::Scheduler);
+        }
         let (events_tx, events_rx) = mpsc::channel(LIVE_EVENT_CHANNEL_CAPACITY);
         let slot = self.spawn_worker(room_id, events_rx, true);
         self.updates
@@ -548,18 +555,17 @@ fn prepare_event(
             if !preview.has_playable_audio() || (preview.needs_tts() && preview.voice.is_none()) {
                 return Ok(PreparedEvent::NoVoice);
             }
-            if device.is_none() && preview.needs_tts() {
+            if device.is_none() && !optional_device_unavailable && preview.needs_tts() {
                 if preview
                     .voice
                     .as_ref()
                     .is_some_and(|voice| voice.provider == Provider::Doubao)
                 {
                     return Err(SnapshotPrepareError::NeedsDoubaoDevice {
-                        fallback_only: false,
+                        fallback_only: preview.voice_from_binding,
                     });
                 }
-                if !optional_device_unavailable
-                    && preview.voice_from_binding
+                if preview.voice_from_binding
                     && preview
                         .default_voice
                         .as_ref()

@@ -135,3 +135,32 @@ test('moderation success exposes undo only for an applied mute in the same viewe
     assert.equal(vm.runInContext('viewerModerationBusy', context), false);
   }
 });
+
+test('mute undo works for a room moderator without broadcast.room matching the watched room', async () => {
+  const { context } = actionContext();
+  const calls = [], messages = [];
+  context.call = async (action, payload, options) => {
+    calls.push({ action, payload: JSON.parse(JSON.stringify(payload)) });
+    const reply = {
+      preferences: { broadcast_console: true },
+      account: { user_id: 42 },
+      live: { room_id: 999 },
+      moderation: { can_moderate: true, muted: true, user_id: 77, room_id: 999 },
+    };
+    return options.accept(reply) ? reply : null;
+  };
+  context.say = message => messages.push(message);
+  vm.runInContext(`
+    snapshot.preferences.broadcast_console = true;
+    snapshot.account.user_id = 42;
+    snapshot.live = { room_id: 999 };
+    snapshot.broadcast = { room: null };
+    viewerContext = null;
+    updateViewerModeration = () => {};
+    command = call;
+    showToast = say;
+  `, context);
+  await vm.runInContext(`undoLakeMute({ account: '42', user_id: '77', room_id: 999 })`, context);
+  assert.deepEqual(calls.map(c => c.action), ['bili.moderation.refresh', 'bili.moderation.unmute']);
+  assert.deepEqual(messages, ['已解除禁言']);
+});

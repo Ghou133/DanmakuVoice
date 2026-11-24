@@ -130,11 +130,12 @@ fn parse_rank_page(value: &Value) -> Result<RankPage, BiliError> {
         .pointer("/data/onlineNum")
         .and_then(Value::as_u64)
         .ok_or(BiliError::Protocol("缺少高能榜人数"))?;
-    let items = value
-        .pointer("/data/OnlineRankItem")
-        .and_then(Value::as_array)
-        .filter(|items| items.len() <= PAGE_SIZE)
-        .ok_or(BiliError::Protocol("高能榜列表无效"))?;
+    let empty = Vec::new();
+    let items = match value.pointer("/data/OnlineRankItem") {
+        Some(Value::Null) => &empty,
+        Some(Value::Array(items)) if items.len() <= PAGE_SIZE => items,
+        _ => return Err(BiliError::Protocol("高能榜列表无效")),
+    };
     let text = value
         .pointer("/data/onlineNumText")
         .and_then(Value::as_str)
@@ -516,5 +517,17 @@ mod tests {
             state.users.len(),
             state.has_more
         );
+    }
+
+    #[test]
+    fn null_rank_item_list_is_treated_as_empty_page() {
+        let page = parse_rank_page(&json!({
+            "code": 0,
+            "data": { "onlineNum": 0, "onlineNumText": "0", "OnlineRankItem": null }
+        }))
+        .unwrap();
+        assert_eq!(page.count, 0);
+        assert!(page.users.is_empty());
+        assert!(!page.full_page);
     }
 }

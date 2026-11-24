@@ -883,6 +883,14 @@ TA 的声音	Their voice
 名字	Name
 哔哩哔哩登录已失效 · 重新扫码	Bilibili sign-in expired · Scan again
 豆包登录已失效 · 重新扫码	Doubao sign-in expired · Scan again
+豆包请求频率过高已暂停 · 恢复播报	Doubao rate-limited and paused · Resume speech
+豆包请求受限已暂停 · 恢复播报	Doubao requests restricted and paused · Resume speech
+请求已暂停	Paused
+请求受限	Restricted
+豆包请求频率过高已暂停，稍后点击恢复即可继续播报。	Doubao requests are paused due to rate limiting. Resume later to continue reading.
+豆包账号或设备请求受限，可稍后手动恢复或重新扫码登录。	Doubao requests are restricted for this account or device. Resume manually later or scan to sign in again.
+已恢复豆包播报	Doubao speech resumed
+个人表情信息读取失败：{0}；请打开表情面板重试。	Failed to load personal emoticons: {0}. Open the emoticon panel to retry.
 豆包登录已失效	Doubao sign-in expired
 重新扫码登录	Sign in again by scanning
 重新扫码登录豆包后即可继续播报。	Scan to sign in to Doubao again to resume reading.

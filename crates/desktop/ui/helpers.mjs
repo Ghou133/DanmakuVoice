@@ -246,7 +246,7 @@ export function runtimeIssue(snapshot) {
   if (snapshot.status?.error) return errorMessage(typeof snapshot.status.error === 'string' ? snapshot.status.error : snapshot.status.message || t('连接或播放遇到问题，请查看设置。'), 'DV-X00');
   const playback = playbackIssue(snapshot.queue);
   if (playback) return playback;
-  if (snapshot.live?.running && snapshot.received_emotes_error) return ui`个人表情信息读取失败：${snapshot.received_emotes_error}；请打开表情面板重试。`;
+  if (snapshot.live?.running && snapshot.received_emotes_error) return ui`个人表情信息读取失败：${localizeDiagnostic(snapshot.received_emotes_error)}；请打开表情面板重试。`;
   if (snapshot.live?.running && Number(snapshot.live.errors) > 0) return t('本次会话有接收或播报错误，请检查直播间和声音设置。 [DV-V05]');
   if (snapshot.live?.running && snapshot.live.no_voice > 0 && snapshot.setup?.tts_enabled) return t('有弹幕未能播报，请检查默认声音、用户绑定或关键词音效。 [DV-P02]');
   return '';

@@ -1061,11 +1061,11 @@ impl DataStore {
     /// It is DPAPI-protected like other credentials and never exported.
     pub fn save_obs_password(&mut self, password: &str) -> Result<(), StorageError> {
         if password.is_empty() {
-            self.maintain_backups()?;
             self.conn.execute(
                 "DELETE FROM protected_secrets WHERE key='obs_websocket'",
                 [],
             )?;
+            self.maintain_backups()?;
             return Ok(());
         }
         if password.chars().count() > 256 || password.chars().any(char::is_control) {
@@ -1223,29 +1223,43 @@ impl DataStore {
     }
 
     pub fn clear_bili_session(&mut self) -> Result<bool, StorageError> {
-        self.maintain_backups()?;
         let changed = self
             .conn
             .execute("DELETE FROM protected_secrets WHERE key='bilibili'", [])?;
+        self.maintain_backups()?;
         Ok(changed > 0)
     }
 
     /// Generate the web identity only once per data directory. Its protected
     /// value is separate from credentials and excluded from normal export.
+    /// If Windows DPAPI can no longer decrypt the locally generated ID (for
+    /// example after a Windows password reset), regenerate it instead of
+    /// permanently locking out Doubao login and playback.
     pub fn load_or_create_dobao_device(&mut self) -> Result<DoubaoDevice, StorageError> {
-        if let Some(device) = self.load_dobao_device()? {
-            return Ok(device);
-        }
+        let replace = match self.load_dobao_device() {
+            Ok(Some(device)) => return Ok(device),
+            Ok(None) => false,
+            Err(StorageError::Secret(SecretError::Unprotect(_))) => true,
+            Err(error) => return Err(error),
+        };
         let generated = DoubaoDevice::generate();
         generated
             .validate()
             .map_err(|_| StorageError::InvalidDoubaoDevice)?;
         let plaintext = Zeroizing::new(serde_json::to_vec(&generated)?);
         let protected = secrets::protect(&plaintext)?;
-        self.conn.execute(
-            "INSERT OR IGNORE INTO protected_secrets(key,protected_value) VALUES('dobao_device',?1)",
-            params![protected],
-        )?;
+        if replace {
+            self.conn.execute(
+                "INSERT INTO protected_secrets(key,protected_value) VALUES('dobao_device',?1)
+                 ON CONFLICT(key) DO UPDATE SET protected_value=excluded.protected_value",
+                params![protected],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO protected_secrets(key,protected_value) VALUES('dobao_device',?1)",
+                params![protected],
+            )?;
+        }
         self.load_dobao_device()?
             .ok_or(StorageError::InvalidDoubaoDevice)
     }
@@ -1275,15 +1289,26 @@ impl DataStore {
     /// directory. It is stored apart from the Bilibili session so logout and
     /// re-login keep the same device, and is excluded from normal export.
     pub fn load_or_create_livehime_device(&mut self) -> Result<LivehimeDevice, StorageError> {
-        if let Some(device) = self.load_livehime_device()? {
-            return Ok(device);
-        }
+        let replace = match self.load_livehime_device() {
+            Ok(Some(device)) => return Ok(device),
+            Ok(None) => false,
+            Err(StorageError::Secret(SecretError::Unprotect(_))) => true,
+            Err(error) => return Err(error),
+        };
         let generated = LivehimeDevice::generate();
         let protected = secrets::protect(generated.as_str().as_bytes())?;
-        self.conn.execute(
-            "INSERT OR IGNORE INTO protected_secrets(key,protected_value) VALUES('livehime_device',?1)",
-            params![protected],
-        )?;
+        if replace {
+            self.conn.execute(
+                "INSERT INTO protected_secrets(key,protected_value) VALUES('livehime_device',?1)
+                 ON CONFLICT(key) DO UPDATE SET protected_value=excluded.protected_value",
+                params![protected],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO protected_secrets(key,protected_value) VALUES('livehime_device',?1)",
+                params![protected],
+            )?;
+        }
         self.load_livehime_device()?
             .ok_or(StorageError::InvalidLivehimeDevice)
     }
@@ -1393,7 +1418,6 @@ impl DataStore {
     }
 
     pub fn delete_connection(&mut self, id: &str) -> Result<(), StorageError> {
-        self.maintain_backups()?;
         let references: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM presets WHERE connection_id=?1",
             params![id],
@@ -1412,6 +1436,7 @@ impl DataStore {
             params![fish_settings_key(id)],
         )?;
         tx.commit()?;
+        self.maintain_backups()?;
         Ok(())
     }
 
@@ -1626,7 +1651,6 @@ impl DataStore {
     }
 
     pub fn clear_connection_credential(&mut self, id: &str) -> Result<bool, StorageError> {
-        self.maintain_backups()?;
         let existing: Option<bool> = self
             .conn
             .query_row(
@@ -1644,6 +1668,7 @@ impl DataStore {
                 params![id],
             )?;
         }
+        self.maintain_backups()?;
         Ok(had_credential)
     }
 
@@ -2655,6 +2680,20 @@ mod tests {
             reopened.load_or_create_livehime_device(),
             Err(StorageError::InvalidLivehimeDevice)
         ));
+        // Undecryptable DPAPI blobs regenerate the local device ID instead of
+        // locking out Broadcast Console permanently after a password reset.
+        reopened
+            .conn
+            .execute(
+                "UPDATE protected_secrets SET protected_value=?1 WHERE key='livehime_device'",
+                params![b"not-a-valid-dpapi-blob".as_slice()],
+            )
+            .unwrap();
+        let regenerated = reopened.load_or_create_livehime_device().unwrap();
+        assert_eq!(
+            reopened.load_or_create_livehime_device().unwrap(),
+            regenerated
+        );
     }
 
     #[test]

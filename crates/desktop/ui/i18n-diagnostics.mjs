@@ -16,6 +16,19 @@ OBS 或叠加层设置已变更，请重新检测	OBS or overlay settings change
 弹幕发送正在处理请求，请稍候	Chat is processing a request. Please wait.
 账号或开播台设置已变更，弹幕请求已取消；请核对发送结果	The account or broadcast settings changed. Chat request cancelled; verify the send result.
 账号或开播台设置已变更；请核对发送结果	The account or broadcast settings changed. Verify the send result.
+账号或网络设置已变更，弹幕请求已取消；请核对发送结果	The account or network settings changed. Chat request cancelled; verify the send result.
+账号或网络设置已变更；请核对发送结果	The account or network settings changed. Verify the send result.
+请先断开直播间再更改房间	Disconnect from the live room before changing the room number.
+系统默认输出设备不可用，等待设备恢复	The system default output device is unavailable; waiting for it to recover.
+输出设备已断开，请在设置中重新应用设备	Output device disconnected. Reapply the output device in settings.
+Windows 已禁用开机启动，请在系统设置的「应用 → 启动」中允许	Windows disabled startup launch. Allow it under Settings › Apps › Startup.
+无法连接 GitHub，请检查网络后重试	Unable to reach GitHub. Check your network and try again.
+GitHub 暂时限制了检查频率，请稍后重试或打开发布页面	GitHub temporarily rate-limited update checks. Try again later or open the releases page.
+GitHub 检查失败（HTTP {0}），请稍后重试	GitHub update check failed (HTTP {0}). Try again later.
+本地服务启动失败	Failed to start the local service.
+端口被其他服务占用，请检查本地服务	The port is used by another service. Check the local service settings.
+服务加载超过 30 分钟，请检查安装目录	The service took over 30 minutes to load. Check the installation folder.
+已保存的 B 站登录无法读取（{0}），请重新扫码登录	The saved Bilibili sign-in could not be read ({0}). Scan to sign in again.
 发送前核对超时，弹幕未发送	Pre-send checks timed out. The message was not sent.
 弹幕发送区读取超时，请重试	Reading chat settings timed out. Try again.
 弹幕被平台拦截，未确认发送成功	The platform filtered this message. Sending was not confirmed.
@@ -293,6 +306,9 @@ TLS 安全连接失败，请检查系统证书、系统时间、网络或代理�
 WebSocket 地址无效	Invalid WebSocket URL
 朗读文本须为 1 到 10000 个字符	Speech text must contain 1–10000 characters
 豆包请求已暂停，请检查登录或稍后手动恢复	Doubao requests are paused. Check login or resume manually later
+豆包登录已失效，请重新扫码登录	Doubao sign-in expired. Scan to sign in again
+豆包账号或设备请求受限，请稍后手动恢复或重新登录	Doubao account or device requests are restricted. Resume manually later or sign in again
+豆包请求频率过高已暂停，请稍后手动恢复	Doubao requests are paused due to rate limiting. Resume manually later
 连接在完成事件之前关闭	Connection closed before completion
 无法识别的事件	Unrecognized event
 事件格式无效	Invalid event format

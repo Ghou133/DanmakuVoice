@@ -4364,3 +4364,36 @@ fn lake_existing_account_migrates_retired_console_switch_without_broadcast_actio
             .broadcast_console
     );
 }
+
+#[test]
+fn unreadable_saved_bili_session_surfaces_startup_status_error() {
+    let directory = tempfile::tempdir().unwrap();
+    {
+        let _store = DataStore::open(directory.path()).unwrap();
+        let sql =
+            rusqlite::Connection::open(directory.path().join("danmakuvoice.sqlite3")).unwrap();
+        sql.execute(
+            "INSERT INTO protected_secrets(key,protected_value) VALUES('bilibili',?1)",
+            rusqlite::params![b"not-valid-dpapi".as_slice()],
+        )
+        .unwrap();
+    }
+    let app = Application::new(directory.path().to_owned(), true).unwrap();
+    let snapshot = app.snapshot().unwrap();
+    assert!(snapshot["account"]["user_id"].is_null());
+    assert_eq!(snapshot["status"]["error"], true);
+    let message = snapshot["status"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("无法读取") && message.contains("DV-K04"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn doubao_resume_command_succeeds_and_snapshot_exposes_pause_reason() {
+    let (_directory, app) = isolated(true);
+    let snapshot = app.snapshot().unwrap();
+    assert!(snapshot["doubao_pause_reason"].is_null());
+    let next = app.dispatch("doubao.resume", json!({})).await.unwrap();
+    assert!(next["doubao_pause_reason"].is_null());
+}

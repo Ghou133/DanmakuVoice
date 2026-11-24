@@ -682,10 +682,6 @@ struct ParsedList {
 fn parse_admin_list(value: &Value, target: u64, page: u64) -> Result<ParsedList, BiliError> {
     api_ok(value)?;
     let data = &value["data"];
-    let rows = data["data"]
-        .as_array()
-        .filter(|rows| rows.len() <= 1000)
-        .ok_or(BiliError::Protocol("房管列表无效"))?;
     let pages = match data.pointer("/page/total_page") {
         Some(Value::Number(n)) => n
             .as_u64()
@@ -693,6 +689,12 @@ fn parse_admin_list(value: &Value, target: u64, page: u64) -> Result<ParsedList,
         // The platform omits pagination for a single-page list.
         None | Some(Value::Null) if page == 1 => 1,
         _ => return Err(BiliError::Protocol("房管列表分页信息无效")),
+    };
+    let empty = Vec::new();
+    let rows = match &data["data"] {
+        Value::Null if page == 1 && pages <= 1 => &empty,
+        Value::Array(rows) if rows.len() <= 1000 => rows,
+        _ => return Err(BiliError::Protocol("房管列表无效")),
     };
     let mut found = false;
     for row in rows {
@@ -1266,5 +1268,13 @@ mod tests {
                 .unwrap()
                 .more
         );
+        let empty_null = parse_admin_list(
+            &json!({"code":0,"data":{"data":null,"page":{"total_page":0}}}),
+            77,
+            1,
+        )
+        .unwrap();
+        assert!(!empty_null.found);
+        assert!(!empty_null.more);
     }
 }

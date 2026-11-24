@@ -323,6 +323,20 @@ pub(crate) async fn confirmed_loopback_offline(
     let Some(port) = endpoint.port_or_known_default() else {
         return Ok(false);
     };
+    // On Windows a `0.0.0.0:port` listener allows binding `127.0.0.1:port`
+    // without SO_EXCLUSIVEADDRUSE. A quick TCP connect sees wildcard listeners
+    // before falling back to a bind check.
+    let connected = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(TtsError::Cancelled),
+        result = tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        ) => result,
+    };
+    if matches!(connected, Ok(Ok(_))) {
+        return Ok(false);
+    }
     let bind = tokio::select! {
         biased;
         _ = cancellation.cancelled() => return Err(TtsError::Cancelled),

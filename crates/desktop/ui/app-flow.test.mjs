@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { createAutosaveQueue } from './autosave.mjs';
 import { t, ui, getLanguage, setLanguage } from './i18n.mjs';
 import { localizeDiagnostic } from './i18n-diagnostics.mjs';
-import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, snapshotPollingPolicy, createSnapshotSequencer, truncateUtf16, uiIsActive, validUid } from './helpers.mjs';
+import { errorMessage, deviceValue, mergeSnapshot, escapeHtml, eventText, headerIdentity, identityColor, initial, messageParts, numericId, playbackIssue, playbackFallbackNotice, qrNeedsRoomFallback, safeMediaUrl, snapshotPollingPolicy, createSnapshotSequencer, startingStep, truncateUtf16, uiIsActive, validUid } from './helpers.mjs';
 
 // overrides replace harness stubs before app.js runs (for example the real autosave queue).
 function appContext(overrides = {}) {
@@ -39,6 +39,7 @@ function appContext(overrides = {}) {
     safeMediaUrl,
     snapshotPollingPolicy,
     createSnapshotSequencer,
+    startingStep,
     truncateUtf16,
     uiIsActive,
     validUid,
@@ -2473,4 +2474,56 @@ test('lake enumerated Chinese punctuation is full width while ASCII punctuation 
     assert.deepEqual([...html.matchAll(/--letter-delay:(\d+)ms/gu)].map(match => Number(match[1])), [0, 160, 320, 480, 640]);
   }
   setLanguage('zh-CN');
+});
+
+test('doubao rate_limited pause shows resume warning and dispatches doubao.resume', async () => {
+  const context = appContext();
+  const calls = [];
+  context.mockCommand = async (action, payload) => {
+    calls.push([action, payload]);
+    vm.runInContext(`snapshot.doubao_pause_reason = null`, context);
+    return vm.runInContext('snapshot', context);
+  };
+  vm.runInContext(`
+    snapshot.connections = [{ id: 'db', name: '豆包', settings: { provider: 'doubao' }, has_credential: true }];
+    snapshot.doubao_login_expired = false;
+    snapshot.doubao_pause_reason = 'rate_limited';
+    command = mockCommand;
+    renderSettings = () => {};
+    showToast = () => {};
+  `, context);
+  const home = vm.runInContext('renderLakeSettingsHome()', context);
+  assert.match(home, /data-action="doubao\.resume">豆包请求频率过高已暂停 · 恢复播报/);
+  const status = vm.runInContext("providerStatus('doubao', snapshot.connections[0])", context);
+  assert.equal(status.tone, 'error');
+  assert.equal(status.label, '请求已暂停');
+  await vm.runInContext("handleAction('doubao.resume', '', null)", context);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [['doubao.resume', {}]]);
+});
+
+test('acceptSnapshot keeps signed-out online users on login even when onboarding_done is true', () => {
+  const context = appContext();
+  vm.runInContext(`
+    step = 'login';
+    renderApp = () => {};
+    updateQr = () => {};
+    snapshot.onboarding_done = true;
+    snapshot.network_disabled = false;
+    snapshot.account = { user_id: null };
+    snapshot.setup = { mode: 'account', room_id: 123, tts_enabled: true };
+  `, context);
+  vm.runInContext('acceptSnapshot({ ...snapshot, config_revision: 1 })', context);
+  assert.equal(vm.runInContext('step', context), 'login');
+});
+
+test('room settings expose a reachable connect button when logged in and disconnected', () => {
+  const context = appContext();
+  vm.runInContext(`
+    snapshot.account = { user_id: 42, name: '主播' };
+    snapshot.setup = { mode: 'account', room_id: 12345, tts_enabled: true };
+    snapshot.live = { running: false, connecting: false, state: 'stopped' };
+    editor = null;
+  `, context);
+  const html = vm.runInContext('renderRoomSettings()', context);
+  assert.match(html, /data-action="live\.toggle"[^>]*>连接直播间/);
 });

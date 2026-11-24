@@ -1108,7 +1108,9 @@ function addTicket(item) {
   const strack = h("span", "strack"); strack.append(h("i"));
   stub.append(sav, h("span", "sprice", `¥${price}`), h("span", "scut"), h("span", "stext", String(item.message || "")), h("span", "sleft"), strack);
   el.append(paper, medal, stub);
-  const rec = { seq: item.seq, item, el, job: item.job_id ?? null, start: now(), total: scDuration(price), open: true,
+  const elapsed = item.at ? Math.max(0, Date.now() - item.at) : 0;
+  const start = now() - elapsed;
+  const rec = { seq: item.seq, item, el, job: item.job_id ?? null, start, total: scDuration(price), open: true,
     demoUntil: item.demo_read_ms ? now() + 900 + item.demo_read_ms : 0, demoStart: item.demo_read_ms ? now() + 900 : 0 };
   setTicketLit(rec, rec.job != null || rec.demoUntil ? 0 : 1);
   state.tickets.set(rec.seq, rec);
@@ -1272,6 +1274,10 @@ function frame() {
     else if (rec.demoUntil) {
       if (t >= rec.demoStart && t < rec.demoUntil) { rec.el.classList.add("reading"); setTicketLit(rec, (t - rec.demoStart) / (rec.demoUntil - rec.demoStart)); }
       else if (t >= rec.demoUntil) { rec.demoUntil = 0; rec.readDone = t; rec.el.classList.remove("reading"); setTicketLit(rec, 1); }
+    } else if (rec.job != null && !rec.readDone && t - rec.start > QUEUE_STALE_MS) {
+      // If TTS failed, was skipped, or is disabled, light and fold the ticket
+      // instead of leaving it dimmed and expanded for its full lifetime.
+      rec.readDone = t; rec.el.classList.remove("reading"); setTicketLit(rec, 1);
     }
     const openFor = rec.readDone ? t - rec.readDone : (rec.job == null && !rec.demoUntil ? t - rec.start - 9000 : -1);
     if (rec.open && openFor > 3000) fold(rec);
@@ -1365,6 +1371,10 @@ function connect() {
     setReading(data.reading);
     for (const item of data.items || []) {
       if (retainsRows() && item.kind !== "super_chat") restoreItem(item);
+      else if (item.kind === "super_chat") {
+        const limit = scDuration(Math.max(0, Math.round(Number(item.price) || 0)));
+        if (Date.now() - (item.at || 0) < limit) receive(item);
+      }
       else if (Date.now() - (item.at || 0) < lingerMs()) receive(item);
     }
     const active = readingRecord();

@@ -350,6 +350,13 @@ impl DotsClient {
         .await;
         match response {
             Ok(Err(TtsError::Cancelled)) => Err(TtsError::Cancelled),
+            Ok(Err(error @ TtsError::Network { .. })) => Err(error),
+            Ok(Err(error @ TtsError::HttpStatus { status: 503, .. })) => Err(error),
+            Err(_) => Err(TtsError::Network {
+                service: SERVICE,
+                stage: "连接",
+                reason: "连接或接收超时",
+            }),
             Ok(Ok(value))
                 if value.get("protocol").and_then(Value::as_str)
                     == Some("danmakuvoice-dots-paths-v1")
@@ -362,7 +369,10 @@ impl DotsClient {
             {
                 Ok(())
             }
-            _ => Err(configuration(UNSUPPORTED)),
+            Ok(Ok(_))
+            | Ok(Err(TtsError::HttpStatus { .. }))
+            | Ok(Err(TtsError::Protocol { .. })) => Err(configuration(UNSUPPORTED)),
+            Ok(Err(error)) => Err(error),
         }
     }
 

@@ -405,12 +405,11 @@ impl QrLoginClient {
     ) -> Result<(), BiliError> {
         let mut url = checked_ticket_url(raw_url)?;
         for _ in 0..5 {
-            let response = self
-                .http
-                .get(url.clone())
-                .send()
-                .await
-                .map_err(|_| BiliError::Network)?;
+            let mut request = self.http.get(url.clone());
+            if let Some(cookie) = cookies.cookie_header() {
+                request = request.header(COOKIE, cookie);
+            }
+            let response = request.send().await.map_err(|_| BiliError::Network)?;
             cookies.collect_headers(response.headers());
             if cookies.complete() {
                 return Ok(());
@@ -620,7 +619,11 @@ impl SessionCookies {
         match name {
             "SESSDATA" if valid_cookie_value(value) => self.sessdata = Some(value.to_owned()),
             "bili_jct" if valid_cookie_value(value) => self.bili_jct = Some(value.to_owned()),
-            "DedeUserID" => self.user_id = value.parse::<u64>().ok().filter(|id| *id > 0),
+            "DedeUserID" => {
+                if let Some(id) = value.parse::<u64>().ok().filter(|id| *id > 0) {
+                    self.user_id = Some(id);
+                }
+            }
             "buvid3" if valid_cookie_value(value) => self.buvid3 = Some(value.to_owned()),
             _ => {}
         }
@@ -628,6 +631,23 @@ impl SessionCookies {
 
     fn complete(&self) -> bool {
         self.sessdata.is_some() && self.bili_jct.is_some() && self.user_id.is_some()
+    }
+
+    fn cookie_header(&self) -> Option<String> {
+        let mut pairs = Vec::new();
+        if let Some(sessdata) = &self.sessdata {
+            pairs.push(format!("SESSDATA={sessdata}"));
+        }
+        if let Some(bili_jct) = &self.bili_jct {
+            pairs.push(format!("bili_jct={bili_jct}"));
+        }
+        if let Some(user_id) = self.user_id {
+            pairs.push(format!("DedeUserID={user_id}"));
+        }
+        if let Some(buvid3) = &self.buvid3 {
+            pairs.push(format!("buvid3={buvid3}"));
+        }
+        (!pairs.is_empty()).then(|| pairs.join("; "))
     }
 
     fn into_session(mut self, refresh_token: Option<String>) -> Result<BiliSession, BiliError> {
@@ -689,7 +709,9 @@ fn parse_qr_poll(value: &Value, headers: &HeaderMap) -> Result<ParsedQrPoll, Bil
                 .get("url")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
-            if let Some(url) = url {
+            if !cookies.complete()
+                && let Some(url) = url
+            {
                 let checked = checked_ticket_url(url)?;
                 cookies.collect_query(&checked);
             }

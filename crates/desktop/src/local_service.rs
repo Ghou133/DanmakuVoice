@@ -187,6 +187,9 @@ impl ServiceState {
         // mistake its stale process handle for a running service.
         let retired = self.switch_endpoint(endpoint.port);
         let launched = if self.process.is_some() {
+            if self.state != "ready" {
+                self.set("starting", "服务正在加载模型");
+            }
             Ok(())
         } else {
             self.spawn(kind, endpoint, app_data_dir)
@@ -283,7 +286,10 @@ impl Endpoint {
             return Err("本地服务地址路径无效".into());
         }
         let port = url.port_or_known_default().ok_or("本地服务端口无效")?;
-        let host = host.to_owned();
+        // Owned local services bind IPv4 `127.0.0.1`; normalize `localhost` so
+        // Windows IPv6 `::1` connect timeouts do not misclassify our own server.
+        let host = "127.0.0.1".to_owned();
+        let _ = url.set_host(Some("127.0.0.1"));
         url.set_path("/");
         Ok(Self {
             base: url,
