@@ -12,7 +12,7 @@
 
 - 对应构建：水月重设计（本地分支 `lake-redesign`，提交 `453985e` 起）。主界面、设置抽屉和初次设置都已换新；旧的待读列表、控制坞、音频输出设备选择和平铺设置页不再存在，文案不再提及。
 - 商店一览的公开内容（名称、介绍、描述、功能、截图及说明、搜索词、版本新增内容、版权）**不出现“豆包”“哔哩哔哩”**，也不写 B站、Bilibili、Doubao（2026-10-18 用户要求）。直播平台写作“受支持的直播平台／直播间”，语音服务写作“支持的云端语音服务”“自行部署的本地语音服务”。GitHub README 不受此限制。
-- 本次准备应用版本 0.3.6，包版本 1.3.6.0；Partner Center 的“版本新增内容”在下述变化正文前加 `0.3.6` 版本行。
+- 本次准备应用版本 0.3.7，包版本 1.3.7.0；Partner Center 的“版本新增内容”在下述变化正文前加 `0.3.7` 版本行。
 
 ## 简体中文（zh-CN）
 
@@ -79,9 +79,9 @@ DanmakuVoice；超绝可爱弹幕姬；弹幕；弹幕姬；语音播报；直�
 
 ### 版本新增内容
 
-- 修复扫码登录状态检查与确认后的登录跳转
-- 登录失效时给出明确提示，并引导重新扫码
-- 改进开播前身份验证流程
+- 改进登录失效后的恢复与提示
+- 修复语音播放和本地服务运行中的稳定性问题
+- 改进窗口、界面及直播叠加层的可靠性
 
 ### 截图说明（与截图依次对应）
 
@@ -168,9 +168,9 @@ danmaku; live chat; text to speech; TTS; streaming; stream tool; DanmakuVoice
 
 ### What's new in this version
 
-- Fix QR sign-in status checks and the redirect after confirmation
-- Show a clear sign-in expiry message and a direct path to scan again
-- Improve the identity-verification flow before going live
+- Improve recovery and guidance when sign-in expires
+- Fix reliability issues in speech playback and local services
+- Improve window, interface, and streaming overlay reliability
 
 ### Screenshot captions
 
@@ -221,10 +221,10 @@ OBS features are optional. Settings > OBS connects to the user's own OBS WebSock
 Only runFullTrust is requested, matching the approved capability set. Windows manages Store app data virtualization. Store and portable builds do not promise a shared physical database or retention after uninstall. Package identity is unchanged. No old database is overwritten and no credentials are automatically imported.
 
 The submission includes FFmpeg (LGPL-2.1-or-later), original third-party license notices, bundled serif fonts with their copyright and SIL OFL 1.1 notices, and a link to the exact complete source archive. The application's own source is AGPL-3.0-only. Source and support: https://github.com/Ghou133/DanmakuVoice
-Corresponding complete source for package 1.3.6.0 (app 0.3.6): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.6.0
+Corresponding complete source for package 1.3.7.0 (app 0.3.7): https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.7.0
 The exact source commit is recorded in the submission package's SUBMISSION-README.txt and in the source release. Publish and verify the matching source archive before submitting the package.
 
-This update fixes QR sign-in status checks, handles the redirect after confirmation, and makes expired sign-in easier to recover from. It also improves the broadcast identity-verification flow. Supported platforms, speech providers and the approved capability set are unchanged. Generic search terms are retained. Certification and publication require a separate Microsoft decision.
+This update improves authentication recovery, speech playback, local service and window lifecycle, and streaming overlay reliability. Supported platforms, speech providers and the approved capability set are unchanged. Generic search terms are retained. Certification and publication require a separate Microsoft decision.
 
 ### runFullTrust 说明（500 字以内）
 

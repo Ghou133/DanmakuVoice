@@ -1615,3 +1615,8 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 - [store-v1.3.6.0 配套完整源码](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.6.0) 已公开，标签指向冻结提交；GitHub 源码资产摘要与本地 SHA-256 一致，匿名 HEAD 返回 HTTP 200。仅发布配套源码和校验文件，没有把未签名 MSIX 作为普通用户安装包公开。
 - Partner Center 产品 `9P4DFD8HGN03` 显示 Submission 6 已在 Microsoft Store 上架。本次创建 Submission 7（`1152921505702315166`），保存中英文 0.3.6 更新说明；沿用原有桌面截图、产品资料、年龄分级和认证通过后自动发布设置。认证说明更新为新版源码提交、公开链接及校验值，没有填写审核凭据。上传本地上述 CI MSIX 后，后台识别 1.3.6.0 x64、Windows Desktop，显示 `Validated`；保存并重新打开 Packages 时仅有该新包，旧 1.3.5.0 已从本次草稿替换。Partner Center 没有显示上传文件 SHA-256，文件来源依据本次选择的已核验本地路径与后台显示的版本/架构。
 - 已点击“提交进行认证”。后台最终显示 **正在认证更新**：Submission 7 提交完成、预处理进行中，认证和发布尚未开始；页面明确“产品在通过认证后立即开始发布”。状态截图为 `target/release-0.3.6-20261104/store-submission-7-in-certification.png`。此时尚未证实微软认证通过、1.3.6.0 上架、签名商店包安装升级、真实账号人脸验证、豆包扫码登录、在线语音或物理出声；离线 CI 和送审不能替代这些验收。
+# 2026-11-25 Store 1.3.7.0 准备
+
+- 按用户要求准备应用 0.3.7 / MSIX 1.3.7.0，更新中英文版本说明与认证源码链接；商店公开更新说明使用通用措辞。修复提交 `a69141d` 的独立 Windows CI（运行 45455935366）正在进行，最终结果和新版本的配套源码、商店提交状态须以实际结果另行记录。
+- 本地 `cargo fmt --all --check` 通过；未将此检查视为完整回归或真实账号、音频、OBS、商店签名安装验收。
+
