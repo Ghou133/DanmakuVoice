@@ -1619,4 +1619,7 @@ fmt、clippy（`--offline --locked --workspace --all-targets -D warnings`）通�
 
 - 按用户要求准备应用 0.3.7 / MSIX 1.3.7.0，更新中英文版本说明与认证源码链接；商店公开更新说明使用通用措辞。修复提交 `a69141d` 的独立 Windows CI（运行 45455935366）正在进行，最终结果和新版本的配套源码、商店提交状态须以实际结果另行记录。
 - 本地 `cargo fmt --all --check` 通过；未将此检查视为完整回归或真实账号、音频、OBS、商店签名安装验收。
+- 冻结构建提交 `413af1dafa232b3c37fc0e8d723cf25da8e0bb36` 的 [Windows CI 45456720302](https://github.com/Ghou133/DanmakuVoice/actions/runs/45456720302) 全部通过，包括 fmt、全目标检查、离线回归、配套源码核验和 MSIX 打包。产物源码 SHA-256 `6545a562889b0006873d8137b3bf0fd5b111ff2ee7d43f7269c3e5d857d3f6e0`，MSIX SHA-256 `6ee199ed5584941d12942102df165fb33abc2aa9b6f9ccdab0ca4b02626a5c60`；[配套源码发布](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.7.0) 的附件摘要与本地清单一致。
+- Partner Center 确认 Submission 7 已上架；新建 Submission 8（`1152921505702496138`），保存中英文 0.3.7 更新说明与审核测试说明。用户手动选择上述 CI MSIX 上传；后台识别 1.3.7.0、x64、Windows Desktop，保存后显示 Validated / Updated。后台未显示文件哈希，上传来源依用户确认。
+- 已提交认证，后台显示 **Update in certification**：Submission 完成，Pre-processing 进行中，Certification 和 Publishing 尚未开始；通过认证后自动发布。尚未证实 1.3.7.0 认证通过或上架，也未完成商店签名安装升级、真实账号、在线语音、实际听音或 OBS 验收。
 

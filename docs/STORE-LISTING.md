@@ -2,6 +2,8 @@
 
 产品：超绝可爱弹幕姬（DanmakuVoice）；Store ID：9P4DFD8HGN03；商店发布者显示名称：CurePrism。
 
+2026-11-25 状态：应用 0.3.7 / MSIX 1.3.7.0 已以 Submission 8（`1152921505702496138`）送审，后台显示 Update in certification、预处理进行中；通过认证后自动发布，尚未确认上架。[独立 Windows CI](https://github.com/Ghou133/DanmakuVoice/actions/runs/45456720302) 已成功，[配套源码](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.7.0) 已公开。详细证据及验收边界见 PROGRESS.md。
+
 2026-11-04 状态：应用 0.3.6 / MSIX 1.3.6.0（构建提交 `6af1c96`）已以 Submission 7（`1152921505702315166`）正式送审，后台显示“正在认证更新”，预处理进行中，认证与发布尚未开始；通过认证后自动发布。中英文 0.3.6 更新说明和认证说明已保存，1.3.6.0 x64 包显示 Validated。[独立 Windows CI](https://github.com/Ghou133/DanmakuVoice/actions/runs/41853279881) 全部成功，[对应完整源码 store-v1.3.6.0](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.6.0) 已公开；尚未确认新版通过认证或上架。精确校验和及验收边界见 PROGRESS.md。
 
 2026-10-20 状态：应用 0.3.4 / MSIX 1.3.4.0（构建提交 `2f908fe9`）已以 Submission 5（`1152921505702175885`）正式送审。后台显示 Update in certification，提交完成、预处理进行中，认证和发布尚未开始；通过认证后自动发布。中英文 0.3.4 更新说明、18 张新截图及审核说明已保存核对。[独立 Windows CI](https://github.com/Ghou133/DanmakuVoice/actions/runs/39353795931) 全部成功，[对应完整源码 store-v1.3.4.0](https://github.com/Ghou133/DanmakuVoice/releases/tag/store-v1.3.4.0) 已公开；尚未确认新版认证通过或上架。构建校验和及验收边界见 PROGRESS.md。
